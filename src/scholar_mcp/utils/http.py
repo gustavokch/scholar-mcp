@@ -34,8 +34,9 @@ class AsyncHttpClient:
         self._limiters_lock = asyncio.Lock()
 
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
+        host = host.lower()
         if host not in self._limiters:
-            if "eutils.ncbi.nlm.nih.gov" in host:
+            if host == "eutils.ncbi.nlm.nih.gov":
                 rate = self.settings.ncbi_rate_limit
             else:
                 rate = 10.0
@@ -44,7 +45,8 @@ class AsyncHttpClient:
 
     def _inject_credentials(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
-        if "eutils.ncbi.nlm.nih.gov" in parsed.netloc:
+        hostname = (parsed.hostname or "").lower()
+        if hostname == "eutils.ncbi.nlm.nih.gov":
             query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if self.settings.pubmed_api_key and "api_key" not in query_dict:
                 query_dict["api_key"] = [self.settings.pubmed_api_key]
