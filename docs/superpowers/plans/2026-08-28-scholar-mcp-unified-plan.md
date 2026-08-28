@@ -75,7 +75,7 @@ amended to match before or alongside Task 1.
 - Produces: `Settings` (from `scholar_mcp.config`), `PaperMetadata`, `FullTextResponse`,
   `FullTextSummary`, `DownloadResult`, `IdentifierMap`, `FetchAttempt` (from `scholar_mcp.models`).
 
-- [ ] **Step 1: Write the failing test for models and config**
+- [x] **Step 1: Write the failing test for models and config**
 
 ```python
 # tests/test_config_models.py
@@ -184,12 +184,12 @@ def test_fetch_attempt_records_skip_reason():
     assert a.to_dict()["reason"] == "UNPAYWALL_EMAIL not configured"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_config_models.py`
 Expected: FAIL (ModuleNotFoundError: No module named 'scholar_mcp')
 
-- [ ] **Step 3: Update `pyproject.toml` and implement config and models**
+- [x] **Step 3: Update `pyproject.toml` and implement config and models**
 
 `pyproject.toml` changes for the hard rename (D4):
 - `name = "scholar-mcp"`
@@ -377,12 +377,12 @@ class DownloadResult:
         return asdict(self)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_config_models.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pyproject.toml src/scholar_mcp/ tests/test_config_models.py
