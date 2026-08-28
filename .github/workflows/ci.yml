@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint (Python ${{ matrix.python-version }})
+  lint-and-test:
+    name: Lint & Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -28,8 +28,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: pip install -e .
+      - name: Install package and test dependencies
+        run: pip install -e ".[dev]"
 
-      - name: Check import
-        run: python -c "from scihub_mcp.server import main; print('Import OK')"
+      - name: Check server import
+        run: python -c "from scholar_mcp.server import main; print('Import OK')"
+
+      - name: Run test suite
+        run: pytest -v

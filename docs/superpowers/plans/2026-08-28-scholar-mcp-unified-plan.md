@@ -1820,7 +1820,7 @@ git commit -m "feat: implement FastMCP server with six tools and prompt registra
   `[project.urls]` entry in `pyproject.toml` is updated to the new path. GitHub redirects the old
   URL, so existing clones and inbound links keep working.
 
-- [ ] **Step 1: Update `README.md`**
+- [x] **Step 1: Update `README.md`**
 
 Cover: the waterfall order and what each tier requires; the full env var table including the new
 `SCHOLAR_DOWNLOAD_DIR`, `SCHOLAR_MAX_CHARS`, `SCHOLAR_TOTAL_BUDGET`, `SCHOLAR_MAX_CONCURRENCY`,
@@ -1831,7 +1831,7 @@ Add a credit for JackKuo666 (MIT, Copyright (c) 2025) beside the existing CyberK
 covering the PubMed search logic ported from `PubMed-MCP-Server/`. Retain the MIT copyright notice
 in any module that reuses a substantial portion of that code.
 
-- [ ] **Step 2: Update `AGENTS.md`**
+- [x] **Step 2: Update `AGENTS.md`**
 
 The current file documents the old two-module layout and states two design decisions that this
 plan reverses. Rewrite: the new package tree; **async-first on `httpx`** replacing the
@@ -1839,7 +1839,7 @@ plan reverses. Rewrite: the new package tree; **async-first on `httpx`** replaci
 the caching policy (IDs and metadata cached, bodies never); and remove the "No test suite yet"
 limitation now that one exists.
 
-- [ ] **Step 3: Add a test step to `.github/workflows/ci.yml`**
+- [x] **Step 3: Add a test step to `.github/workflows/ci.yml`**
 
 The job currently installs the package and runs an import check only. Change the install to
 `pip install -e ".[dev]"`, update the import check to `scholar_mcp.server`, and add:
@@ -1849,14 +1849,14 @@ The job currently installs the package and runs an import check only. Change the
         run: pytest -v
 ```
 
-- [ ] **Step 4: Delete the legacy package and vendored reference**
+- [x] **Step 4: Delete the legacy package and vendored reference**
 
 ```bash
 git rm -r src/scihub_mcp
 git rm -r --cached PubMed-MCP-Server   # if it was ever tracked; otherwise delete locally
 ```
 
-- [ ] **Step 5: Run the full suite and verify the server starts**
+- [x] **Step 5: Run the full suite and verify the server starts**
 
 ```bash
 pytest -v
@@ -1864,14 +1864,14 @@ python -c "from scholar_mcp.server import main; print('Import OK')"
 ```
 Expected: all tests PASS, import OK.
 
-- [ ] **Step 6: Manual smoke test against live services (not part of CI)**
+- [x] **Step 6: Manual smoke test against live services (not part of CI)**
 
 With `PUBMED_EMAIL` and `UNPAYWALL_EMAIL` set, confirm by hand:
 - a known OA PMC article returns `source="pmc"` with real Markdown
 - a closed-access DOI reaches the Sci-Hub or abstract tier and reports a coherent `attempts` trace
 - `download_paper` writes inside `SCHOLAR_DOWNLOAD_DIR` and refuses `../` escape
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A
