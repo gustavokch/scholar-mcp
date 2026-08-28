@@ -65,8 +65,12 @@ class ArxivProvider(BaseProvider):
             if entry is None:
                 return None
 
+            entry_id = _text(entry, "id")
+            if "arxiv.org/api/errors" in entry_id:
+                return None
+
             title = " ".join(_text(entry, "title").split())
-            if not title:
+            if not title or title.lower() == "error":
                 return None
 
             authors = [

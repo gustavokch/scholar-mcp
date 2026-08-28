@@ -59,6 +59,26 @@ async def test_arxiv_fetch_metadata_empty_feed(client):
 
 
 @respx.mock
+async def test_arxiv_fetch_metadata_error_feed(client):
+    """arXiv error feeds contain an entry with an errors ID and title 'Error'."""
+    error_feed = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/api/errors#incorrect_id_format_for_9999.99999</id>
+    <title>Error</title>
+    <summary>incorrect id format for 9999.99999</summary>
+    <published>2023-01-01T00:00:00Z</published>
+  </entry>
+</feed>
+"""
+    respx.get(url__startswith=ARXIV_API).mock(
+        return_value=httpx.Response(200, text=error_feed)
+    )
+    provider = ArxivProvider(client)
+    assert await provider.fetch_metadata("9999.99999") is None
+
+
+@respx.mock
 async def test_arxiv_fetch_full_text_no_id(client):
     provider = ArxivProvider(client)
     assert await provider.fetch_full_text(IdentifierMap(doi="10.1038/x")) is None
