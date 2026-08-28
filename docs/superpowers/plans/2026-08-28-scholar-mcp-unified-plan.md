@@ -412,7 +412,7 @@ git commit -m "feat: scaffold scholar-mcp configuration and core models"
 cached. **Full-text bodies and PDF bytes are never cached** — 500 cached articles would be
 hundreds of megabytes resident.
 
-- [ ] **Step 1: Write the failing test for HTTP, rate limiting, and cache**
+- [x] **Step 1: Write the failing test for HTTP, rate limiting, and cache**
 
 ```python
 # tests/test_http_cache.py
@@ -509,12 +509,12 @@ async def test_ncbi_requests_are_rate_limited(monkeypatch):
     await client.aclose()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_http_cache.py`
 Expected: FAIL (ModuleNotFoundError)
 
-- [ ] **Step 3: Implement `cache.py`, `rate_limit.py`, and `http.py`**
+- [x] **Step 3: Implement `cache.py`, `rate_limit.py`, and `http.py`**
 
 `cache.py` — `TTLCache` over `collections.OrderedDict`, storing `(value, expires_at)` with
 `time.monotonic()`. `get` evicts on expiry and moves live entries to the end; `set` evicts the
@@ -536,12 +536,12 @@ follow_redirects=True)`:
   expected, so Sci-Hub mirror rotation treats them as misses.
 - `aclose()` closes the underlying client; `server.py` calls it on shutdown.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_http_cache.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/utils/ tests/test_http_cache.py
