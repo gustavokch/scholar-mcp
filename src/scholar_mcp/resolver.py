@@ -6,13 +6,17 @@ from typing import Any
 from scholar_mcp.config import Settings
 from scholar_mcp.identifiers import resolve_identifiers
 from scholar_mcp.models import (
+    CitationItem,
     DownloadResult,
     FetchAttempt,
     FullTextResponse,
     FullTextSummary,
     IdentifierMap,
     PaperMetadata,
+    ReferenceItem,
+    RelatedPaper,
 )
+
 from scholar_mcp.parsers.jats import list_sections, select_sections
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
@@ -397,3 +401,48 @@ class WaterfallResolver:
         # Annotate OA status in one batched call
         await annotate_oa_status(papers[:limit], self.http_client)
         return papers[:limit]
+
+    async def get_references(
+        self,
+        identifier: str,
+        limit: int = 50,
+    ) -> list[ReferenceItem]:
+        ids = await self.resolve_ids(identifier)
+        # Try Europe PMC references
+        refs = await self.europe_pmc.fetch_references(ids, limit=limit)
+        if refs:
+            return refs
+
+        # Fallback to CrossRef if DOI available
+        if ids.doi:
+            refs = await self.crossref.fetch_references(ids.doi, limit=limit)
+            if refs:
+                return refs
+
+        return []
+
+    async def get_citations(
+        self,
+        identifier: str,
+        limit: int = 50,
+    ) -> list[CitationItem]:
+        ids = await self.resolve_ids(identifier)
+        return await self.europe_pmc.fetch_citations(ids, limit=limit)
+
+    async def get_related_papers(
+        self,
+        identifier: str,
+        limit: int = 10,
+    ) -> list[RelatedPaper]:
+        ids = await self.resolve_ids(identifier)
+        pmid = ids.pmid
+        if not pmid and ids.doi:
+            meta = await self.pubmed.fetch_abstract(ids)
+            if meta and meta.pmid:
+                pmid = meta.pmid
+
+        if not pmid:
+            return []
+
+        return await self.pubmed.fetch_related_papers(pmid, limit=limit)
+

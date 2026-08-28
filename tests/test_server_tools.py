@@ -98,6 +98,46 @@ def test_all_tools_registered():
         "get_metadata",
         "download_paper",
         "deep_paper_analysis_prompt",
+        "get_references",
+        "get_citations",
+        "get_related_papers",
     }
     for name in expected:
         assert callable(getattr(srv, name)), f"{name} is not exposed by scholar_mcp.server"
+
+
+async def test_get_references_tool(resolver):
+    from scholar_mcp.models import ReferenceItem
+
+    resolver.get_references.return_value = [
+        ReferenceItem(id="1", title="Ref Paper", doi="10.1/ref")
+    ]
+    res = await srv.get_references("32000000", limit=10)
+    assert len(res) == 1
+    assert res[0]["title"] == "Ref Paper"
+    assert res[0]["doi"] == "10.1/ref"
+
+
+async def test_get_citations_tool(resolver):
+    from scholar_mcp.models import CitationItem
+
+    resolver.get_citations.return_value = [
+        CitationItem(title="Citing Paper", doi="10.1/cite", citation_count=5)
+    ]
+    res = await srv.get_citations("32000000", limit=10)
+    assert len(res) == 1
+    assert res[0]["title"] == "Citing Paper"
+    assert res[0]["citation_count"] == 5
+
+
+async def test_get_related_papers_tool(resolver):
+    from scholar_mcp.models import RelatedPaper
+
+    resolver.get_related_papers.return_value = [
+        RelatedPaper(title="Related Paper", score=90.0, pmid="33000000")
+    ]
+    res = await srv.get_related_papers("32000000", limit=5)
+    assert len(res) == 1
+    assert res[0]["title"] == "Related Paper"
+    assert res[0]["score"] == 90.0
+
