@@ -976,7 +976,7 @@ git commit -m "feat: implement identifier resolution with title match thresholdi
 
 ---
 
-### Task 6: Legal Open Access Providers (PMC, Europe PMC, Unpaywall)
+### Task 6: Legal Open Access Providers (Europe PMC, PMC, Unpaywall)
 
 **Files:**
 - Create: `src/scholar_mcp/providers/__init__.py`
@@ -1447,7 +1447,7 @@ from scholar_mcp.resolver import WaterfallResolver
 def make_resolver(settings: Settings) -> WaterfallResolver:
     r = WaterfallResolver(settings=settings, http_client=AsyncMock(), cache=None)
     r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz", pmcid="PMC1"))
-    for name in ("pmc", "europe_pmc", "unpaywall", "scihub"):
+    for name in ("europe_pmc", "pmc", "unpaywall", "scihub"):
         getattr(r, name).fetch_full_text = AsyncMock(return_value=None)
     r.fetch_abstract = AsyncMock(return_value=None)
     return r
@@ -1457,21 +1457,21 @@ def hit(source: str, content: str = "body text") -> FullTextResponse:
     return FullTextResponse(status="full_text", source=source, content=content)
 
 
-async def test_pmc_hit_short_circuits():
-    r = make_resolver(Settings())
-    r.pmc.fetch_full_text.return_value = hit("pmc")
-    res = await r.resolve_full_text("10.1038/xyz")
-    assert res.source == "pmc"
-    r.europe_pmc.fetch_full_text.assert_not_awaited()
-    r.unpaywall.fetch_full_text.assert_not_awaited()
-
-
-async def test_falls_through_to_europe_pmc():
+async def test_europe_pmc_hit_short_circuits():
     r = make_resolver(Settings())
     r.europe_pmc.fetch_full_text.return_value = hit("europepmc")
     res = await r.resolve_full_text("10.1038/xyz")
     assert res.source == "europepmc"
-    assert [a.tier for a in res.attempts] == ["pmc", "europepmc"]
+    r.pmc.fetch_full_text.assert_not_awaited()
+    r.unpaywall.fetch_full_text.assert_not_awaited()
+
+
+async def test_falls_through_to_pmc():
+    r = make_resolver(Settings())
+    r.pmc.fetch_full_text.return_value = hit("pmc")
+    res = await r.resolve_full_text("10.1038/xyz")
+    assert res.source == "pmc"
+    assert [a.tier for a in res.attempts] == ["europepmc", "pmc"]
     assert res.attempts[0].outcome == "miss"
 
 
@@ -1816,6 +1816,9 @@ git commit -m "feat: implement FastMCP server with six tools and prompt registra
   the renamed env var `FORCE_SCIHUB` -> `PREFER_SCIHUB_OVER_UNPAYWALL`.
 - Version resets to `1.0.0` in `pyproject.toml` and `src/scholar_mcp/__init__.py` (a new project
   starting at `0.4.0` would be confusing).
+- The GitHub repository is renamed `w8s/scihub-mcp` -> `w8s/scholar-mcp`, and every
+  `[project.urls]` entry in `pyproject.toml` is updated to the new path. GitHub redirects the old
+  URL, so existing clones and inbound links keep working.
 
 - [ ] **Step 1: Update `README.md`**
 
@@ -1823,6 +1826,10 @@ Cover: the waterfall order and what each tier requires; the full env var table i
 `SCHOLAR_DOWNLOAD_DIR`, `SCHOLAR_MAX_CHARS`, `SCHOLAR_TOTAL_BUDGET`, `SCHOLAR_MAX_CONCURRENCY`,
 `SCHOLAR_CACHE_TTL`, `SCHOLAR_TITLE_MATCH_THRESHOLD`; all six tools with example calls; and the
 migration note from `scihub-mcp`.
+
+Add a credit for JackKuo666 (MIT, Copyright (c) 2025) beside the existing CyberKrypton credit,
+covering the PubMed search logic ported from `PubMed-MCP-Server/`. Retain the MIT copyright notice
+in any module that reuses a substantial portion of that code.
 
 - [ ] **Step 2: Update `AGENTS.md`**
 
@@ -1876,17 +1883,21 @@ renamed, FORCE_SCIHUB renamed to PREFER_SCIHUB_OVER_UNPAYWALL."
 
 ---
 
-## Open Items (decide before or during implementation)
+## Resolved Items (decided 2026-08-28)
 
-1. **GitHub repository rename.** D4 renames the Python package and PyPI project. The repo is still
-   `w8s/scihub-mcp` and `[project.urls]` points there. Rename the repo too, or accept the
-   mismatch? GitHub redirects old repo URLs, so either is workable.
-2. **Sci-Hub default.** `ENABLE_SCIHUB` defaults to `true`, inherited from the current project.
-   Under a neutral `scholar-mcp` name that default is a more visible stance than it was under
-   `scihub-mcp`. Flipping the default to `false` is a one-line change if that is preferred.
-3. **`PubMed-MCP-Server/` provenance.** It is currently untracked in the working tree and is
-   AGPL/MIT-unclear vendored code. Confirm its licence before porting logic from it, and record
-   attribution in `README.md` alongside the existing CyberKrypton credit.
-4. **Europe PMC vs PMC ordering.** Both tiers largely serve the same corpus, and Europe PMC is
-   less rate-limited than NCBI E-utilities. If PMC hit rates prove low in the smoke test,
-   swapping tiers 1 and 2 is a cheap win.
+Every item Revision 2 left open is now decided. Implement against these answers.
+
+1. **GitHub repository rename — yes.** Rename `w8s/scihub-mcp` -> `w8s/scholar-mcp` and update
+   `[project.urls]` in Task 1 to the new path (Task 10 records the consequence).
+2. **Sci-Hub default — unchanged.** `ENABLE_SCIHUB` stays `default=True` in `Settings`. Do not
+   flip it. The gating table already guarantees that setting it to `false` leaves Unpaywall
+   running.
+3. **`PubMed-MCP-Server/` provenance — confirmed MIT** (Copyright (c) 2025 JackKuo666), compatible
+   with this project's MIT licence. Porting its PubMed search logic is permitted. Task 7 may reuse
+   it; Task 10 adds the README credit and retains the copyright notice in any module carrying a
+   substantial portion. The directory stays untracked and is deleted once porting is complete.
+4. **Europe PMC before PMC — yes.** Waterfall steps 1 and 2 are swapped: Europe PMC OA is tier 1,
+   PMC OA is tier 2. Europe PMC mirrors the PMC corpus and adds preprints and non-US Open Access
+   records, serves full text and Open Access status from one REST endpoint, and is outside the
+   NCBI rate limit that every E-utilities call must share with identifier resolution and the
+   abstract fallback. Task 8 builds the tier list in this order; the Task 8 tests assert it.

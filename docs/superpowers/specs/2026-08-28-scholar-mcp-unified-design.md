@@ -9,7 +9,7 @@
 
 `scholar-mcp` unifies PubMed scientific discovery and Sci-Hub full-text retrieval into a single
 FastMCP server. It implements a multi-tier waterfall retrieval pipeline that checks legal Open
-Access sources first (PubMed Central JATS XML, Europe PMC, Unpaywall), optionally routes through
+Access sources first (Europe PMC, PubMed Central JATS XML, Unpaywall), optionally routes through
 Sci-Hub, and degrades gracefully to structured abstracts.
 
 Full-text articles are rendered as clean, token-efficient Markdown directly inside MCP tool
@@ -24,7 +24,7 @@ named sections, with dedicated tools for local PDF download and deep paper analy
 - **Single Source of Truth:** Unified MCP server providing paper search, metadata resolution,
   full-text extraction, and file downloading across scientific domains (biomedical and general).
 - **Waterfall Full-Text Resolver:** Prioritized retrieval order
-  (PMC OA -> Europe PMC OA -> Unpaywall -> Sci-Hub -> Abstract fallback).
+  (Europe PMC OA -> PMC OA -> Unpaywall -> Sci-Hub -> Abstract fallback).
 - **LLM-Optimized Text Extraction:** Clean JATS XML-to-Markdown conversion (stripping citation
   bibliographies, MathML noise, and licensing boilerplate) and in-memory PDF-to-text extraction.
 - **Bounded, Navigable Output:** Every full-text response is capped at a configurable character
@@ -94,17 +94,17 @@ proceeds with the tiers that identifier can support.
                     ╔═════ total budget: SCHOLAR_TOTAL_BUDGET ═════╗
                     ║                                              ║
                     ║   ┌──────────────────────────────┐           ║
-                    ║   │  Step 1: PMC Open Access     │           ║
-                    ║   │  (efetch JATS XML -> MD)     │           ║
-                    ║   └──────────────┬───────────────┘           ║
-                    ║     Found? ──YES─┴──────────► [Full Text: pmc]
-                    ║              │ NO                            ║
-                    ║              ▼                               ║
-                    ║   ┌──────────────────────────────┐           ║
-                    ║   │  Step 2: Europe PMC OA       │           ║
+                    ║   │  Step 1: Europe PMC OA       │           ║
                     ║   │  (fullTextXML / OA PDF)      │           ║
                     ║   └──────────────┬───────────────┘           ║
                     ║     Found? ──YES─┴──────────► [Full Text: europepmc]
+                    ║              │ NO                            ║
+                    ║              ▼                               ║
+                    ║   ┌──────────────────────────────┐           ║
+                    ║   │  Step 2: PMC Open Access     │           ║
+                    ║   │  (efetch JATS XML -> MD)     │           ║
+                    ║   └──────────────┬───────────────┘           ║
+                    ║     Found? ──YES─┴──────────► [Full Text: pmc]
                     ║              │ NO                            ║
                     ║              ▼                               ║
                     ║   ┌──────────────────────────────┐           ║
@@ -242,7 +242,7 @@ Retrieve full text of a paper using the prioritized waterfall pipeline.
     returned when nothing matches — this is not an error.
 - **Returns**: `FullTextResponse` containing:
   - `status`: `"full_text"` | `"abstract_only"` | `"ambiguous_match"` | `"not_found"` | `"error"`
-  - `source`: `"pmc"` | `"europepmc"` | `"unpaywall"` | `"scihub"` | `"abstract_fallback"` | `"none"`
+  - `source`: `"europepmc"` | `"pmc"` | `"unpaywall"` | `"scihub"` | `"abstract_fallback"` | `"none"`
   - `format`: `"markdown"` | `"text"`
   - `title`, `doi`, `pmid`, `pmcid`: Resolved metadata (nullable)
   - `content`: Extracted article body in Markdown, or abstract text if fallback
@@ -499,8 +499,8 @@ All tests use `pytest` with `pytest-asyncio` (`asyncio_mode = "auto"`). HTTP is 
    title match above threshold accepted; **title match below threshold returns `ambiguous`
    with no DOI**; results cached (second call issues no request); upstream failure preserves the
    caller's input.
-6. **OA providers:** PMC hit; missing PMCID is a miss; metadata-only stub is a miss; upstream 500
-   is a miss rather than a raise; Europe PMC hit; **Unpaywall skipped with zero HTTP calls when
+6. **OA providers:** Europe PMC hit; PMC hit; missing PMCID is a miss; metadata-only stub is a
+   miss; upstream 500 is a miss rather than a raise; **Unpaywall skipped with zero HTTP calls when
    no email is configured**; closed-access is a miss; a PDF extracting to whitespace is a miss.
 7. **Discovery & Sci-Hub providers:** PubMed query builder applies every filter; PubMed and
    CrossRef search shapes; `oa_status` annotated for a whole page in **one** request; Sci-Hub
@@ -545,6 +545,7 @@ The package is renamed outright. There is no compatibility shim and `src/scihub_
 | Console script | `scihub-mcp` | `scholar-mcp` |
 | Version | `0.4.0` | `1.0.0` |
 | Env var | `FORCE_SCIHUB` | `PREFER_SCIHUB_OVER_UNPAYWALL` |
+| GitHub repo | `w8s/scihub-mcp` | `w8s/scholar-mcp` (GitHub redirects the old URL; `[project.urls]` is updated to the new one) |
 | Tools | `search_scihub_by_doi`, `search_scihub_by_title`, `search_scihub_by_keyword`, `download_scihub_pdf` | `search_papers`, `get_full_text`, `get_full_text_batch`, `get_metadata`, `download_paper`, `deep_paper_analysis_prompt` |
 
 **Breaking for existing users:** every `mcpServers` entry pointing at the old script or module
@@ -587,17 +588,28 @@ counts as a tier miss rather than short-circuiting the waterfall with an empty b
 
 ---
 
-## 12. Open Items
+## 12. Resolved Items
 
-1. **GitHub repository rename.** The Python package and PyPI project are renamed, but the repo is
-   still `w8s/scihub-mcp` and `[project.urls]` points there. Rename the repo or accept the
-   mismatch — GitHub redirects old URLs, so either works.
-2. **Sci-Hub default.** `ENABLE_SCIHUB` defaults to `true`, inherited from the current project.
-   Under a neutral `scholar-mcp` name that default is a more visible stance than it was under
-   `scihub-mcp`. Flipping it is a one-line change.
-3. **`PubMed-MCP-Server/` provenance.** Currently untracked vendored reference code with an
-   unconfirmed licence. Confirm before porting logic from it, and record attribution in
-   `README.md` alongside the existing CyberKrypton credit.
-4. **Europe PMC vs PMC ordering.** Both tiers largely serve the same corpus and Europe PMC is less
-   rate-limited than NCBI E-utilities. If PMC hit rates prove low in the smoke test, swapping
-   steps 1 and 2 is a cheap win.
+All items left open by Revision 2 were decided on 2026-08-28. They are recorded here rather than
+deleted, because each one changes an instruction that an implementer would otherwise infer from
+Revision 1.
+
+1. **GitHub repository rename — yes.** The repository is renamed `w8s/scihub-mcp` ->
+   `w8s/scholar-mcp` alongside the package. `[project.urls]` points at the new name. GitHub
+   redirects the old URL, so existing clones and inbound links keep working.
+2. **Sci-Hub default — unchanged.** `ENABLE_SCIHUB` continues to default to `true`. The neutral
+   project name does not change what the tier does, and flipping the default would silently remove
+   a capability existing users rely on. Operators who want the tier off set the variable to
+   `false`, which section 3.3 guarantees never disables Unpaywall.
+3. **`PubMed-MCP-Server/` provenance — confirmed MIT.** The vendored reference carries an MIT
+   licence, Copyright (c) 2025 JackKuo666, which is compatible with this project's MIT licence.
+   Porting logic from it is permitted, provided `README.md` credits JackKuo666 alongside the
+   existing CyberKrypton credit and the copyright notice is retained wherever substantial portions
+   are reused. The directory itself stays out of version control.
+4. **Europe PMC before PMC — yes.** Steps 1 and 2 of the waterfall are swapped: Europe PMC OA is
+   now tier 1 and PMC OA is tier 2. Europe PMC mirrors the PMC corpus and adds preprints and
+   non-US Open Access records, so it is a superset far more often than a subset; it also returns
+   full text and Open Access status from one REST endpoint, and it is not governed by the NCBI
+   rate limit that section 3.6 imposes on every E-utilities call. Putting it first therefore
+   raises the tier-1 hit rate and spends less of the NCBI budget that identifier resolution and
+   the abstract fallback still need.
