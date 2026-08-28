@@ -103,7 +103,7 @@ def _render_node(node: Tag | NavigableString, sec_level: int = 2) -> str:
 
     tag_name = node.name.lower() if node.name else ""
 
-    if tag_name in DECOMPOSE_TAGS or "mml:" in tag_name:
+    if tag_name in DECOMPOSE_TAGS:
         return ""
 
     if tag_name == "sec":
