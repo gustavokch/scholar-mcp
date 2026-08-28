@@ -9,17 +9,20 @@ Unified academic paper discovery and multi-tier waterfall full-text retrieval MC
 
 ## What is scholar-mcp?
 
-`scholar-mcp` gives LLMs and AI agents structured access to scientific literature. It unifies PubMed discovery and CrossRef metadata with a 5-tier waterfall resolver that converts full-text academic papers into token-efficient, clean Markdown with citation noise and XML artifacts removed.
+`scholar-mcp` gives LLMs and AI agents structured access to scientific literature. It unifies PubMed discovery, CrossRef metadata, OpenAlex citation data, and Semantic Scholar recommendations with a 6-tier waterfall resolver that converts full-text academic papers into token-efficient, clean Markdown with citation noise and XML artifacts removed.
 
-### 5-Tier Waterfall Resolver
+### 6-Tier Waterfall Resolver
 
-When resolving paper full text from a DOI, PMID, PMCID, or title, `scholar-mcp` traverses:
+When resolving paper full text from a DOI, PMID, PMCID, arXiv ID, or title, `scholar-mcp` traverses:
 
 1. **Europe PMC** — Direct JATS XML full-text extraction to clean Markdown.
 2. **PubMed Central (PMC)** — NCBI E-utilities JATS XML retrieval to clean Markdown.
 3. **Unpaywall** — Open-access PDF discovery and in-memory text extraction (requires email).
-4. **Sci-Hub** — Multi-mirror failover and in-memory PDF text extraction.
-5. **Abstract Fallback** — PubMed and CrossRef structured abstract and metadata if full text is unavailable.
+4. **arXiv** — Preprint PDF retrieval and in-memory text extraction (only when an arXiv ID is known; arXiv DOIs `10.48550/arXiv.*` are detected automatically).
+5. **Sci-Hub** — Multi-mirror failover and in-memory PDF text extraction.
+6. **Abstract Fallback** — PubMed, CrossRef, and arXiv structured abstract and metadata if full text is unavailable.
+
+Accepted identifier formats include `10.xxxx/...` DOIs, `PMID:...`, `PMC...`, arXiv IDs (`arXiv:2305.18290`, `2305.18290v2`, `hep-th/9901001`, arxiv.org abs/pdf URLs), and free-text titles.
 
 ---
 
@@ -64,12 +67,12 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 ## Tools
 
 ### 1. `search_papers`
-Search academic papers across PubMed and CrossRef with structured filters and Europe PMC Open Access annotation.
+Search academic papers across PubMed, CrossRef, and Semantic Scholar with structured filters and Europe PMC Open Access annotation.
 
 ```python
 search_papers(
     query="crispr cas9 off target effects",
-    source="auto",      # "auto" (PubMed + CrossRef top-up), "pubmed", or "crossref"
+    source="auto",      # "auto" (PubMed + CrossRef top-up), "pubmed", "crossref", or "s2" (Semantic Scholar)
     num_results=10,     # Max 50
     year_start=2020,
     year_end=2024,
@@ -79,11 +82,11 @@ search_papers(
 ```
 
 ### 2. `get_full_text`
-Retrieve full text using the 5-tier waterfall resolver, converted to clean Markdown.
+Retrieve full text using the 6-tier waterfall resolver, converted to clean Markdown.
 
 ```python
 get_full_text(
-    identifier="10.1038/s41586-020-2003-7", # DOI, PMID, PMCID, or Title
+    identifier="10.1038/s41586-020-2003-7", # DOI, PMID, PMCID, arXiv ID, or Title
     max_chars=50000,                         # Optional token budget cap
     sections=["Methods", "Results"],         # Optional section filter
 )
@@ -99,7 +102,7 @@ get_full_text_batch(
 ```
 
 ### 4. `get_metadata`
-Fast metadata and abstract retrieval without executing the full-text waterfall.
+Fast metadata and abstract retrieval without executing the full-text waterfall. Responses include OpenAlex-enriched `citation_count`, `oa_url`, and `institutions` fields when available.
 
 ```python
 get_metadata(identifier="32000000")
@@ -127,7 +130,7 @@ get_references(
 ```
 
 ### 7. `get_citations`
-Retrieve forward citations (papers citing this target paper).
+Retrieve forward citations (papers citing this target paper) via Europe PMC, with OpenAlex as fallback (covers non-biomedical literature).
 
 ```python
 get_citations(
@@ -137,7 +140,7 @@ get_citations(
 ```
 
 ### 8. `get_related_papers`
-Retrieve computationally related and similar literature via PubMed E-Link.
+Retrieve computationally related and similar literature via PubMed E-Link, with Semantic Scholar recommendations as fallback (works from DOI or arXiv ID).
 
 ```python
 get_related_papers(
@@ -163,6 +166,10 @@ All options are configured via environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `UNPAYWALL_EMAIL` | None | Email address required to enable the Unpaywall tier. |
+| `OPENALEX_MAILTO` | Falls back to `UNPAYWALL_EMAIL`/`PUBMED_EMAIL` | Email for the OpenAlex polite pool. |
+| `S2_API_KEY` | None | Semantic Scholar API key (raises S2 rate limit from 1 rps to 5 rps). |
+| `ENABLE_OPENALEX` | `true` | Master switch for OpenAlex metadata enrichment and citations fallback. |
+| `ENABLE_S2` | `true` | Master switch for Semantic Scholar search and recommendations. |
 | `PUBMED_EMAIL` | None | Email sent in NCBI and CrossRef polite pool headers. |
 | `PUBMED_API_KEY` | None | NCBI API key (raises rate limit from 3 rps to 10 rps). |
 | `PUBMED_TOOL` | `ScholarMCP` | Tool identifier sent to NCBI E-utilities. |
