@@ -203,6 +203,27 @@ async def test_fetch_pdf_bytes_prefers_arxiv_before_scihub():
     r.scihub.fetch_pdf_bytes.assert_not_awaited()
 
 
+async def test_fetch_pdf_bytes_rejects_arxiv_non_pdf_body():
+    """arXiv serves a 200 HTML placeholder while a PDF is still being generated."""
+    r = make_resolver(Settings(unpaywall_email=None))
+    r.http_client.get_bytes = AsyncMock(return_value=b"<html>PDF is being generated</html>")
+    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    b, src = await r.fetch_pdf_bytes(
+        IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    assert (b, src) == (b"%PDF-sh", "scihub")
+
+
+async def test_fetch_pdf_bytes_survives_arxiv_transport_error():
+    r = make_resolver(Settings(unpaywall_email=None))
+    r.http_client.get_bytes = AsyncMock(side_effect=RuntimeError("boom"))
+    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    b, src = await r.fetch_pdf_bytes(
+        IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    assert (b, src) == (b"%PDF-sh", "scihub")
+
+
 async def test_fetch_abstract_falls_back_to_arxiv():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     r.pubmed.fetch_abstract = AsyncMock(return_value=None)

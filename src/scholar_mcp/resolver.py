@@ -18,7 +18,7 @@ from scholar_mcp.models import (
 )
 
 from scholar_mcp.parsers.jats import list_sections, select_sections
-from scholar_mcp.providers.arxiv import ArxivProvider
+from scholar_mcp.providers.arxiv import ARXIV_PDF, ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
 from scholar_mcp.providers.openalex import OpenAlexProvider
@@ -123,9 +123,14 @@ class WaterfallResolver:
 
         # Try arXiv when an arXiv ID is known (free, fast, legal)
         if ids.arxiv:
-            b = await self.http_client.get_bytes(f"https://export.arxiv.org/pdf/{ids.arxiv}")
-            if b:
-                return b, "arxiv"
+            try:
+                b = await self.http_client.get_bytes(f"{ARXIV_PDF}/{ids.arxiv}")
+                # arXiv answers 200 with an HTML placeholder while a PDF is still
+                # being generated; never hand that to the caller as a PDF.
+                if b and b.startswith(b"%PDF-"):
+                    return b, "arxiv"
+            except Exception:
+                pass
 
         # Try Sci-Hub if enabled
         if self.settings.scihub_tier_enabled() and ids.doi:
