@@ -1206,7 +1206,7 @@ git commit -m "feat: implement PMC, Europe PMC, and Unpaywall OA providers"
 one HTTP request per row, up to 50 per search. Use a single Europe PMC query returning
 `isOpenAccess` for the batch.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_search_scihub_providers.py
@@ -1360,12 +1360,12 @@ async def test_scihub_without_doi_is_miss(client):
     assert await provider.fetch_full_text(IdentifierMap(pmid="123")) is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_search_scihub_providers.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `pubmed.py`, `crossref.py`, `scihub.py`, and `annotate_oa_status`**
+- [x] **Step 3: Implement `pubmed.py`, `crossref.py`, `scihub.py`, and `annotate_oa_status`**
 
 `PubMedProvider.build_query` is a pure static method so filter mapping is testable without HTTP.
 Search is `esearch` for the ID list followed by one `esummary` for the page. DOIs come from
@@ -1379,12 +1379,12 @@ Search is `esearch` for the ID list followed by one `esummary` for the page. DOI
 and treats a captcha/HTML interstitial as a mirror miss so rotation continues. Port the working
 extraction logic from the existing `src/scihub_mcp/search.py` rather than rewriting it blind.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_search_scihub_providers.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/providers/ tests/test_search_scihub_providers.py
