@@ -26,10 +26,10 @@ class ArxivProvider(BaseProvider):
 
     tier: str = "arxiv"
 
-    def __init__(self, http_client: AsyncHttpClient) -> None:
-        super().__init__(http_client)
-
     async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
+        # Per-request state: the provider instance is reused across every request,
+        # so a stale reason would mislabel a later miss as a skip.
+        self.last_skip_reason = ""
         if not ids.arxiv:
             self.last_skip_reason = "NO_ARXIV_ID"
             return None
