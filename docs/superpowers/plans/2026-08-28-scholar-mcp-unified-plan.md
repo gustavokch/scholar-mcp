@@ -997,7 +997,7 @@ provider must return `None` immediately without any HTTP call, and expose
 `last_skip_reason = "UNPAYWALL_EMAIL not configured"` so the resolver can record a
 `FetchAttempt(outcome="skipped")`.
 
-- [ ] **Step 1: Write the failing tests for the OA providers**
+- [x] **Step 1: Write the failing tests for the OA providers**
 
 ```python
 # tests/test_oa_providers.py
@@ -1137,12 +1137,12 @@ async def test_unpaywall_pdf_yielding_no_text_is_miss(client, monkeypatch):
     assert res is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_oa_providers.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `base.py`, `pmc.py`, `europe_pmc.py`, `unpaywall.py`**
+- [x] **Step 3: Implement `base.py`, `pmc.py`, `europe_pmc.py`, `unpaywall.py`**
 
 `base.py` defines the `BaseProvider` ABC plus a shared `MIN_USEFUL_CHARS` constant (e.g. 200).
 Any tier producing less than that after extraction counts as a miss — this is what stops
@@ -1159,12 +1159,12 @@ Europe PMC search API to discover an OA record from a DOI. Reuses the same JATS 
 `/v2/{doi}?email=...`, prefers `best_oa_location.url_for_pdf` over `.url`, downloads the PDF as
 bytes, and extracts with `pdf_bytes_to_text` (`format="text"`).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_oa_providers.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/providers/ tests/test_oa_providers.py
