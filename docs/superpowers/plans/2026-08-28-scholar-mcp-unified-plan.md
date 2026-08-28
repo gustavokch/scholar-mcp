@@ -729,7 +729,7 @@ git commit -m "feat: implement JATS XML to clean Markdown parser with section se
 **Interfaces:**
 - Produces: `pdf_bytes_to_text(pdf_bytes: bytes) -> str`
 
-- [ ] **Step 1: Write the failing test for PDF text extraction**
+- [x] **Step 1: Write the failing test for PDF text extraction**
 
 ```python
 # tests/test_pdf_parser.py
@@ -790,12 +790,12 @@ def test_repeated_header_footer_removed():
     assert "Real content two" in out
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_pdf_parser.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `scholar_mcp/parsers/pdf.py`**
+- [x] **Step 3: Implement `scholar_mcp/parsers/pdf.py`**
 
 `pypdf.PdfReader` over `io.BytesIO` — never write to disk. Wrap the whole extraction in
 `try/except Exception` and return `""` on corrupt, empty, or encrypted input. Split the helpers so
@@ -803,12 +803,12 @@ they are unit-testable: `_strip_repeated_lines(pages)` drops lines appearing on 
 pages (running headers/footers), `_postprocess(text)` rejoins `word-\nbreak` hyphenation and
 collapses runs of whitespace and blank lines.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_pdf_parser.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/parsers/pdf.py tests/test_pdf_parser.py
