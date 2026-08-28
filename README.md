@@ -116,12 +116,43 @@ download_paper(
 )
 ```
 
-### 6. `deep_paper_analysis_prompt` & `@mcp.prompt("deep_paper_analysis")`
+### 6. `get_references`
+Extract bibliography and cited references for an academic paper (via Europe PMC and CrossRef).
+
+```python
+get_references(
+    identifier="10.1038/s41586-020-2003-7",
+    limit=50,  # Max 100
+)
+```
+
+### 7. `get_citations`
+Retrieve forward citations (papers citing this target paper).
+
+```python
+get_citations(
+    identifier="10.1038/s41586-020-2003-7",
+    limit=50,  # Max 100
+)
+```
+
+### 8. `get_related_papers`
+Retrieve computationally related and similar literature via PubMed E-Link.
+
+```python
+get_related_papers(
+    identifier="32000000",
+    limit=10,  # Max 25
+)
+```
+
+### 9. `deep_paper_analysis_prompt` & `@mcp.prompt("deep_paper_analysis")`
 Constructs a structured prompt template containing the full text for comprehensive scientific analysis.
 
 ```python
 deep_paper_analysis_prompt(identifier="10.1038/s41586-020-2003-7")
 ```
+
 
 ---
 

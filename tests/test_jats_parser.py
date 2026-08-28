@@ -127,3 +127,43 @@ def test_select_sections_preserves_nested_subsections():
     assert "## Methods" not in intro_section
     assert "We measured flux" not in intro_section
 
+
+def test_jats_formula_rendering():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <front><article-meta><title-group><article-title>Math Paper</article-title></title-group></article-meta></front>
+  <body>
+    <sec>
+      <title>Methods</title>
+      <p>Here is inline equation <inline-formula><tex-math>E = mc^2</tex-math></inline-formula> and display:
+        <disp-formula>
+          <tex-math>\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}</tex-math>
+        </disp-formula>
+      </p>
+    </sec>
+  </body>
+</article>"""
+    md = jats_to_markdown(xml)
+    assert "$E = mc^2$" in md
+    assert "$$\n\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}\n$$" in md
+
+
+def test_jats_mathml_rendering():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <front><article-meta><title-group><article-title>MathML Paper</article-title></title-group></article-meta></front>
+  <body>
+    <sec>
+      <title>Results</title>
+      <p>Formula with alttext: <inline-formula><mml:math alttext="x + y = z"><mml:mi>x</mml:mi><mml:mo>+</mml:mo><mml:mi>y</mml:mi><mml:mo>=</mml:mo><mml:mi>z</mml:mi></mml:math></inline-formula> and standalone <mml:math alttext="a = b"><mml:mi>a</mml:mi><mml:mo>=</mml:mo><mml:mi>b</mml:mi></mml:math> and text math <inline-formula><mml:math><mml:mi>u</mml:mi><mml:mo>+</mml:mo><mml:mi>v</mml:mi></mml:math></inline-formula>.</p>
+    </sec>
+  </body>
+</article>"""
+    md = jats_to_markdown(xml)
+    assert "$x + y = z$" in md
+    assert "$a = b$" in md
+    assert "$u + v$" in md or "u + v" in md
+
+
+
+

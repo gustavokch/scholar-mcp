@@ -1,12 +1,14 @@
 import re
 from typing import Any
 
-from scholar_mcp.models import FullTextResponse, IdentifierMap, PaperMetadata
+from scholar_mcp.models import CitationItem, FullTextResponse, IdentifierMap, PaperMetadata, ReferenceItem
 from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
+
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+
 
 
 class EuropePMCProvider(BaseProvider):
@@ -86,6 +88,129 @@ class EuropePMCProvider(BaseProvider):
                 pass
 
         return None
+
+    async def _resolve_source_and_ext_id(
+        self,
+        ids: IdentifierMap,
+    ) -> tuple[str | None, str | None]:
+        if ids.pmid:
+            return "MED", ids.pmid
+        if ids.pmcid:
+            return "PMC", ids.pmcid.upper().replace("PMC", "")
+        if ids.doi:
+            try:
+                search_url = f"{EPMC_REST_BASE}/search"
+                resp = await self.http_client.get(
+                    search_url,
+                    params={
+                        "query": f'DOI:"{ids.doi}"',
+                        "format": "json",
+                        "resultType": "lite",
+                    },
+                )
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    results = data.get("resultList", {}).get("result", [])
+                    if results:
+                        rec = results[0]
+                        if rec.get("pmid"):
+                            return "MED", rec.get("pmid")
+                        elif rec.get("pmcid"):
+                            return "PMC", rec.get("pmcid").upper().replace("PMC", "")
+            except Exception:
+                pass
+        return None, None
+
+    async def fetch_references(
+        self,
+        ids: IdentifierMap,
+        limit: int = 50,
+    ) -> list[ReferenceItem]:
+        source, ext_id = await self._resolve_source_and_ext_id(ids)
+        if not source or not ext_id:
+            return []
+
+        url = f"{EPMC_REST_BASE}/{source}/{ext_id}/references"
+        try:
+            resp = await self.http_client.get(
+                url,
+                params={"format": "json", "pageSize": min(max(1, limit), 100)},
+            )
+            if resp is None or resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            ref_list = data.get("referenceList", {}).get("reference", [])
+            references: list[ReferenceItem] = []
+
+            for r in ref_list:
+                authors: list[str] = []
+                author_str = r.get("authorString", "")
+                if author_str:
+                    authors = [a.strip() for a in author_str.split(",") if a.strip()]
+
+                references.append(
+                    ReferenceItem(
+                        id=str(r.get("id") or ""),
+                        title=r.get("title", "").rstrip("."),
+                        authors=authors,
+                        year=str(r.get("pubYear") or ""),
+                        venue=r.get("journalTitle") or "",
+                        doi=r.get("doi"),
+                        pmid=r.get("pmid"),
+                        raw_text=r.get("citationString") or "",
+                    )
+                )
+
+            return references[:limit]
+        except Exception:
+            return []
+
+    async def fetch_citations(
+        self,
+        ids: IdentifierMap,
+        limit: int = 50,
+    ) -> list[CitationItem]:
+        source, ext_id = await self._resolve_source_and_ext_id(ids)
+        if not source or not ext_id:
+            return []
+
+        url = f"{EPMC_REST_BASE}/{source}/{ext_id}/citations"
+        try:
+            resp = await self.http_client.get(
+                url,
+                params={"format": "json", "pageSize": min(max(1, limit), 100)},
+            )
+            if resp is None or resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            cit_list = data.get("citationList", {}).get("citation", [])
+            citations: list[CitationItem] = []
+
+            for c in cit_list:
+                authors: list[str] = []
+                author_str = c.get("authorString", "")
+                if author_str:
+                    authors = [a.strip() for a in author_str.split(",") if a.strip()]
+
+                citations.append(
+                    CitationItem(
+                        title=c.get("title", "").rstrip("."),
+                        authors=authors,
+                        year=str(c.get("pubYear") or ""),
+                        venue=c.get("journalTitle") or "",
+                        doi=c.get("doi"),
+                        pmid=c.get("pmid"),
+                        citation_count=c.get("citedByCount"),
+                    )
+                )
+
+            return citations[:limit]
+        except Exception:
+            return []
+
+
 
 
 async def annotate_oa_status(

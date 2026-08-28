@@ -3,12 +3,14 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
-from scholar_mcp.models import IdentifierMap, PaperMetadata
+from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
+
 
 
 class PubMedProvider:
@@ -218,3 +220,108 @@ class PubMedProvider:
             )
         except Exception:
             return None
+
+    async def fetch_related_papers(
+        self,
+        pmid: str,
+        limit: int = 10,
+    ) -> list[RelatedPaper]:
+        clean_pmid = pmid.strip()
+        params = {
+            "dbfrom": "pubmed",
+            "id": clean_pmid,
+            "cmd": "neighbor_score",
+            "linkname": "pubmed_pubmed",
+            "retmode": "json",
+        }
+        try:
+            resp = await self.http_client.get(ELINK_URL, params=params)
+            if resp is None or resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            linksets = data.get("linksets", [])
+            if not linksets:
+                return []
+
+            linksetdbs = linksets[0].get("linksetdbs", [])
+            if not linksetdbs:
+                return []
+
+            links = linksetdbs[0].get("links", [])
+            if not links:
+                return []
+
+            # Filter out null IDs and the source pmid itself, then limit
+            candidate_links = [
+                l for l in links
+                if l.get("id") is not None and str(l.get("id")) != clean_pmid
+            ][:limit]
+            if not candidate_links:
+                return []
+
+            target_ids = [str(l["id"]) for l in candidate_links]
+            scores = {}
+            for l in candidate_links:
+                raw_score = l.get("score")
+                if raw_score is not None:
+                    try:
+                        scores[str(l["id"])] = float(raw_score) / 1000000.0
+                    except Exception:
+                        scores[str(l["id"])] = None
+
+            # Fetch metadata via esummary
+            summary_params = {
+                "db": "pubmed",
+                "id": ",".join(target_ids),
+                "retmode": "json",
+            }
+            sum_resp = await self.http_client.get(ESUMMARY_URL, params=summary_params)
+            if sum_resp is None or sum_resp.status_code != 200:
+                return []
+
+            sum_data = sum_resp.json()
+            results_dict = sum_data.get("result", {})
+            related_papers: list[RelatedPaper] = []
+
+            for uid in target_ids:
+                rec = results_dict.get(str(uid), {})
+                if not rec or not isinstance(rec, dict):
+                    continue
+
+                title = rec.get("title", "").rstrip(".")
+                authors: list[str] = []
+                for a in rec.get("authors", []):
+                    if isinstance(a, dict) and a.get("name"):
+                        authors.append(a["name"])
+
+                pubdate = rec.get("pubdate", "")
+                year_match = re.search(r"\b(19\d\d|20\d\d)\b", pubdate)
+                year = year_match.group(1) if year_match else pubdate
+
+                venue = rec.get("fulljournalname") or rec.get("source") or ""
+
+                doi = None
+                eloc = rec.get("elocationid", "")
+                if "doi:" in eloc.lower():
+                    doi = re.sub(r"^doi:\s*", "", eloc, flags=re.IGNORECASE).strip()
+                for aid in rec.get("articleids", []):
+                    if isinstance(aid, dict) and aid.get("idtype") == "doi":
+                        doi = aid.get("value")
+
+                related_papers.append(
+                    RelatedPaper(
+                        title=title,
+                        authors=authors,
+                        year=year,
+                        venue=venue,
+                        doi=doi,
+                        pmid=str(uid),
+                        score=scores.get(str(uid)),
+                    )
+                )
+
+            return related_papers
+        except Exception:
+            return []
+

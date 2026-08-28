@@ -219,7 +219,65 @@ Please evaluate:
         }
 
 
+@mcp.tool()
+async def get_references(
+    identifier: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Retrieve bibliography and cited references for an academic paper.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+        limit: Maximum number of references to return (max 100).
+    """
+    clamped_limit = min(max(1, limit), 100)
+    try:
+        refs = await resolver.get_references(identifier, limit=clamped_limit)
+        return [r.to_dict() for r in refs]
+    except Exception as ex:
+        return [{"status": "error", "error": str(ex)}]
+
+
+@mcp.tool()
+async def get_citations(
+    identifier: str,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Retrieve forward citations (papers that cited this paper).
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+        limit: Maximum number of citing papers to return (max 100).
+    """
+    clamped_limit = min(max(1, limit), 100)
+    try:
+        cits = await resolver.get_citations(identifier, limit=clamped_limit)
+        return [c.to_dict() for c in cits]
+    except Exception as ex:
+        return [{"status": "error", "error": str(ex)}]
+
+
+@mcp.tool()
+async def get_related_papers(
+    identifier: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Retrieve computationally related and similar papers via PubMed / Europe PMC.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+        limit: Maximum number of related papers to return (max 25).
+    """
+    clamped_limit = min(max(1, limit), 25)
+    try:
+        related = await resolver.get_related_papers(identifier, limit=clamped_limit)
+        return [rel.to_dict() for rel in related]
+    except Exception as ex:
+        return [{"status": "error", "error": str(ex)}]
+
+
 @mcp.prompt("deep_paper_analysis")
+
 async def deep_paper_analysis(identifier: str) -> str:
     """Prompt template for deep paper analysis."""
     result = await deep_paper_analysis_prompt(identifier)
