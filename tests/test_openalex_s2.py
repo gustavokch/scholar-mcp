@@ -286,3 +286,73 @@ async def test_resolver_related_papers_falls_back_to_s2():
     assert len(recs) == 1
     assert recs[0].title == "Recommended Paper"
     await resolver.http_client.aclose()
+
+
+@respx.mock
+async def test_s2_author_edge_cases(client):
+    """S2 authors list can contain strings, None, or empty dicts."""
+    malformed_s2 = {
+        "data": [
+            {
+                "title": "Malformed Author Paper",
+                "authors": ["Solo String Author", {"name": "Valid Dict Author"}, None, {"other": "no-name"}],
+                "externalIds": {"DOI": "10.1234/test"},
+            }
+        ]
+    }
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json=malformed_s2)
+    )
+    provider = SemanticScholarProvider(client)
+    papers = await provider.search("query", num_results=5)
+    assert len(papers) == 1
+    assert papers[0].authors == ["Solo String Author", "Valid Dict Author"]
+
+    recs_malformed = {
+        "recommendedPapers": [
+            {
+                "title": "Rec Paper",
+                "authors": ["String Author", None, {"name": "Dict Author"}],
+            }
+        ]
+    }
+    respx.get(url__startswith="https://api.semanticscholar.org/recommendations/v1/papers/forpaper/").mock(
+        return_value=httpx.Response(200, json=recs_malformed)
+    )
+    recs = await provider.fetch_recommendations("DOI:10.1234/test", limit=5)
+    assert len(recs) == 1
+    assert recs[0].authors == ["String Author", "Dict Author"]
+
+
+@respx.mock
+async def test_openalex_author_and_doi_edge_cases(client):
+    """OpenAlex authorships can contain non-dict elements or varied DOI formats."""
+    from scholar_mcp.providers.openalex import _strip_doi_url
+
+    assert _strip_doi_url("https://doi.org/10.1038/n1") == "10.1038/n1"
+    assert _strip_doi_url("http://doi.org/10.1038/n2") == "10.1038/n2"
+    assert _strip_doi_url("https://dx.doi.org/10.1038/n3") == "10.1038/n3"
+    assert _strip_doi_url("doi: 10.1038/n4") == "10.1038/n4"
+    assert _strip_doi_url(None) is None
+
+    malformed_work = {
+        "id": "https://openalex.org/W999",
+        "doi": "https://dx.doi.org/10.1038/dxdoi",
+        "title": "Edge Case Work",
+        "authorships": [
+            "raw string",
+            {"author": {"display_name": "Dr. Good"}, "institutions": ["non-dict inst", {"display_name": "MIT"}]},
+            {"author": None, "institutions": None},
+            None,
+        ],
+    }
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works/https://doi.org/").mock(
+        return_value=httpx.Response(200, json=malformed_work)
+    )
+    provider = OpenAlexProvider(client)
+    meta = await provider.fetch_metadata("doi: 10.1038/dxdoi")
+    assert meta is not None
+    assert meta.doi == "10.1038/dxdoi"
+    assert meta.authors == ["Dr. Good"]
+    assert meta.institutions == ["MIT"]
+

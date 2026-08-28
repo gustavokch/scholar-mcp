@@ -10,12 +10,26 @@ S2_RECS_BASE = "https://api.semanticscholar.org/recommendations/v1"
 PAPER_FIELDS = "title,authors,year,venue,abstract,externalIds,citationCount,openAccessPdf"
 
 
+def _extract_authors(authors_raw: Any) -> list[str]:
+    if not isinstance(authors_raw, list):
+        return []
+    authors: list[str] = []
+    for a in authors_raw:
+        if isinstance(a, dict):
+            name = a.get("name")
+            if isinstance(name, str) and name.strip():
+                authors.append(name.strip())
+        elif isinstance(a, str) and a.strip():
+            authors.append(a.strip())
+    return authors
+
+
 def _paper_to_metadata(p: dict[str, Any]) -> PaperMetadata:
     ext = p.get("externalIds") or {}
     oa_pdf = (p.get("openAccessPdf") or {}).get("url")
     return PaperMetadata(
         title=p.get("title") or "",
-        authors=[a.get("name", "") for a in p.get("authors", []) if a.get("name")],
+        authors=_extract_authors(p.get("authors")),
         year=str(p.get("year") or ""),
         venue=p.get("venue") or "",
         doi=ext.get("DOI"),
@@ -91,7 +105,7 @@ class SemanticScholarProvider:
                 recs.append(
                     RelatedPaper(
                         title=p.get("title") or "",
-                        authors=[a.get("name", "") for a in p.get("authors", []) if a.get("name")],
+                        authors=_extract_authors(p.get("authors")),
                         year=str(p.get("year") or ""),
                         venue=p.get("venue") or "",
                         doi=ext.get("DOI"),
