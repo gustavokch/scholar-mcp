@@ -253,3 +253,67 @@ async def test_pubmed_fetch_related_papers_none_id(client):
     assert related[0].title == "Related Paper 3"
 
 
+EPMC_SEARCH = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+
+@respx.mock
+async def test_europe_pmc_references_and_citations_doi_fallback(client):
+    # Mock Europe PMC search for DOI -> PMID
+    respx.get(url__startswith=EPMC_SEARCH).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {
+                            "id": "12345",
+                            "pmid": "12345",
+                            "doi": "10.1038/target-doi",
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    respx.get(url__startswith=EPMC_REF).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "referenceList": {
+                    "reference": [
+                        {
+                            "id": "1",
+                            "title": "DOI Resolved Reference",
+                            "pubYear": "2021",
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    respx.get(url__startswith=EPMC_CIT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "citationList": {
+                    "citation": [
+                        {
+                            "title": "DOI Resolved Citation",
+                            "pubYear": "2023",
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    provider = EuropePMCProvider(client)
+    refs = await provider.fetch_references(IdentifierMap(doi="10.1038/target-doi"), limit=5)
+    assert len(refs) == 1
+    assert refs[0].title == "DOI Resolved Reference"
+
+    cits = await provider.fetch_citations(IdentifierMap(doi="10.1038/target-doi"), limit=5)
+    assert len(cits) == 1
+    assert cits[0].title == "DOI Resolved Citation"
+
+
+

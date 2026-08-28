@@ -89,22 +89,15 @@ class EuropePMCProvider(BaseProvider):
 
         return None
 
-    async def fetch_references(
+    async def _resolve_source_and_ext_id(
         self,
         ids: IdentifierMap,
-        limit: int = 50,
-    ) -> list[ReferenceItem]:
-        source = None
-        ext_id = None
-
+    ) -> tuple[str | None, str | None]:
         if ids.pmid:
-            source = "MED"
-            ext_id = ids.pmid
-        elif ids.pmcid:
-            source = "PMC"
-            ext_id = ids.pmcid.upper().replace("PMC", "")
-        elif ids.doi:
-            # Try finding via Europe PMC search
+            return "MED", ids.pmid
+        if ids.pmcid:
+            return "PMC", ids.pmcid.upper().replace("PMC", "")
+        if ids.doi:
             try:
                 search_url = f"{EPMC_REST_BASE}/search"
                 resp = await self.http_client.get(
@@ -121,14 +114,19 @@ class EuropePMCProvider(BaseProvider):
                     if results:
                         rec = results[0]
                         if rec.get("pmid"):
-                            source = "MED"
-                            ext_id = rec.get("pmid")
+                            return "MED", rec.get("pmid")
                         elif rec.get("pmcid"):
-                            source = "PMC"
-                            ext_id = rec.get("pmcid").upper().replace("PMC", "")
+                            return "PMC", rec.get("pmcid").upper().replace("PMC", "")
             except Exception:
                 pass
+        return None, None
 
+    async def fetch_references(
+        self,
+        ids: IdentifierMap,
+        limit: int = 50,
+    ) -> list[ReferenceItem]:
+        source, ext_id = await self._resolve_source_and_ext_id(ids)
         if not source or not ext_id:
             return []
 
@@ -173,40 +171,7 @@ class EuropePMCProvider(BaseProvider):
         ids: IdentifierMap,
         limit: int = 50,
     ) -> list[CitationItem]:
-        source = None
-        ext_id = None
-
-        if ids.pmid:
-            source = "MED"
-            ext_id = ids.pmid
-        elif ids.pmcid:
-            source = "PMC"
-            ext_id = ids.pmcid.upper().replace("PMC", "")
-        elif ids.doi:
-            try:
-                search_url = f"{EPMC_REST_BASE}/search"
-                resp = await self.http_client.get(
-                    search_url,
-                    params={
-                        "query": f'DOI:"{ids.doi}"',
-                        "format": "json",
-                        "resultType": "lite",
-                    },
-                )
-                if resp and resp.status_code == 200:
-                    data = resp.json()
-                    results = data.get("resultList", {}).get("result", [])
-                    if results:
-                        rec = results[0]
-                        if rec.get("pmid"):
-                            source = "MED"
-                            ext_id = rec.get("pmid")
-                        elif rec.get("pmcid"):
-                            source = "PMC"
-                            ext_id = rec.get("pmcid").upper().replace("PMC", "")
-            except Exception:
-                pass
-
+        source, ext_id = await self._resolve_source_and_ext_id(ids)
         if not source or not ext_id:
             return []
 
