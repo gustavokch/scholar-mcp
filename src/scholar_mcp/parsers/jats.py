@@ -179,11 +179,11 @@ def jats_to_markdown(xml_content: str | bytes) -> str:
 
     # Decompose unwanted elements
     for tag_name in DECOMPOSE_TAGS:
-        for match in soup.find_all(tag_name):
+        for match in list(soup.find_all(tag_name)):
             match.decompose()
 
     # Also decompose namespace tags
-    for tag in soup.find_all(True):
+    for tag in list(soup.find_all(True)):
         if tag.name and ("mml:" in tag.name or "math" in tag.name):
             tag.decompose()
 
@@ -242,11 +242,6 @@ def jats_to_markdown(xml_content: str | bytes) -> str:
 
 
 def list_sections(markdown: str) -> list[str]:
-    matches = re.findall(r"^#{1,6}\s+(.+)$", markdown, re.MULTILINE)
-    # Exclude title line if it was level 1? Actually keep all section headers
-    # (Level 1 in our output is the article title, level 2+ are sections like Abstract, Introduction)
-    # But let's check: if "Abstract" is in sections, "Introduction" is in sections, etc.
-    # Level 2+ matches
     sections: list[str] = []
     for line in markdown.splitlines():
         m = re.match(r"^#{2,6}\s+(.+)$", line)
@@ -264,23 +259,45 @@ def select_sections(markdown: str, wanted: list[str]) -> str:
         return markdown
 
     # Split markdown by headings (##, ###, etc.)
-    heading_pattern = re.compile(r"^(#{2,6}\s+.+)$", re.MULTILINE)
+    heading_pattern = re.compile(r"^(#{2,6})\s+(.+)$", re.MULTILINE)
     splits = heading_pattern.split(markdown)
 
-    # splits will be: [preamble, heading1, content1, heading2, content2, ...]
-    selected_parts: list[str] = []
-
+    # splits structure: [preamble, hashes1, title1, content1, hashes2, title2, content2, ...]
+    chunks: list[dict[str, Any]] = []
     i = 1
     while i < len(splits):
-        heading_line = splits[i]
-        content = splits[i + 1] if i + 1 < len(splits) else ""
+        hashes = splits[i]
+        title = splits[i + 1]
+        content = splits[i + 2] if i + 2 < len(splits) else ""
+        chunks.append({
+            "level": len(hashes),
+            "heading_line": f"{hashes} {title}",
+            "title": title.strip(),
+            "content": content,
+        })
+        i += 3
 
-        # Extract heading title
-        heading_match = re.match(r"^#{2,6}\s+(.+)$", heading_line)
-        if heading_match:
-            heading_title = heading_match.group(1).strip().lower()
-            if any(w in heading_title for w in wanted_lower):
-                selected_parts.append(f"{heading_line}\n{content}".strip())
-        i += 2
+    if not chunks:
+        return ""
+
+    included_indices: set[int] = set()
+
+    for idx, chunk in enumerate(chunks):
+        title_lower = chunk["title"].lower()
+        if any(w in title_lower for w in wanted_lower):
+            included_indices.add(idx)
+            # Include child subsections until next heading with equal or lower level
+            parent_level = chunk["level"]
+            for sub_idx in range(idx + 1, len(chunks)):
+                if chunks[sub_idx]["level"] > parent_level:
+                    included_indices.add(sub_idx)
+                else:
+                    break
+
+    selected_parts: list[str] = []
+    for idx, chunk in enumerate(chunks):
+        if idx in included_indices:
+            body = chunk["content"]
+            selected_parts.append(f"{chunk['heading_line']}\n{body}".strip())
 
     return "\n\n".join(selected_parts).strip()

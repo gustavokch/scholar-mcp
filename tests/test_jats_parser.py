@@ -115,3 +115,15 @@ def test_list_and_select_sections():
 
     # Unknown section names yield an empty selection rather than raising
     assert select_sections(md, ["Nonexistent"]).strip() == ""
+
+
+def test_select_sections_preserves_nested_subsections():
+    md = jats_to_markdown(SAMPLE_JATS_XML)
+    intro_section = select_sections(md, ["Introduction"])
+    assert "## Introduction" in intro_section
+    assert "Cellular respiration is vital" in intro_section
+    assert "### Sub Background" in intro_section
+    assert "Nested section body." in intro_section
+    assert "## Methods" not in intro_section
+    assert "We measured flux" not in intro_section
+
