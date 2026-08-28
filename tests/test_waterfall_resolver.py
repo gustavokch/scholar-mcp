@@ -12,7 +12,7 @@ from scholar_mcp.resolver import WaterfallResolver
 def make_resolver(settings: Settings) -> WaterfallResolver:
     r = WaterfallResolver(settings=settings, http_client=AsyncMock(), cache=None)
     r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz", pmcid="PMC1"))
-    for name in ("europe_pmc", "pmc", "unpaywall", "scihub"):
+    for name in ("europe_pmc", "pmc", "unpaywall", "arxiv", "scihub"):
         getattr(r, name).fetch_full_text = AsyncMock(return_value=None)
     r.fetch_abstract = AsyncMock(return_value=None)
     return r
@@ -79,7 +79,7 @@ async def test_total_failure_falls_back_to_abstract():
 async def test_nothing_at_all_returns_not_found():
     res = await make_resolver(Settings()).resolve_full_text("10.1038/xyz")
     assert res.status == "not_found"
-    assert len(res.attempts) == 5
+    assert len(res.attempts) == 6
 
 
 async def test_ambiguous_title_does_not_fetch():
@@ -165,3 +165,73 @@ async def test_download_writes_inside_root(tmp_path):
     assert res.success is True
     assert res.file_size_bytes == len(b"%PDF-data")
     assert Path(res.saved_path).read_bytes() == b"%PDF-data"
+
+
+async def test_arxiv_hit_short_circuits_before_scihub():
+    r = make_resolver(Settings())
+    r.resolve_ids = AsyncMock(
+        return_value=IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    r.arxiv.fetch_full_text.return_value = hit("arxiv")
+    res = await r.resolve_full_text("arXiv:2305.18290")
+    assert res.source == "arxiv"
+    r.scihub.fetch_full_text.assert_not_awaited()
+    assert [a.tier for a in res.attempts] == ["europepmc", "pmc", "unpaywall", "arxiv"]
+
+
+async def test_arxiv_tier_reports_skip_without_arxiv_id():
+    # Real ArxivProvider: no arXiv ID -> fast skip with reason, no HTTP.
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz"))
+    for name in ("europe_pmc", "pmc", "unpaywall", "scihub"):
+        getattr(r, name).fetch_full_text = AsyncMock(return_value=None)
+    r.fetch_abstract = AsyncMock(return_value=None)
+    res = await r.resolve_full_text("10.1038/xyz")
+    arxiv_attempt = [a for a in res.attempts if a.tier == "arxiv"][0]
+    assert arxiv_attempt.outcome == "skipped"
+    assert arxiv_attempt.reason == "NO_ARXIV_ID"
+
+
+async def test_fetch_pdf_bytes_prefers_arxiv_before_scihub():
+    r = make_resolver(Settings(unpaywall_email=None))
+    r.http_client.get_bytes = AsyncMock(return_value=b"%PDF-arxiv")
+    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "url"))
+    b, src = await r.fetch_pdf_bytes(
+        IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    assert (b, src) == (b"%PDF-arxiv", "arxiv")
+    r.scihub.fetch_pdf_bytes.assert_not_awaited()
+
+
+async def test_fetch_pdf_bytes_rejects_arxiv_non_pdf_body():
+    """arXiv serves a 200 HTML placeholder while a PDF is still being generated."""
+    r = make_resolver(Settings(unpaywall_email=None))
+    r.http_client.get_bytes = AsyncMock(return_value=b"<html>PDF is being generated</html>")
+    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    b, src = await r.fetch_pdf_bytes(
+        IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    assert (b, src) == (b"%PDF-sh", "scihub")
+
+
+async def test_fetch_pdf_bytes_survives_arxiv_transport_error():
+    r = make_resolver(Settings(unpaywall_email=None))
+    r.http_client.get_bytes = AsyncMock(side_effect=RuntimeError("boom"))
+    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    b, src = await r.fetch_pdf_bytes(
+        IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
+    )
+    assert (b, src) == (b"%PDF-sh", "scihub")
+
+
+async def test_fetch_abstract_falls_back_to_arxiv():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.fetch_abstract = AsyncMock(return_value=None)
+    r.crossref.fetch_metadata = AsyncMock(return_value=None)
+    r.arxiv.fetch_metadata = AsyncMock(
+        return_value=PaperMetadata(title="A", abstract="Arxiv abstract.")
+    )
+    meta = await r.fetch_abstract(IdentifierMap(arxiv="2305.18290"))
+    assert meta is not None
+    assert meta.title == "A"
+    r.arxiv.fetch_metadata.assert_awaited_once_with("2305.18290")

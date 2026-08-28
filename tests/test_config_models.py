@@ -101,3 +101,40 @@ def test_full_text_response_carries_truncation_and_trace():
 def test_fetch_attempt_records_skip_reason():
     a = FetchAttempt(tier="unpaywall", outcome="skipped", reason="UNPAYWALL_EMAIL not configured")
     assert a.to_dict()["reason"] == "UNPAYWALL_EMAIL not configured"
+
+
+def test_settings_s2_and_openalex_env(monkeypatch):
+    monkeypatch.setenv("S2_API_KEY", "secret")
+    monkeypatch.setenv("OPENALEX_MAILTO", "me@example.com")
+    monkeypatch.setenv("ENABLE_S2", "false")
+    s = Settings.load()
+    assert s.s2_api_key == "secret"
+    assert s.openalex_email == "me@example.com"
+    assert s.enable_s2 is False
+    assert s.enable_openalex is True
+
+
+def test_settings_openalex_mailto_fallback(monkeypatch):
+    monkeypatch.delenv("OPENALEX_MAILTO", raising=False)
+    monkeypatch.delenv("UNPAYWALL_EMAIL", raising=False)
+    monkeypatch.setenv("PUBMED_EMAIL", "pubmed@example.com")
+    s = Settings.load()
+    assert s.openalex_email == "pubmed@example.com"
+
+
+async def test_s2_rate_limit_depends_on_api_key(monkeypatch):
+    from scholar_mcp.utils.http import AsyncHttpClient
+
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    c1 = AsyncHttpClient(settings=Settings.load(), max_retries=1)
+    try:
+        assert c1._limiter_for("api.semanticscholar.org").rate_per_sec == 1.0
+    finally:
+        await c1.aclose()
+
+    monkeypatch.setenv("S2_API_KEY", "k")
+    c2 = AsyncHttpClient(settings=Settings.load(), max_retries=1)
+    try:
+        assert c2._limiter_for("api.semanticscholar.org").rate_per_sec == 5.0
+    finally:
+        await c2.aclose()

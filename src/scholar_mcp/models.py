@@ -7,6 +7,7 @@ class IdentifierMap:
     pmid: str | None = None
     pmcid: str | None = None
     doi: str | None = None
+    arxiv: str | None = None
     title: str | None = None
     match_score: float | None = None  # set when resolved from a title query
     ambiguous: bool = False  # True when the best title match is below threshold
@@ -39,6 +40,9 @@ class PaperMetadata:
     pmcid: str | None = None
     abstract: str = ""
     oa_status: str = "unknown"  # "oa" | "closed" | "unknown"
+    citation_count: int | None = None
+    oa_url: str | None = None
+    institutions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -18,11 +18,14 @@ from scholar_mcp.models import (
 )
 
 from scholar_mcp.parsers.jats import list_sections, select_sections
+from scholar_mcp.providers.arxiv import ARXIV_PDF, ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
+from scholar_mcp.providers.openalex import OpenAlexProvider
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.providers.scihub import SciHubProvider
+from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
 from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE, UnpaywallProvider
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -61,10 +64,13 @@ class WaterfallResolver:
         )
         self.europe_pmc = EuropePMCProvider(self.http_client)
         self.pmc = PMCProvider(self.http_client)
+        self.arxiv = ArxivProvider(self.http_client)
         self.unpaywall = UnpaywallProvider(self.http_client, email=self.settings.unpaywall_email)
         self.scihub = SciHubProvider(self.http_client, mirrors=self.settings.scihub_mirrors)
         self.pubmed = PubMedProvider(self.http_client, self.settings)
         self.crossref = CrossRefProvider(self.http_client)
+        self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
+        self.s2 = SemanticScholarProvider(self.http_client, api_key=self.settings.s2_api_key)
 
     async def resolve_ids(self, identifier: str) -> IdentifierMap:
         return await resolve_identifiers(identifier, self.http_client, self.cache, self.settings)
@@ -73,6 +79,28 @@ class WaterfallResolver:
         meta = await self.pubmed.fetch_abstract(ids)
         if (not meta or not meta.abstract) and ids.doi:
             meta = await self.crossref.fetch_metadata(ids.doi)
+        if (not meta or not meta.abstract) and ids.arxiv:
+            arxiv_meta = await self.arxiv.fetch_metadata(ids.arxiv)
+            if arxiv_meta is not None:
+                meta = arxiv_meta
+
+        # Enrich with OpenAlex citation counts / OA URLs / institutions
+        if self.settings.enable_openalex and ids.doi:
+            if meta is None or meta.citation_count is None:
+                enriched = await self.openalex.fetch_metadata(ids.doi)
+                if enriched:
+                    if meta is None:
+                        meta = enriched
+                    else:
+                        meta.citation_count = enriched.citation_count
+                        if enriched.oa_url:
+                            meta.oa_url = enriched.oa_url
+                        if not meta.institutions:
+                            meta.institutions = enriched.institutions
+                        if not meta.abstract and enriched.abstract:
+                            meta.abstract = enriched.abstract
+                        if meta.oa_status in ("", "unknown") and enriched.oa_status != "unknown":
+                            meta.oa_status = enriched.oa_status
         return meta
 
     async def fetch_pdf_bytes(self, ids: IdentifierMap) -> tuple[bytes | None, str | None]:
@@ -92,6 +120,17 @@ class WaterfallResolver:
                             b = await self.http_client.get_bytes(pdf_url)
                             if b:
                                 return b, "unpaywall"
+            except Exception:
+                pass
+
+        # Try arXiv when an arXiv ID is known (free, fast, legal)
+        if ids.arxiv:
+            try:
+                b = await self.http_client.get_bytes(f"{ARXIV_PDF}/{ids.arxiv}")
+                # arXiv answers 200 with an HTML placeholder while a PDF is still
+                # being generated; never hand that to the caller as a PDF.
+                if b and b.startswith(b"%PDF-"):
+                    return b, "arxiv"
             except Exception:
                 pass
 
@@ -122,7 +161,7 @@ class WaterfallResolver:
             )
 
         # Plan tiers
-        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. Sci-Hub -> 5. Abstract fallback
+        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. arXiv -> 5. Sci-Hub -> 6. Abstract fallback
         tiers_plan = [
             ("europepmc", self.europe_pmc, None),
             ("pmc", self.pmc, None),
@@ -133,6 +172,9 @@ class WaterfallResolver:
         if self.settings.prefer_scihub_over_unpaywall and self.settings.enable_scihub:
             unpaywall_skip = "PREFER_SCIHUB_OVER_UNPAYWALL"
         tiers_plan.append(("unpaywall", self.unpaywall, unpaywall_skip))
+
+        # arXiv: runs only when an arXiv ID is known (provider self-skips otherwise)
+        tiers_plan.append(("arxiv", self.arxiv, None))
 
         # Sci-Hub skip checks
         scihub_skip = None
@@ -361,6 +403,17 @@ class WaterfallResolver:
                 year_start=year_start,
                 year_end=year_end,
             )
+        elif source_mode in ("s2", "semanticscholar"):
+            if not self.settings.enable_s2:
+                return []
+            papers = await self.s2.search(
+                query,
+                num_results=limit,
+                author=author,
+                journal=journal,
+                year_start=year_start,
+                year_end=year_end,
+            )
         else:  # auto
             # 1. Query PubMed for num_results
             papers = await self.pubmed.search(
@@ -427,7 +480,12 @@ class WaterfallResolver:
         limit: int = 50,
     ) -> list[CitationItem]:
         ids = await self.resolve_ids(identifier)
-        return await self.europe_pmc.fetch_citations(ids, limit=limit)
+        cits = await self.europe_pmc.fetch_citations(ids, limit=limit)
+        if cits:
+            return cits
+        if self.settings.enable_openalex and ids.doi:
+            return await self.openalex.fetch_citations(ids.doi, limit=limit)
+        return []
 
     async def get_related_papers(
         self,
@@ -441,8 +499,20 @@ class WaterfallResolver:
             if meta and meta.pmid:
                 pmid = meta.pmid
 
-        if not pmid:
-            return []
+        if pmid:
+            related = await self.pubmed.fetch_related_papers(pmid, limit=limit)
+            if related:
+                return related
 
-        return await self.pubmed.fetch_related_papers(pmid, limit=limit)
+        # Fallback: S2 recommendations by DOI or arXiv (covers non-biomed)
+        if self.settings.enable_s2:
+            paper_id = None
+            if ids.doi:
+                paper_id = f"DOI:{ids.doi}"
+            elif ids.arxiv:
+                paper_id = f"ARXIV:{ids.arxiv}"
+            if paper_id:
+                return await self.s2.fetch_recommendations(paper_id, limit=limit)
+
+        return []
 

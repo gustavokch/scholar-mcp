@@ -14,6 +14,12 @@ PMCID_RE = re.compile(r"^(?:pmcid:\s*)?(PMC\d+)$", re.IGNORECASE)
 PMID_RE = re.compile(r"^(?:pmid:\s*)?(\d+)$", re.IGNORECASE)
 DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
 DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
+ARXIV_NEW_RE = re.compile(r"^(?:arxiv:\s*)?(\d{4}\.\d{4,5})(v\d+)?$", re.IGNORECASE)
+ARXIV_OLD_RE = re.compile(r"^(?:arxiv:\s*)?([a-z-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$", re.IGNORECASE)
+ARXIV_URL_RE = re.compile(
+    r"arxiv\.org/(?:abs|pdf|html)/([a-z0-9.\-/]+?)(v\d+)?(?:\.pdf)?$", re.IGNORECASE
+)
+ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
 
 
 def clean_identifier(raw: str) -> tuple[str, str]:
@@ -37,7 +43,19 @@ def clean_identifier(raw: str) -> tuple[str, str]:
     if m_pmid:
         return "pmid", m_pmid.group(1)
 
-    # 4. Fallback to Title
+    # 4. arXiv check (URL, new-style, old-style)
+    # Drop any query string, fragment, and trailing slash so the URL pattern,
+    # which is end-anchored, still sees the bare identifier.
+    url_part = s.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    m_url = ARXIV_URL_RE.search(url_part)
+    if m_url:
+        return "arxiv", f"{m_url.group(1).strip()}{m_url.group(2) or ''}"
+    for rx in (ARXIV_NEW_RE, ARXIV_OLD_RE):
+        m_arxiv = rx.match(s)
+        if m_arxiv:
+            return "arxiv", f"{m_arxiv.group(1)}{m_arxiv.group(2) or ''}"
+
+    # 5. Fallback to Title
     return "title", s
 
 
@@ -62,6 +80,13 @@ async def resolve_identifiers(
         id_map.pmcid = cleaned
     elif id_type == "doi":
         id_map.doi = cleaned
+        m_arxiv_doi = ARXIV_DOI_RE.match(cleaned)
+        if m_arxiv_doi:
+            id_map.arxiv = m_arxiv_doi.group(1)
+    elif id_type == "arxiv":
+        id_map.arxiv = cleaned
+        base = re.sub(r"v\d+$", "", cleaned)
+        id_map.doi = f"10.48550/arXiv.{base}"
     elif id_type == "title":
         id_map.title = cleaned
 
@@ -123,6 +148,8 @@ async def resolve_identifiers(
         keys_to_cache.add(f"idmap:{id_map.pmid.lower()}")
     if id_map.pmcid:
         keys_to_cache.add(f"idmap:{id_map.pmcid.lower()}")
+    if id_map.arxiv:
+        keys_to_cache.add(f"idmap:{id_map.arxiv.lower()}")
 
     for k in keys_to_cache:
         await cache.set(k, id_map)
