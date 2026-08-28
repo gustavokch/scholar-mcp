@@ -3,6 +3,7 @@ import pytest
 import respx
 
 from scholar_mcp.config import Settings
+from scholar_mcp.models import IdentifierMap
 from scholar_mcp.providers.openalex import OPENALEX_BASE, OpenAlexProvider
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -82,6 +83,33 @@ async def test_openalex_handles_missing_work(client):
     provider = OpenAlexProvider(client, email="me@example.com")
     assert await provider.fetch_metadata("10.1038/nature123") is None
     assert await provider.fetch_citations("10.1038/nature123", limit=10) == []
+
+
+@respx.mock
+async def test_openalex_enrichment_keeps_existing_oa_url():
+    """A closed OpenAlex record must not erase an oa_url found by an earlier provider."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.models import PaperMetadata
+    from scholar_mcp.resolver import WaterfallResolver
+
+    closed_work = dict(WORK_JSON, open_access={"is_oa": False, "oa_url": None})
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works/https://doi.org/").mock(
+        return_value=httpx.Response(200, json=closed_work)
+    )
+    resolver = WaterfallResolver(settings=Settings())
+    resolver.pubmed.fetch_abstract = AsyncMock(
+        return_value=PaperMetadata(
+            title="Existing",
+            abstract="An abstract.",
+            oa_url="https://existing.example/paper.pdf",
+        )
+    )
+    meta = await resolver.fetch_abstract(IdentifierMap(doi="10.1038/nature123"))
+    assert meta is not None
+    assert meta.citation_count == 42  # enrichment still applied
+    assert meta.oa_url == "https://existing.example/paper.pdf"
+    await resolver.http_client.aclose()
 
 
 @respx.mock

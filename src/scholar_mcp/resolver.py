@@ -93,7 +93,8 @@ class WaterfallResolver:
                         meta = enriched
                     else:
                         meta.citation_count = enriched.citation_count
-                        meta.oa_url = enriched.oa_url
+                        if enriched.oa_url:
+                            meta.oa_url = enriched.oa_url
                         if not meta.institutions:
                             meta.institutions = enriched.institutions
                         if not meta.abstract and enriched.abstract:
