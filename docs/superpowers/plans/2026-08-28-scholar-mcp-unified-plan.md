@@ -833,7 +833,7 @@ best-effort hit. Compare the returned `score` against `settings.title_match_thre
 `match_score`. Below threshold, set `ambiguous=True` and leave `doi` unset so the resolver can
 return `status="ambiguous_match"` instead of silently fetching the wrong paper.
 
-- [ ] **Step 1: Write the failing test for identifier resolution**
+- [x] **Step 1: Write the failing test for identifier resolution**
 
 ```python
 # tests/test_identifiers.py
@@ -948,12 +948,12 @@ async def test_resolution_survives_upstream_failure():
     await client.aclose()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_identifiers.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `scholar_mcp/identifiers.py`**
+- [x] **Step 3: Implement `scholar_mcp/identifiers.py`**
 
 Regex detection order matters: PMCID (`PMC\d+`) before DOI before bare-digit PMID; anything else
 is a title. Normalize DOIs by stripping `doi:`, `https://doi.org/`, and trailing punctuation, and
@@ -962,12 +962,12 @@ then any known PMID/PMCID/DOI is expanded through NCBI `idconv`. Cache the resul
 `IdentifierMap` under every identifier it contains. Never raise: on upstream failure return an
 `IdentifierMap` populated with whatever the caller supplied.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_identifiers.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/identifiers.py tests/test_identifiers.py
