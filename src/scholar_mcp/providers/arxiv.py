@@ -12,6 +12,9 @@ ARXIV_ABS = "https://arxiv.org/abs"
 ATOM_NS = "http://www.w3.org/2005/Atom"
 ARXIV_NS = "http://arxiv.org/schemas/atom"
 
+# Hardened against XXE / entity-expansion: no entities, no DTD, no network.
+_XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+
 
 def _text(entry: etree._Element, tag: str, ns: str = ATOM_NS) -> str:
     el = entry.find(f"{{{ns}}}{tag}")
@@ -57,7 +60,7 @@ class ArxivProvider(BaseProvider):
             resp = await self.http_client.get(ARXIV_API, params={"id_list": arxiv_id})
             if resp is None or resp.status_code != 200:
                 return None
-            root = etree.fromstring(resp.content)
+            root = etree.fromstring(resp.content, parser=_XML_PARSER)
             entry = root.find(f"{{{ATOM_NS}}}entry")
             if entry is None:
                 return None
