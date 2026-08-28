@@ -1,172 +1,159 @@
-# scihub-mcp
+# scholar-mcp
 
-MCP server for searching and downloading academic papers via Sci-Hub, with metadata enrichment from CrossRef.
+Unified academic paper discovery and multi-tier waterfall full-text retrieval MCP server for AI assistants, research agents, and Claude Desktop.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/github/license/w8s/scihub-mcp)
+![License](https://img.shields.io/github/license/w8s/scholar-mcp)
 
-## Features
+---
 
-- 🔍 **Search by keyword, title, or DOI** — powered by CrossRef discovery
-- 📋 **Rich metadata** — title, authors, year, abstract, and venue returned automatically
-- 📄 **PDF retrieval** — fetches available PDFs across multiple Sci-Hub mirrors
-- ⚡ **Async throughout** — non-blocking tool calls via FastMCP
-- 🧩 **Clean package structure** — `src/` layout, PEP 8 compliant, no legacy cruft
+## What is scholar-mcp?
+
+`scholar-mcp` gives LLMs and AI agents structured access to scientific literature. It unifies PubMed discovery and CrossRef metadata with a 5-tier waterfall resolver that converts full-text academic papers into token-efficient, clean Markdown with citation noise and XML artifacts removed.
+
+### 5-Tier Waterfall Resolver
+
+When resolving paper full text from a DOI, PMID, PMCID, or title, `scholar-mcp` traverses:
+
+1. **Europe PMC** — Direct JATS XML full-text extraction to clean Markdown.
+2. **PubMed Central (PMC)** — NCBI E-utilities JATS XML retrieval to clean Markdown.
+3. **Unpaywall** — Open-access PDF discovery and in-memory text extraction (requires email).
+4. **Sci-Hub** — Multi-mirror failover and in-memory PDF text extraction.
+5. **Abstract Fallback** — PubMed and CrossRef structured abstract and metadata if full text is unavailable.
+
+---
 
 ## Quick Start
 
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+### Claude Desktop Configuration
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
 ```json
 {
   "mcpServers": {
-    "sci-hub": {
+    "scholar": {
       "command": "uvx",
-      "args": ["scihub-mcp"]
+      "args": ["scholar-mcp"],
+      "env": {
+        "UNPAYWALL_EMAIL": "your-email@example.com",
+        "PUBMED_EMAIL": "your-email@example.com"
+      }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The following tools will be available:
+---
 
-- `search_scihub_by_keyword` — find papers by topic
-- `search_scihub_by_title` — resolve a title to a PDF
-- `search_scihub_by_doi` — look up a specific paper
-- `download_scihub_pdf` — save a PDF to disk
+## Migration from `scihub-mcp` (v0.4.0)
 
-## Installation
+`scholar-mcp` is a complete rewrite and superset of `scihub-mcp`.
 
-### Requirements
+| `scihub-mcp` (Old) | `scholar-mcp` (New) |
+|---|---|
+| Command: `uvx scihub-mcp` | Command: `uvx scholar-mcp` |
+| `search_scihub_by_keyword` | `search_papers(query, source="auto")` |
+| `search_scihub_by_title` | `get_full_text(title)` or `get_metadata(title)` |
+| `search_scihub_by_doi` | `get_full_text(doi)` or `get_metadata(doi)` |
+| `download_scihub_pdf` | `download_paper(identifier, output_path)` |
+| Env var: `FORCE_SCIHUB` | Env var: `PREFER_SCIHUB_OVER_UNPAYWALL` |
 
-- Python 3.10+
-- [`uv`](https://docs.astral.sh/uv/) or `pip`
-- Claude Desktop (or any MCP-compatible client)
+---
 
-### Via uvx (recommended — no local install needed)
+## Tools
 
-```bash
-uvx scihub-mcp
-```
+### 1. `search_papers`
+Search academic papers across PubMed and CrossRef with structured filters and Europe PMC Open Access annotation.
 
-### Via pip
-
-```bash
-pip install scihub-mcp
-```
-
-### Local development
-
-```bash
-git clone https://github.com/w8s/scihub-mcp
-cd scihub-mcp
-uv venv --python 3.12
-uv pip install -e . --only-binary cryptography
-```
-
-Point your Claude Desktop config at the local server:
-
-```json
-{
-  "mcpServers": {
-    "sci-hub": {
-      "command": "/path/to/scihub-mcp/.venv/bin/python3",
-      "args": ["/path/to/scihub-mcp/src/scihub_mcp/server.py"]
-    }
-  }
-}
-```
-
-## Usage
-
-### Search by keyword
-
-```
-search_scihub_by_keyword("dopamine ADHD executive function", num_results=5)
-```
-
-Returns: list of papers with `title`, `author`, `year`, `abstract`, `venue`, `doi`, `pdf_url`, `mirror`, `status`.
-
-### Search by title
-
-```
-search_scihub_by_title("Attention and Effort")
-```
-
-Resolves the title via CrossRef, then retrieves from Sci-Hub. Returns same fields as keyword search.
-
-### Search by DOI
-
-```
-search_scihub_by_doi("10.1038/nature09492")
-```
-
-Direct lookup. Fastest when you already have the DOI.
-
-### Download a PDF
-
-```
-download_scihub_pdf(
-  pdf_url="https://sci.bban.top/pdf/10.1038/nature09492.pdf",
-  output_path="/Users/you/papers/nature09492.pdf"
+```python
+search_papers(
+    query="crispr cas9 off target effects",
+    source="auto",      # "auto" (PubMed + CrossRef top-up), "pubmed", or "crossref"
+    num_results=10,     # Max 50
+    year_start=2020,
+    year_end=2024,
+    author="Doudna J",
+    journal="Nature",
 )
 ```
 
-`pdf_url` comes from any of the search tools above.
+### 2. `get_full_text`
+Retrieve full text using the 5-tier waterfall resolver, converted to clean Markdown.
 
-## Configuration
-
-No environment variables required. The server uses public CrossRef and Sci-Hub mirror endpoints by default.
-
-**Sci-Hub mirrors** (tried in order, first success wins):
-
-```
-https://sci-hub.hkvisa.net
-https://sci-hub.mksa.top
-https://sci-hub.ren
-https://sci-hub.se
-https://sci-hub.st
-https://sci-hub.ee
+```python
+get_full_text(
+    identifier="10.1038/s41586-020-2003-7", # DOI, PMID, PMCID, or Title
+    max_chars=50000,                         # Optional token budget cap
+    sections=["Methods", "Results"],         # Optional section filter
+)
 ```
 
-Mirror availability varies. If searches return empty results, the DOI may not be available on current mirrors — try a different paper or check mirror status manually.
+### 3. `get_full_text_batch`
+Concurrent full-text retrieval for up to 25 papers with bounded concurrency.
 
-## Project Structure
-
-```
-scihub-mcp/
-├── src/
-│   └── scihub_mcp/
-│       ├── __init__.py   # version
-│       ├── server.py     # MCP tool definitions (FastMCP)
-│       └── search.py     # CrossRef + Sci-Hub retrieval logic
-├── pyproject.toml
-└── README.md
+```python
+get_full_text_batch(
+    identifiers=["32000000", "PMC7000000", "10.1038/nature123"]
+)
 ```
 
-## Limitations
+### 4. `get_metadata`
+Fast metadata and abstract retrieval without executing the full-text waterfall.
 
-- **Coverage**: Sci-Hub mirrors do not host every paper. Older, highly-cited papers have the best availability.
-- **Abstracts**: CrossRef does not provide abstracts for all records. Newer structured metadata is more complete.
-- **Mirror stability**: Sci-Hub mirrors change over time. If all mirrors fail, the tool returns `status: not_found`.
-- **Legal**: Access to Sci-Hub may be restricted or illegal in some jurisdictions. Use responsibly and in accordance with local law.
+```python
+get_metadata(identifier="32000000")
+```
 
-## Contributing
+### 5. `download_paper`
+Download the PDF of a paper into the sandboxed download directory.
 
-Issues and PRs welcome. Please:
+```python
+download_paper(
+    identifier="10.1038/s41586-020-2003-7",
+    output_path="nature_paper.pdf",
+    overwrite=False,
+)
+```
 
-1. Follow the existing code style (`src/` layout, PEP 8, double quotes, type hints)
-2. Keep `search.py` and `server.py` separated — logic vs. MCP interface
-3. Test against at least one known-good DOI before submitting
+### 6. `deep_paper_analysis_prompt` & `@mcp.prompt("deep_paper_analysis")`
+Constructs a structured prompt template containing the full text for comprehensive scientific analysis.
+
+```python
+deep_paper_analysis_prompt(identifier="10.1038/s41586-020-2003-7")
+```
+
+---
+
+## Configuration Options
+
+All options are configured via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `UNPAYWALL_EMAIL` | None | Email address required to enable the Unpaywall tier. |
+| `PUBMED_EMAIL` | None | Email sent in NCBI and CrossRef polite pool headers. |
+| `PUBMED_API_KEY` | None | NCBI API key (raises rate limit from 3 rps to 10 rps). |
+| `PUBMED_TOOL` | `ScholarMCP` | Tool identifier sent to NCBI E-utilities. |
+| `ENABLE_SCIHUB` | `true` | Master switch for Sci-Hub tier. `false` disables Sci-Hub. |
+| `PREFER_SCIHUB_OVER_UNPAYWALL` | `false` | When `true`, tries Sci-Hub before Unpaywall. |
+| `SCIHUB_MIRRORS` | Built-in list | Comma-separated list of Sci-Hub mirror base URLs. |
+| `SCHOLAR_DOWNLOAD_DIR` | `./downloads` | Root directory sandbox for `download_paper`. |
+| `SCHOLAR_MAX_CHARS` | `50000` | Default character limit for full-text responses. |
+| `SCHOLAR_TOTAL_BUDGET` | `45` | Total wall-clock budget (seconds) per full-text call. |
+| `SCHOLAR_MAX_CONCURRENCY` | `5` | Semaphore limit for concurrent batch requests. |
+| `SCHOLAR_CACHE_TTL` | `3600` | Cache time-to-live in seconds for IDs and metadata. |
+| `SCHOLAR_TITLE_MATCH_THRESHOLD` | `80.0` | CrossRef minimum score for resolving title queries. |
+
+---
 
 ## Acknowledgments
 
-The core Sci-Hub scraping logic (`_extract_pdf_url`, `_fetch_from_scihub`, mirror failover) is derived from [CyberKrypton/Sci-Hub-MCP-Server](https://github.com/CyberKrypton/Sci-Hub-MCP-Server), which replaced the broken `scihub` PyPI package with direct `requests` + `BeautifulSoup` parsing.
+- PubMed search integration logic ported from [JackKuo666/PubMed-MCP-Server](https://github.com/JackKuo666/PubMed-MCP-Server) (MIT, Copyright (c) 2025 JackKuo666).
+- Sci-Hub scraping and failover logic derived from [CyberKrypton/Sci-Hub-MCP-Server](https://github.com/CyberKrypton/Sci-Hub-MCP-Server) and [JackKuo666/Sci-Hub-MCP-Server](https://github.com/JackKuo666/Sci-Hub-MCP-Server).
 
-Also inspired by [JackKuo666/Sci-Hub-MCP-Server](https://github.com/JackKuo666/Sci-Hub-MCP-Server), the original MCP server in this space.
-
-This fork adds CrossRef metadata enrichment (title, author, year, abstract, venue), a `src/` package structure for proper uvx compatibility, and fixes the missing `main()` entry point.
+---
 
 ## License
 
-MIT
+MIT License.

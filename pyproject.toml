@@ -1,7 +1,7 @@
 [project]
-name = "scihub-mcp"
-version = "0.4.0"
-description = "MCP server for searching and downloading academic papers via Sci-Hub, with CrossRef metadata enrichment"
+name = "scholar-mcp"
+version = "1.0.0"
+description = "Unified academic discovery and multi-tier waterfall full-text MCP server with clean Markdown extraction"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -15,24 +15,35 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
 ]
 dependencies = [
-    "requests>=2.31.0",
-    "urllib3>=2.0.0",
-    "beautifulsoup4>=4.12.0",
     "fastmcp>=3.0.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "pypdf>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.21.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/w8s/scihub-mcp"
-Repository = "https://github.com/w8s/scihub-mcp"
-Changelog = "https://github.com/w8s/scihub-mcp/blob/main/CHANGELOG.md"
-Issues = "https://github.com/w8s/scihub-mcp/issues"
+Homepage = "https://github.com/w8s/scholar-mcp"
+Repository = "https://github.com/w8s/scholar-mcp"
+Changelog = "https://github.com/w8s/scholar-mcp/blob/main/CHANGELOG.md"
+Issues = "https://github.com/w8s/scholar-mcp/issues"
 
 [project.scripts]
-scihub-mcp = "scihub_mcp.server:main"
+scholar-mcp = "scholar_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/scihub_mcp"]
+packages = ["src/scholar_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
