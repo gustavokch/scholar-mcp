@@ -66,10 +66,10 @@ async def get_full_text(
 ) -> dict[str, Any]:
     """Retrieve full text of an academic paper using multi-tier waterfall resolution.
 
-    Tiers: Europe PMC -> PMC -> Unpaywall -> Sci-Hub -> Abstract fallback.
+    Tiers: Europe PMC -> PMC -> Unpaywall -> arXiv -> Sci-Hub -> Abstract fallback.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
         max_chars: Maximum character limit for output (defaults to 50,000).
         sections: List of section names to extract (e.g. ['Methods', 'Results']).
     """
@@ -96,7 +96,7 @@ async def get_full_text_batch(
     """Retrieve full-text summaries for up to 25 papers concurrently.
 
     Args:
-        identifiers: List of DOIs, PMIDs, PMCIDs, or paper titles (max 25).
+        identifiers: List of DOIs, PMIDs, PMCIDs, arXiv IDs, or paper titles (max 25).
     """
     if len(identifiers) > 25:
         return [
@@ -129,7 +129,7 @@ async def get_metadata(
     """Retrieve paper metadata and abstract without running the multi-tier full-text waterfall.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
     """
     try:
         meta = await resolver.get_metadata(identifier)
@@ -155,7 +155,7 @@ async def download_paper(
     """Download the PDF of a paper into the configured download directory sandbox.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
         output_path: Relative path inside the download directory to save the PDF.
         overwrite: Whether to overwrite existing files (default False).
     """
@@ -182,7 +182,7 @@ async def deep_paper_analysis_prompt(
     """Generate a structured analysis prompt loaded with the resolved paper full text.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
     """
     try:
         resp = await resolver.resolve_full_text(identifier)
@@ -227,7 +227,7 @@ async def get_references(
     """Retrieve bibliography and cited references for an academic paper.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
         limit: Maximum number of references to return (max 100).
     """
     clamped_limit = min(max(1, limit), 100)
@@ -246,7 +246,7 @@ async def get_citations(
     """Retrieve forward citations (papers that cited this paper).
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
         limit: Maximum number of citing papers to return (max 100).
     """
     clamped_limit = min(max(1, limit), 100)
@@ -265,7 +265,7 @@ async def get_related_papers(
     """Retrieve computationally related and similar papers via PubMed / Europe PMC.
 
     Args:
-        identifier: DOI, PMID, PMCID, or paper title.
+        identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
         limit: Maximum number of related papers to return (max 25).
     """
     clamped_limit = min(max(1, limit), 25)

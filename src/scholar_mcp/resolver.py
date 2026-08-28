@@ -18,6 +18,7 @@ from scholar_mcp.models import (
 )
 
 from scholar_mcp.parsers.jats import list_sections, select_sections
+from scholar_mcp.providers.arxiv import ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
 from scholar_mcp.providers.pmc import PMCProvider
@@ -61,6 +62,7 @@ class WaterfallResolver:
         )
         self.europe_pmc = EuropePMCProvider(self.http_client)
         self.pmc = PMCProvider(self.http_client)
+        self.arxiv = ArxivProvider(self.http_client)
         self.unpaywall = UnpaywallProvider(self.http_client, email=self.settings.unpaywall_email)
         self.scihub = SciHubProvider(self.http_client, mirrors=self.settings.scihub_mirrors)
         self.pubmed = PubMedProvider(self.http_client, self.settings)
@@ -73,6 +75,10 @@ class WaterfallResolver:
         meta = await self.pubmed.fetch_abstract(ids)
         if (not meta or not meta.abstract) and ids.doi:
             meta = await self.crossref.fetch_metadata(ids.doi)
+        if (not meta or not meta.abstract) and ids.arxiv:
+            arxiv_meta = await self.arxiv.fetch_metadata(ids.arxiv)
+            if arxiv_meta is not None:
+                meta = arxiv_meta
         return meta
 
     async def fetch_pdf_bytes(self, ids: IdentifierMap) -> tuple[bytes | None, str | None]:
@@ -94,6 +100,12 @@ class WaterfallResolver:
                                 return b, "unpaywall"
             except Exception:
                 pass
+
+        # Try arXiv when an arXiv ID is known (free, fast, legal)
+        if ids.arxiv:
+            b = await self.http_client.get_bytes(f"https://export.arxiv.org/pdf/{ids.arxiv}")
+            if b:
+                return b, "arxiv"
 
         # Try Sci-Hub if enabled
         if self.settings.scihub_tier_enabled() and ids.doi:
@@ -122,7 +134,7 @@ class WaterfallResolver:
             )
 
         # Plan tiers
-        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. Sci-Hub -> 5. Abstract fallback
+        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. arXiv -> 5. Sci-Hub -> 6. Abstract fallback
         tiers_plan = [
             ("europepmc", self.europe_pmc, None),
             ("pmc", self.pmc, None),
@@ -133,6 +145,9 @@ class WaterfallResolver:
         if self.settings.prefer_scihub_over_unpaywall and self.settings.enable_scihub:
             unpaywall_skip = "PREFER_SCIHUB_OVER_UNPAYWALL"
         tiers_plan.append(("unpaywall", self.unpaywall, unpaywall_skip))
+
+        # arXiv: runs only when an arXiv ID is known (provider self-skips otherwise)
+        tiers_plan.append(("arxiv", self.arxiv, None))
 
         # Sci-Hub skip checks
         scihub_skip = None
