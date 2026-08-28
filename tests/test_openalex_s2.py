@@ -5,6 +5,7 @@ import respx
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap
 from scholar_mcp.providers.openalex import OPENALEX_BASE, OpenAlexProvider
+from scholar_mcp.providers.semantic_scholar import S2_BASE, S2_RECS_BASE, SemanticScholarProvider
 from scholar_mcp.utils.http import AsyncHttpClient
 
 WORK_URL = f"{OPENALEX_BASE}/works/https://doi.org/10.1038/nature123"
@@ -133,8 +134,6 @@ async def test_resolver_get_citations_falls_back_to_openalex():
     await resolver.http_client.aclose()
 
 
-from scholar_mcp.providers.semantic_scholar import S2_BASE, SemanticScholarProvider
-
 S2_SEARCH_JSON = {
     "data": [
         {
@@ -221,12 +220,34 @@ async def test_s2_search_post_filters_author_and_journal(client):
 
 
 @respx.mock
-async def test_s2_errors_return_empty(client):
+async def test_s2_empty_result_set_returns_empty(client):
     respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
         return_value=httpx.Response(200, json={"data": []})
     )
     provider = SemanticScholarProvider(client, api_key=None)
     assert await provider.search("nothing", num_results=5) == []
+
+
+@respx.mock
+async def test_s2_upstream_error_returns_empty(client):
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(500)
+    )
+    respx.get(url__startswith=f"{S2_RECS_BASE}/papers/forpaper/").mock(
+        return_value=httpx.Response(500)
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+    assert await provider.search("boom", num_results=5) == []
+    assert await provider.fetch_recommendations("DOI:10.1038/x", limit=5) == []
+
+
+@respx.mock
+async def test_s2_malformed_payload_returns_empty(client):
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, text="not json")
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+    assert await provider.search("bad", num_results=5) == []
 
 
 @respx.mock

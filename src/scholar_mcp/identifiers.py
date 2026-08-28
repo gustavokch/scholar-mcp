@@ -44,12 +44,12 @@ def clean_identifier(raw: str) -> tuple[str, str]:
         return "pmid", m_pmid.group(1)
 
     # 4. arXiv check (URL, new-style, old-style)
-    m_url = ARXIV_URL_RE.search(s)
+    # Drop any query string, fragment, and trailing slash so the URL pattern,
+    # which is end-anchored, still sees the bare identifier.
+    url_part = s.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    m_url = ARXIV_URL_RE.search(url_part)
     if m_url:
-        base = m_url.group(1).strip()
-        if base.lower().endswith(".pdf"):
-            base = base[:-4]
-        return "arxiv", f"{base}{m_url.group(2) or ''}"
+        return "arxiv", f"{m_url.group(1).strip()}{m_url.group(2) or ''}"
     for rx in (ARXIV_NEW_RE, ARXIV_OLD_RE):
         m_arxiv = rx.match(s)
         if m_arxiv:

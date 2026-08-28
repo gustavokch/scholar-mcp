@@ -115,6 +115,12 @@ def test_clean_identifier_detects_arxiv():
     assert clean_identifier("arxiv:hep-th/9901001") == ("arxiv", "hep-th/9901001")
     assert clean_identifier("https://arxiv.org/abs/2305.18290") == ("arxiv", "2305.18290")
     assert clean_identifier("https://arxiv.org/pdf/2305.18290v3.pdf") == ("arxiv", "2305.18290v3")
+    assert clean_identifier("https://arxiv.org/abs/2305.18290/") == ("arxiv", "2305.18290")
+    assert clean_identifier("https://arxiv.org/abs/2305.18290?context=cs.CL") == (
+        "arxiv",
+        "2305.18290",
+    )
+    assert clean_identifier("https://arxiv.org/abs/hep-th/9901001") == ("arxiv", "hep-th/9901001")
     # No false positives
     assert clean_identifier("34567890") == ("pmid", "34567890")
     assert clean_identifier("10.1038/s41586-020-2003-7")[0] == "doi"

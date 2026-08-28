@@ -122,13 +122,19 @@ def test_settings_openalex_mailto_fallback(monkeypatch):
     assert s.openalex_email == "pubmed@example.com"
 
 
-def test_s2_rate_limit_depends_on_api_key(monkeypatch):
+async def test_s2_rate_limit_depends_on_api_key(monkeypatch):
     from scholar_mcp.utils.http import AsyncHttpClient
 
     monkeypatch.delenv("S2_API_KEY", raising=False)
     c1 = AsyncHttpClient(settings=Settings.load(), max_retries=1)
-    assert c1._limiter_for("api.semanticscholar.org").rate_per_sec == 1.0
+    try:
+        assert c1._limiter_for("api.semanticscholar.org").rate_per_sec == 1.0
+    finally:
+        await c1.aclose()
 
     monkeypatch.setenv("S2_API_KEY", "k")
     c2 = AsyncHttpClient(settings=Settings.load(), max_retries=1)
-    assert c2._limiter_for("api.semanticscholar.org").rate_per_sec == 5.0
+    try:
+        assert c2._limiter_for("api.semanticscholar.org").rate_per_sec == 5.0
+    finally:
+        await c2.aclose()
