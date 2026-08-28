@@ -1,0 +1,235 @@
+from typing import Any
+
+from fastmcp import FastMCP
+
+from scholar_mcp.config import Settings
+from scholar_mcp.models import (
+    DownloadResult,
+    FullTextResponse,
+    FullTextSummary,
+    PaperMetadata,
+)
+from scholar_mcp.resolver import WaterfallResolver
+from scholar_mcp.utils.cache import TTLCache
+from scholar_mcp.utils.http import AsyncHttpClient
+
+settings = Settings.load()
+http_client = AsyncHttpClient(settings)
+cache = TTLCache(maxsize=settings.cache_size, ttl_seconds=settings.cache_ttl_seconds)
+resolver = WaterfallResolver(settings=settings, http_client=http_client, cache=cache)
+
+mcp = FastMCP("ScholarMCP")
+
+
+@mcp.tool()
+async def search_papers(
+    query: str,
+    source: str = "auto",
+    num_results: int = 10,
+    year_start: int | None = None,
+    year_end: int | None = None,
+    author: str | None = None,
+    journal: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search for academic papers across PubMed and CrossRef.
+
+    Args:
+        query: Search keywords or query string.
+        source: 'auto' (PubMed first, top up with CrossRef), 'pubmed', or 'crossref'.
+        num_results: Maximum number of results to return (max 50).
+        year_start: Filter papers published in or after this year.
+        year_end: Filter papers published in or before this year.
+        author: Filter by author name.
+        journal: Filter by journal name.
+    """
+    clamped_num = min(max(1, num_results), 50)
+    try:
+        results = await resolver.search(
+            query=query,
+            source=source,
+            num_results=clamped_num,
+            year_start=year_start,
+            year_end=year_end,
+            author=author,
+            journal=journal,
+        )
+        return [r.to_dict() for r in results]
+    except Exception as ex:
+        return [{"status": "error", "error": str(ex)}]
+
+
+@mcp.tool()
+async def get_full_text(
+    identifier: str,
+    max_chars: int | None = None,
+    sections: list[str] | None = None,
+) -> dict[str, Any]:
+    """Retrieve full text of an academic paper using multi-tier waterfall resolution.
+
+    Tiers: Europe PMC -> PMC -> Unpaywall -> Sci-Hub -> Abstract fallback.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+        max_chars: Maximum character limit for output (defaults to 50,000).
+        sections: List of section names to extract (e.g. ['Methods', 'Results']).
+    """
+    try:
+        resp = await resolver.resolve_full_text(
+            identifier=identifier,
+            max_chars=max_chars,
+            sections=sections,
+        )
+        return resp.to_dict()
+    except Exception as ex:
+        return {
+            "status": "error",
+            "source": "none",
+            "content": "",
+            "error": str(ex),
+        }
+
+
+@mcp.tool()
+async def get_full_text_batch(
+    identifiers: list[str],
+) -> list[dict[str, Any]]:
+    """Retrieve full-text summaries for up to 25 papers concurrently.
+
+    Args:
+        identifiers: List of DOIs, PMIDs, PMCIDs, or paper titles (max 25).
+    """
+    if len(identifiers) > 25:
+        return [
+            {
+                "identifier": "",
+                "status": "error",
+                "source": "none",
+                "error": "Batch size exceeds maximum limit of 25 identifiers",
+            }
+        ]
+
+    try:
+        summaries = await resolver.resolve_full_text_batch(identifiers)
+        return [s.to_dict() for s in summaries]
+    except Exception as ex:
+        return [
+            {
+                "identifier": "",
+                "status": "error",
+                "source": "none",
+                "error": str(ex),
+            }
+        ]
+
+
+@mcp.tool()
+async def get_metadata(
+    identifier: str,
+) -> dict[str, Any]:
+    """Retrieve paper metadata and abstract without running the multi-tier full-text waterfall.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+    """
+    try:
+        meta = await resolver.get_metadata(identifier)
+        if meta:
+            return meta.to_dict()
+        return {
+            "status": "not_found",
+            "error": f"Metadata not found for identifier: {identifier}",
+        }
+    except Exception as ex:
+        return {
+            "status": "error",
+            "error": str(ex),
+        }
+
+
+@mcp.tool()
+async def download_paper(
+    identifier: str,
+    output_path: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Download the PDF of a paper into the configured download directory sandbox.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+        output_path: Relative path inside the download directory to save the PDF.
+        overwrite: Whether to overwrite existing files (default False).
+    """
+    try:
+        res = await resolver.download_article(
+            identifier=identifier,
+            output_path=output_path,
+            overwrite=overwrite,
+        )
+        return res.to_dict()
+    except Exception as ex:
+        return {
+            "success": False,
+            "saved_path": output_path,
+            "source_used": "none",
+            "message": f"Download failed: {ex}",
+        }
+
+
+@mcp.tool()
+async def deep_paper_analysis_prompt(
+    identifier: str,
+) -> dict[str, Any]:
+    """Generate a structured analysis prompt loaded with the resolved paper full text.
+
+    Args:
+        identifier: DOI, PMID, PMCID, or paper title.
+    """
+    try:
+        resp = await resolver.resolve_full_text(identifier)
+        prompt_text = f"""Please perform a deep, rigorous scientific analysis of the following paper.
+
+Title: {resp.title}
+DOI: {resp.doi or 'N/A'}
+PMID: {resp.pmid or 'N/A'}
+PMCID: {resp.pmcid or 'N/A'}
+Source: {resp.source}
+
+--- PAPER CONTENT ---
+{resp.content}
+---------------------
+
+Please evaluate:
+1. Core thesis and primary research questions
+2. Experimental methodology, controls, and potential confounders
+3. Key quantitative findings and statistical robustness
+4. Strengths, critical limitations, and unaddressed questions
+5. Broader scientific implications and future directions
+"""
+        return {
+            "status": resp.status,
+            "source": resp.source,
+            "title": resp.title,
+            "analysis_prompt": prompt_text,
+        }
+    except Exception as ex:
+        return {
+            "status": "error",
+            "error": str(ex),
+            "analysis_prompt": "",
+        }
+
+
+@mcp.prompt("deep_paper_analysis")
+async def deep_paper_analysis(identifier: str) -> str:
+    """Prompt template for deep paper analysis."""
+    result = await deep_paper_analysis_prompt(identifier)
+    return result.get("analysis_prompt", "")
+
+
+def main() -> None:
+    """Server entrypoint."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1659,7 +1659,7 @@ git commit -m "feat: implement waterfall resolver with trace, budget, and downlo
 `num_results` is clamped to 50 and `identifiers` to 25 **at the tool boundary**, so a malformed LLM
 call returns a clear error rather than a stack trace.
 
-- [ ] **Step 1: Write the failing tests for the server tools**
+- [x] **Step 1: Write the failing tests for the server tools**
 
 ```python
 # tests/test_server_tools.py
@@ -1768,12 +1768,12 @@ def test_all_tools_registered():
         assert callable(getattr(srv, name)), f"{name} is not exposed by scholar_mcp.server"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_server_tools.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `src/scholar_mcp/server.py`**
+- [x] **Step 3: Implement `src/scholar_mcp/server.py`**
 
 Construct `Settings.load()`, one `AsyncHttpClient`, one `TTLCache`, and one `WaterfallResolver` at
 module scope so tests can monkeypatch `srv.resolver`. Every tool body is a thin `try/except` that
@@ -1784,12 +1784,12 @@ directly; there is no `asyncio.to_thread` bridge any more (D2).
 Docstrings are the tool descriptions the model reads, so state the identifier formats accepted,
 the `max_chars` default, and that `download_paper` writes only inside `SCHOLAR_DOWNLOAD_DIR`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_server_tools.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/server.py tests/test_server_tools.py
