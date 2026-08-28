@@ -18,6 +18,10 @@ class Settings:
     pubmed_email: str | None = None
     pubmed_tool: str = "ScholarMCP"
     unpaywall_email: str | None = None
+    s2_api_key: str | None = None
+    openalex_email: str | None = None
+    enable_openalex: bool = True
+    enable_s2: bool = True
     enable_scihub: bool = True
     prefer_scihub_over_unpaywall: bool = False
     scihub_mirrors: list[str] = field(default_factory=lambda: list(DEFAULT_SCIHUB_MIRRORS))
@@ -61,6 +65,12 @@ class Settings:
             pubmed_email=os.getenv("PUBMED_EMAIL"),
             pubmed_tool=os.getenv("PUBMED_TOOL", "ScholarMCP"),
             unpaywall_email=os.getenv("UNPAYWALL_EMAIL") or os.getenv("PUBMED_EMAIL"),
+            s2_api_key=os.getenv("S2_API_KEY"),
+            openalex_email=os.getenv("OPENALEX_MAILTO")
+            or os.getenv("UNPAYWALL_EMAIL")
+            or os.getenv("PUBMED_EMAIL"),
+            enable_openalex=_bool(os.getenv("ENABLE_OPENALEX"), True),
+            enable_s2=_bool(os.getenv("ENABLE_S2"), True),
             enable_scihub=_bool(os.getenv("ENABLE_SCIHUB"), True),
             prefer_scihub_over_unpaywall=_bool(
                 os.getenv("PREFER_SCIHUB_OVER_UNPAYWALL"), False

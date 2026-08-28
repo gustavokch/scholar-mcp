@@ -40,6 +40,9 @@ class AsyncHttpClient:
             if host not in self._limiters:
                 if host == "eutils.ncbi.nlm.nih.gov":
                     rate = self.settings.ncbi_rate_limit
+                elif host == "api.semanticscholar.org":
+                    # S2 shared pool without a key; dedicated quota with one.
+                    rate = 5.0 if self.settings.s2_api_key else 1.0
                 else:
                     rate = 10.0
                 self._limiters[host] = AsyncRateLimiter(rate_per_sec=rate)
