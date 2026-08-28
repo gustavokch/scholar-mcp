@@ -19,7 +19,7 @@ from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_stat
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.providers.scihub import SciHubProvider
-from scholar_mcp.providers.unpaywall import UnpaywallProvider
+from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE, UnpaywallProvider
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -75,8 +75,6 @@ class WaterfallResolver:
         # Try Unpaywall first if configured
         if self.settings.unpaywall_configured() and ids.doi:
             try:
-                from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE
-
                 resp = await self.http_client.get(
                     f"{UNPAYWALL_BASE}/{ids.doi.strip()}",
                     params={"email": self.settings.unpaywall_email},

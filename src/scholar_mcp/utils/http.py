@@ -1,5 +1,6 @@
 import asyncio
 import random
+import threading
 from typing import Any
 import urllib.parse
 
@@ -27,21 +28,22 @@ class AsyncHttpClient:
             timeout=float(self.settings.request_timeout),
             follow_redirects=True,
             headers={
-                "User-Agent": f"ScholarMCP/0.5.0 (mailto:{self.settings.pubmed_email or 'scholar-mcp@example.com'})"
+                "User-Agent": f"ScholarMCP/1.0.0 (mailto:{self.settings.pubmed_email or 'scholar-mcp@example.com'})"
             },
         )
         self._limiters: dict[str, AsyncRateLimiter] = {}
-        self._limiters_lock = asyncio.Lock()
+        self._limiters_lock = threading.Lock()
 
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
         host = host.lower()
-        if host not in self._limiters:
-            if host == "eutils.ncbi.nlm.nih.gov":
-                rate = self.settings.ncbi_rate_limit
-            else:
-                rate = 10.0
-            self._limiters[host] = AsyncRateLimiter(rate_per_sec=rate)
-        return self._limiters[host]
+        with self._limiters_lock:
+            if host not in self._limiters:
+                if host == "eutils.ncbi.nlm.nih.gov":
+                    rate = self.settings.ncbi_rate_limit
+                else:
+                    rate = 10.0
+                self._limiters[host] = AsyncRateLimiter(rate_per_sec=rate)
+            return self._limiters[host]
 
     def _inject_credentials(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)

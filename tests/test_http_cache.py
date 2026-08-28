@@ -89,3 +89,20 @@ async def test_ncbi_requests_are_rate_limited(monkeypatch):
     client = AsyncHttpClient(settings=Settings(pubmed_api_key=None))
     assert client._limiter_for("eutils.ncbi.nlm.nih.gov").rate_per_sec == 3.0
     await client.aclose()
+
+
+def test_http_client_user_agent_version():
+    client = AsyncHttpClient(settings=Settings(pubmed_email="author@example.com"))
+    ua = client.client.headers.get("User-Agent", "")
+    assert "ScholarMCP/1.0.0" in ua
+    assert "mailto:author@example.com" in ua
+
+
+async def test_limiters_concurrent_access():
+    client = AsyncHttpClient(settings=Settings())
+    limiters = await asyncio.gather(
+        *(asyncio.to_thread(client._limiter_for, "api.crossref.org") for _ in range(20))
+    )
+    assert len(set(id(lim) for lim in limiters)) == 1
+    await client.aclose()
+
