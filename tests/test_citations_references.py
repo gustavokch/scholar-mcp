@@ -78,3 +78,95 @@ async def test_crossref_fetch_references(client):
     assert refs[0].title == "CrossRef Cited Article"
     assert refs[0].doi == "10.1126/science.ref1"
     assert refs[0].authors == ["Lovelace A"]
+
+
+EPMC_CIT = "https://www.ebi.ac.uk/europepmc/webservices/rest/MED/12345/citations"
+ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
+ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+
+
+@respx.mock
+async def test_europe_pmc_fetch_citations(client):
+    respx.get(url__startswith=EPMC_CIT).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "citationList": {
+                    "citation": [
+                        {
+                            "title": "Citing Paper Alpha",
+                            "authorString": "Doe J",
+                            "pubYear": "2022",
+                            "journalTitle": "Cell",
+                            "doi": "10.1016/j.cell.2022.01",
+                            "pmid": "35000001",
+                            "citedByCount": 12,
+                        }
+                    ]
+                }
+            },
+        )
+    )
+    provider = EuropePMCProvider(client)
+    cits = await provider.fetch_citations(IdentifierMap(pmid="12345"), limit=10)
+    assert len(cits) == 1
+    assert cits[0].title == "Citing Paper Alpha"
+    assert cits[0].citation_count == 12
+    assert cits[0].doi == "10.1016/j.cell.2022.01"
+
+
+@respx.mock
+async def test_pubmed_fetch_related_papers(client):
+    respx.get(url__startswith=ELINK_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "linksets": [
+                    {
+                        "linksetdbs": [
+                            {
+                                "linkname": "pubmed_pubmed",
+                                "links": [
+                                    {"id": "31000001", "score": "95000000"},
+                                    {"id": "31000002", "score": "82000000"},
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+        )
+    )
+    respx.get(url__startswith=ESUMMARY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["31000001", "31000002"],
+                    "31000001": {
+                        "title": "Related Paper 1",
+                        "authors": [{"name": "Author One"}],
+                        "pubdate": "2021",
+                        "fulljournalname": "Genetics",
+                        "elocationid": "doi: 10.1000/1",
+                    },
+                    "31000002": {
+                        "title": "Related Paper 2",
+                        "authors": [{"name": "Author Two"}],
+                        "pubdate": "2021",
+                        "fulljournalname": "Genomics",
+                        "elocationid": "doi: 10.1000/2",
+                    },
+                }
+            },
+        )
+    )
+    from scholar_mcp.providers.pubmed import PubMedProvider
+
+    provider = PubMedProvider(client, Settings())
+    related = await provider.fetch_related_papers("12345", limit=2)
+    assert len(related) == 2
+    assert related[0].title == "Related Paper 1"
+    assert related[0].score == 95.0
+    assert related[0].doi == "10.1000/1"
+
