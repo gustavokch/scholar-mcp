@@ -205,3 +205,51 @@ async def test_pubmed_fetch_related_papers(client):
     assert related[0].score == 95.0
     assert related[0].doi == "10.1000/1"
 
+
+@respx.mock
+async def test_pubmed_fetch_related_papers_none_id(client):
+    respx.get(url__startswith=ELINK_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "linksets": [
+                    {
+                        "linksetdbs": [
+                            {
+                                "linkname": "pubmed_pubmed",
+                                "links": [
+                                    {"id": None, "score": "50000000"},
+                                    {"id": "12345", "score": "100000000"},
+                                    {"id": "31000003", "score": "75000000"},
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+        )
+    )
+    respx.get(url__startswith=ESUMMARY_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["31000003"],
+                    "31000003": {
+                        "title": "Related Paper 3",
+                        "authors": [{"name": "Author Three"}],
+                        "pubdate": "2023",
+                    },
+                }
+            },
+        )
+    )
+    from scholar_mcp.providers.pubmed import PubMedProvider
+
+    provider = PubMedProvider(client, Settings())
+    related = await provider.fetch_related_papers("12345", limit=5)
+    assert len(related) == 1
+    assert related[0].pmid == "31000003"
+    assert related[0].title == "Related Paper 3"
+
+

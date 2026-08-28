@@ -252,8 +252,11 @@ class PubMedProvider:
             if not links:
                 return []
 
-            # Filter out the source pmid itself and limit
-            candidate_links = [l for l in links if str(l.get("id")) != clean_pmid][:limit]
+            # Filter out null IDs and the source pmid itself, then limit
+            candidate_links = [
+                l for l in links
+                if l.get("id") is not None and str(l.get("id")) != clean_pmid
+            ][:limit]
             if not candidate_links:
                 return []
 
