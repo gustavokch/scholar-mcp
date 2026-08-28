@@ -17,7 +17,7 @@ DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Za-z0-9]+$")
 ARXIV_NEW_RE = re.compile(r"^(?:arxiv:\s*)?(\d{4}\.\d{4,5})(v\d+)?$", re.IGNORECASE)
 ARXIV_OLD_RE = re.compile(r"^(?:arxiv:\s*)?([a-z-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$", re.IGNORECASE)
 ARXIV_URL_RE = re.compile(
-    r"arxiv\.org/(?:abs|pdf)/([a-z0-9.\-/]+?)(v\d+)?(?:\.pdf)?$", re.IGNORECASE
+    r"arxiv\.org/(?:abs|pdf|html)/([a-z0-9.\-/]+?)(v\d+)?(?:\.pdf)?$", re.IGNORECASE
 )
 ARXIV_DOI_RE = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
 

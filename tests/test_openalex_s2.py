@@ -114,6 +114,31 @@ async def test_openalex_enrichment_keeps_existing_oa_url():
 
 
 @respx.mock
+async def test_openalex_enrichment_updates_unknown_oa_status():
+    """When existing metadata has unknown oa_status, OpenAlex OA status should enrich it."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.models import PaperMetadata
+    from scholar_mcp.resolver import WaterfallResolver
+
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works/https://doi.org/").mock(
+        return_value=httpx.Response(200, json=WORK_JSON)
+    )
+    resolver = WaterfallResolver(settings=Settings())
+    resolver.pubmed.fetch_abstract = AsyncMock(
+        return_value=PaperMetadata(
+            title="Existing",
+            abstract="An abstract.",
+            oa_status="unknown",
+        )
+    )
+    meta = await resolver.fetch_abstract(IdentifierMap(doi="10.1038/nature123"))
+    assert meta is not None
+    assert meta.oa_status == "oa"
+    await resolver.http_client.aclose()
+
+
+@respx.mock
 async def test_resolver_get_citations_falls_back_to_openalex():
     from scholar_mcp.resolver import WaterfallResolver
 

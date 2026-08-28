@@ -99,6 +99,8 @@ class WaterfallResolver:
                             meta.institutions = enriched.institutions
                         if not meta.abstract and enriched.abstract:
                             meta.abstract = enriched.abstract
+                        if meta.oa_status in ("", "unknown") and enriched.oa_status != "unknown":
+                            meta.oa_status = enriched.oa_status
         return meta
 
     async def fetch_pdf_bytes(self, ids: IdentifierMap) -> tuple[bytes | None, str | None]:

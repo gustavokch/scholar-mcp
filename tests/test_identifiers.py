@@ -114,6 +114,7 @@ def test_clean_identifier_detects_arxiv():
     assert clean_identifier("2305.18290v2") == ("arxiv", "2305.18290v2")
     assert clean_identifier("arxiv:hep-th/9901001") == ("arxiv", "hep-th/9901001")
     assert clean_identifier("https://arxiv.org/abs/2305.18290") == ("arxiv", "2305.18290")
+    assert clean_identifier("https://arxiv.org/html/2305.18290v1") == ("arxiv", "2305.18290v1")
     assert clean_identifier("https://arxiv.org/pdf/2305.18290v3.pdf") == ("arxiv", "2305.18290v3")
     assert clean_identifier("https://arxiv.org/abs/2305.18290/") == ("arxiv", "2305.18290")
     assert clean_identifier("https://arxiv.org/abs/2305.18290?context=cs.CL") == (
