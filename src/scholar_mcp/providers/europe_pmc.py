@@ -1,12 +1,13 @@
 import re
 from typing import Any
 
-from scholar_mcp.models import FullTextResponse, IdentifierMap, PaperMetadata
+from scholar_mcp.models import FullTextResponse, IdentifierMap, PaperMetadata, ReferenceItem
 from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+
 
 
 class EuropePMCProvider(BaseProvider):
@@ -86,6 +87,86 @@ class EuropePMCProvider(BaseProvider):
                 pass
 
         return None
+
+    async def fetch_references(
+        self,
+        ids: IdentifierMap,
+        limit: int = 50,
+    ) -> list[ReferenceItem]:
+        source = None
+        ext_id = None
+
+        if ids.pmid:
+            source = "MED"
+            ext_id = ids.pmid
+        elif ids.pmcid:
+            source = "PMC"
+            ext_id = ids.pmcid.upper().replace("PMC", "")
+        elif ids.doi:
+            # Try finding via Europe PMC search
+            try:
+                search_url = f"{EPMC_REST_BASE}/search"
+                resp = await self.http_client.get(
+                    search_url,
+                    params={
+                        "query": f'DOI:"{ids.doi}"',
+                        "format": "json",
+                        "resultType": "lite",
+                    },
+                )
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    results = data.get("resultList", {}).get("result", [])
+                    if results:
+                        rec = results[0]
+                        if rec.get("pmid"):
+                            source = "MED"
+                            ext_id = rec.get("pmid")
+                        elif rec.get("pmcid"):
+                            source = "PMC"
+                            ext_id = rec.get("pmcid").upper().replace("PMC", "")
+            except Exception:
+                pass
+
+        if not source or not ext_id:
+            return []
+
+        url = f"{EPMC_REST_BASE}/{source}/{ext_id}/references"
+        try:
+            resp = await self.http_client.get(
+                url,
+                params={"format": "json", "pageSize": min(max(1, limit), 100)},
+            )
+            if resp is None or resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            ref_list = data.get("referenceList", {}).get("reference", [])
+            references: list[ReferenceItem] = []
+
+            for r in ref_list:
+                authors: list[str] = []
+                author_str = r.get("authorString", "")
+                if author_str:
+                    authors = [a.strip() for a in author_str.split(",") if a.strip()]
+
+                references.append(
+                    ReferenceItem(
+                        id=str(r.get("id") or ""),
+                        title=r.get("title", "").rstrip("."),
+                        authors=authors,
+                        year=str(r.get("pubYear") or ""),
+                        venue=r.get("journalTitle") or "",
+                        doi=r.get("doi"),
+                        pmid=r.get("pmid"),
+                        raw_text=r.get("citationString") or "",
+                    )
+                )
+
+            return references[:limit]
+        except Exception:
+            return []
+
 
 
 async def annotate_oa_status(

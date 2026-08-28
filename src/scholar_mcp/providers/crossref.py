@@ -2,8 +2,9 @@ import re
 from typing import Any
 from bs4 import BeautifulSoup
 
-from scholar_mcp.models import PaperMetadata
+from scholar_mcp.models import PaperMetadata, ReferenceItem
 from scholar_mcp.utils.http import AsyncHttpClient
+
 
 CROSSREF_BASE = "https://api.crossref.org/works"
 
@@ -151,3 +152,48 @@ class CrossRefProvider:
             )
         except Exception:
             return None
+
+    async def fetch_references(
+        self,
+        doi: str,
+        limit: int = 50,
+    ) -> list[ReferenceItem]:
+        clean_doi = doi.strip()
+        url = f"{CROSSREF_BASE}/{clean_doi}"
+        try:
+            resp = await self.http_client.get(url)
+            if resp is None or resp.status_code != 200:
+                return []
+
+            data = resp.json()
+            items = data.get("message", {}).get("reference", [])
+            references: list[ReferenceItem] = []
+
+            for r in items:
+                authors: list[str] = []
+                author = r.get("author")
+                if author:
+                    authors = [author.strip()]
+
+                title = r.get("article-title") or r.get("volume-title") or ""
+                year = str(r.get("year") or "")
+                venue = r.get("journal-title") or ""
+                ref_doi = r.get("DOI")
+
+                references.append(
+                    ReferenceItem(
+                        id=str(r.get("key") or ""),
+                        title=title.rstrip("."),
+                        authors=authors,
+                        year=year,
+                        venue=venue,
+                        doi=ref_doi,
+                        pmid=None,
+                        raw_text=r.get("unstructured") or "",
+                    )
+                )
+
+            return references[:limit]
+        except Exception:
+            return []
+
