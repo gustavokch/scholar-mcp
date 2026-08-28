@@ -44,8 +44,8 @@ class SemanticScholarProvider:
         year_start: int | None = None,
         year_end: int | None = None,
     ) -> list[PaperMetadata]:
-        # S2 graph search has no author/journal filters; those params are
-        # accepted for interface parity with PubMed/CrossRef and ignored.
+        # S2 graph search has no author/journal filter, so the caller's constraint
+        # is applied to the returned page instead of being silently dropped.
         params: dict[str, Any] = {
             "query": query,
             "limit": min(max(1, num_results), 100),
@@ -60,9 +60,17 @@ class SemanticScholarProvider:
             )
             if resp is None or resp.status_code != 200:
                 return []
-            return [_paper_to_metadata(p) for p in resp.json().get("data", [])]
+            papers = [_paper_to_metadata(p) for p in resp.json().get("data", [])]
         except Exception:
             return []
+
+        if author:
+            needle = author.lower()
+            papers = [p for p in papers if any(needle in a.lower() for a in p.authors)]
+        if journal:
+            needle = journal.lower()
+            papers = [p for p in papers if needle in p.venue.lower()]
+        return papers
 
     async def fetch_recommendations(
         self, paper_id: str, limit: int = 10

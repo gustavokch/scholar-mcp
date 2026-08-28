@@ -207,6 +207,20 @@ async def test_s2_recommendations(client):
 
 
 @respx.mock
+async def test_s2_search_post_filters_author_and_journal(client):
+    """S2 graph search has no author/journal filter, so results must be filtered locally."""
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json=S2_SEARCH_JSON)
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+
+    assert await provider.search("dl", num_results=5, author="LeCun") != []
+    assert await provider.search("dl", num_results=5, author="Curie") == []
+    assert await provider.search("dl", num_results=5, journal="NeurIPS") != []
+    assert await provider.search("dl", num_results=5, journal="Nature") == []
+
+
+@respx.mock
 async def test_s2_errors_return_empty(client):
     respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
         return_value=httpx.Response(200, json={"data": []})
