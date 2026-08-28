@@ -80,6 +80,41 @@ async def test_crossref_fetch_references(client):
     assert refs[0].authors == ["Lovelace A"]
 
 
+@respx.mock
+async def test_crossref_fetch_references_author_edge_cases(client):
+    respx.get(CROSSREF_WORKS).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "message": {
+                    "reference": [
+                        {
+                            "key": "ref1",
+                            "article-title": "Dict Author Article",
+                            "author": {"family": "Turing", "given": "Alan"},
+                            "year": "1936",
+                        },
+                        {
+                            "key": "ref2",
+                            "article-title": "Non-string Author Article",
+                            "author": None,
+                            "year": "1940",
+                        },
+                    ]
+                }
+            },
+        )
+    )
+    provider = CrossRefProvider(client)
+    refs = await provider.fetch_references("10.1038/nature123", limit=10)
+    assert len(refs) == 2
+    assert refs[0].title == "Dict Author Article"
+    assert refs[0].authors == ["Alan Turing"] or refs[0].authors == ["Turing"]
+    assert refs[1].title == "Non-string Author Article"
+    assert refs[1].authors == []
+
+
+
 EPMC_CIT = "https://www.ebi.ac.uk/europepmc/webservices/rest/MED/12345/citations"
 ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
 ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"

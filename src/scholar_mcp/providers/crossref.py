@@ -172,8 +172,22 @@ class CrossRefProvider:
             for r in items:
                 authors: list[str] = []
                 author = r.get("author")
-                if author:
+                if isinstance(author, str) and author.strip():
                     authors = [author.strip()]
+                elif isinstance(author, dict):
+                    given = str(author.get("given") or "").strip()
+                    family = str(author.get("family") or "").strip()
+                    full_name = f"{given} {family}".strip() or family
+                    if full_name:
+                        authors = [full_name]
+                elif isinstance(author, list):
+                    for a in author:
+                        if isinstance(a, str) and a.strip():
+                            authors.append(a.strip())
+                        elif isinstance(a, dict):
+                            nm = f"{a.get('given', '')} {a.get('family', '')}".strip() or str(a.get("family") or "")
+                            if nm:
+                                authors.append(nm)
 
                 title = r.get("article-title") or r.get("volume-title") or ""
                 year = str(r.get("year") or "")
