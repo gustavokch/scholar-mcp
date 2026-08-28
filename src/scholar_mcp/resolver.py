@@ -21,6 +21,7 @@ from scholar_mcp.parsers.jats import list_sections, select_sections
 from scholar_mcp.providers.arxiv import ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
+from scholar_mcp.providers.openalex import OpenAlexProvider
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.providers.scihub import SciHubProvider
@@ -67,6 +68,7 @@ class WaterfallResolver:
         self.scihub = SciHubProvider(self.http_client, mirrors=self.settings.scihub_mirrors)
         self.pubmed = PubMedProvider(self.http_client, self.settings)
         self.crossref = CrossRefProvider(self.http_client)
+        self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
 
     async def resolve_ids(self, identifier: str) -> IdentifierMap:
         return await resolve_identifiers(identifier, self.http_client, self.cache, self.settings)
@@ -79,6 +81,21 @@ class WaterfallResolver:
             arxiv_meta = await self.arxiv.fetch_metadata(ids.arxiv)
             if arxiv_meta is not None:
                 meta = arxiv_meta
+
+        # Enrich with OpenAlex citation counts / OA URLs / institutions
+        if self.settings.enable_openalex and ids.doi:
+            if meta is None or meta.citation_count is None:
+                enriched = await self.openalex.fetch_metadata(ids.doi)
+                if enriched:
+                    if meta is None:
+                        meta = enriched
+                    else:
+                        meta.citation_count = enriched.citation_count
+                        meta.oa_url = enriched.oa_url
+                        if not meta.institutions:
+                            meta.institutions = enriched.institutions
+                        if not meta.abstract and enriched.abstract:
+                            meta.abstract = enriched.abstract
         return meta
 
     async def fetch_pdf_bytes(self, ids: IdentifierMap) -> tuple[bytes | None, str | None]:
@@ -442,7 +459,12 @@ class WaterfallResolver:
         limit: int = 50,
     ) -> list[CitationItem]:
         ids = await self.resolve_ids(identifier)
-        return await self.europe_pmc.fetch_citations(ids, limit=limit)
+        cits = await self.europe_pmc.fetch_citations(ids, limit=limit)
+        if cits:
+            return cits
+        if self.settings.enable_openalex and ids.doi:
+            return await self.openalex.fetch_citations(ids.doi, limit=limit)
+        return []
 
     async def get_related_papers(
         self,
