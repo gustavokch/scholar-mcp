@@ -88,3 +88,47 @@ class DownloadResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ReferenceItem:
+    id: str = ""
+    title: str = ""
+    authors: list[str] = field(default_factory=list)
+    year: str = ""
+    venue: str = ""
+    doi: str | None = None
+    pmid: str | None = None
+    raw_text: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class CitationItem:
+    title: str = ""
+    authors: list[str] = field(default_factory=list)
+    year: str = ""
+    venue: str = ""
+    doi: str | None = None
+    pmid: str | None = None
+    citation_count: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class RelatedPaper:
+    title: str = ""
+    authors: list[str] = field(default_factory=list)
+    year: str = ""
+    venue: str = ""
+    doi: str | None = None
+    pmid: str | None = None
+    score: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
