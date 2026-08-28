@@ -162,11 +162,17 @@ class PubMedProvider:
             abstract_elem = article.find("Abstract")
             abstract = ""
             if abstract_elem is not None:
-                abstract_texts = [
-                    p.get_text(" ", strip=True)
-                    for p in abstract_elem.find_all("AbstractText")
-                ]
-                abstract = "\n\n".join(t for t in abstract_texts if t)
+                abstract_texts: list[str] = []
+                for p in abstract_elem.find_all("AbstractText"):
+                    txt = p.get_text(" ", strip=True)
+                    if not txt:
+                        continue
+                    label = p.get("Label") or p.get("label")
+                    if label:
+                        abstract_texts.append(f"{label.strip()}: {txt}")
+                    else:
+                        abstract_texts.append(txt)
+                abstract = "\n\n".join(abstract_texts)
 
             authors: list[str] = []
             author_list = article.find("AuthorList")

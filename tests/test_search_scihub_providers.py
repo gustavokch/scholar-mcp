@@ -146,3 +146,46 @@ async def test_scihub_all_mirrors_down_is_miss(client):
 async def test_scihub_without_doi_is_miss(client):
     provider = SciHubProvider(client, mirrors=["https://mirror1.org"])
     assert await provider.fetch_full_text(IdentifierMap(pmid="123")) is None
+
+
+@respx.mock
+async def test_pubmed_fetch_abstract_structured_labels(client):
+    efetch_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>99999999</PMID>
+      <Article>
+        <ArticleTitle>A Trial of Treatment</ArticleTitle>
+        <Abstract>
+          <AbstractText Label="BACKGROUND">Cancer is a complex disease.</AbstractText>
+          <AbstractText Label="METHODS">We conducted a randomized trial.</AbstractText>
+          <AbstractText Label="RESULTS">Survival improved significantly.</AbstractText>
+          <AbstractText Label="CONCLUSIONS">Treatment was effective.</AbstractText>
+        </Abstract>
+        <AuthorList>
+          <Author><LastName>Smith</LastName><ForeName>John</ForeName></Author>
+        </AuthorList>
+        <Journal><Title>Journal of Clinical Medicine</Title></Journal>
+        <ArticleIdList>
+          <ArticleId IdType="doi">10.1000/182</ArticleId>
+        </ArticleIdList>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>"""
+
+    respx.get(url__startswith="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=efetch_xml)
+    )
+
+    provider = PubMedProvider(client, Settings())
+    meta = await provider.fetch_abstract(IdentifierMap(pmid="99999999"))
+
+    assert meta is not None
+    assert meta.title == "A Trial of Treatment"
+    assert "BACKGROUND: Cancer is a complex disease." in meta.abstract
+    assert "METHODS: We conducted a randomized trial." in meta.abstract
+    assert "RESULTS: Survival improved significantly." in meta.abstract
+    assert "CONCLUSIONS: Treatment was effective." in meta.abstract
+
