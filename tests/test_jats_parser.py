@@ -127,3 +127,24 @@ def test_select_sections_preserves_nested_subsections():
     assert "## Methods" not in intro_section
     assert "We measured flux" not in intro_section
 
+
+def test_jats_formula_rendering():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <front><article-meta><title-group><article-title>Math Paper</article-title></title-group></article-meta></front>
+  <body>
+    <sec>
+      <title>Methods</title>
+      <p>Here is inline equation <inline-formula><tex-math>E = mc^2</tex-math></inline-formula> and display:
+        <disp-formula>
+          <tex-math>\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}</tex-math>
+        </disp-formula>
+      </p>
+    </sec>
+  </body>
+</article>"""
+    md = jats_to_markdown(xml)
+    assert "$E = mc^2$" in md
+    assert "$$\n\\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}\n$$" in md
+
+

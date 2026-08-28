@@ -13,10 +13,8 @@ DECOMPOSE_TAGS = [
     "copyright-holder",
     "supplementary-material",
     "related-article",
-    "tex-math",
-    "mml:math",
-    "math",
 ]
+
 
 
 def _format_table(table_tag: Tag) -> str:
@@ -149,11 +147,38 @@ def _render_node(node: Tag | NavigableString, sec_level: int = 2) -> str:
     if tag_name == "list":
         return _format_list(node)
 
-    if tag_name in ("inline-formula", "disp-formula"):
+    if tag_name == "inline-formula":
+        tex = node.find("tex-math")
+        if tex:
+            val = tex.get_text(" ", strip=True)
+            if val:
+                return f"${val}$"
+        mml = node.find(lambda t: t.name in ("mml:math", "math") if t.name else False)
+        if mml and mml.get("alttext"):
+            return f"${mml.get('alttext').strip()}$"
+        txt = node.get_text(" ", strip=True)
+        return f"${txt}$" if txt else ""
+
+    if tag_name == "disp-formula":
+        tex = node.find("tex-math")
+        if tex:
+            val = tex.get_text(" ", strip=True)
+            if val:
+                return f"\n\n$$\n{val}\n$$\n\n"
+        mml = node.find(lambda t: t.name in ("mml:math", "math") if t.name else False)
+        if mml and mml.get("alttext"):
+            return f"\n\n$$\n{mml.get('alttext').strip()}\n$$\n\n"
+        txt = node.get_text(" ", strip=True)
+        return f"\n\n$$\n{txt}\n$$\n\n" if txt else ""
+
+    if tag_name in ("mml:math", "math"):
+        if node.get("alttext"):
+            return f"${node.get('alttext').strip()}$"
         return node.get_text(" ", strip=True)
 
     # General container
     return "".join(_render_node(c, sec_level) for c in node.children)
+
 
 
 def jats_to_markdown(xml_content: str | bytes) -> str:
@@ -182,12 +207,8 @@ def jats_to_markdown(xml_content: str | bytes) -> str:
         for match in list(soup.find_all(tag_name)):
             match.decompose()
 
-    # Also decompose namespace tags
-    for tag in list(soup.find_all(True)):
-        if tag.name and ("mml:" in tag.name or "math" in tag.name):
-            tag.decompose()
-
     parts: list[str] = []
+
 
     # Title
     title_tag = soup.find("article-title")
