@@ -1429,7 +1429,7 @@ inside the resolved root. Absolute paths outside the root and `..` traversal are
 with `success=False` and an explanatory message — never a raised exception. Existing files are
 not overwritten unless `overwrite=True`.
 
-- [ ] **Step 1: Write the failing tests for the resolver**
+- [x] **Step 1: Write the failing tests for the resolver**
 
 ```python
 # tests/test_waterfall_resolver.py
@@ -1602,12 +1602,12 @@ async def test_download_writes_inside_root(tmp_path):
     assert Path(res.saved_path).read_bytes() == b"%PDF-data"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_waterfall_resolver.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `src/scholar_mcp/resolver.py`**
+- [x] **Step 3: Implement `src/scholar_mcp/resolver.py`**
 
 Build the tier list as `(name, coroutine_factory, skip_reason_or_None)` tuples so skipping and
 tracing share one code path and the flag interaction is expressed once. Time each tier with
@@ -1624,12 +1624,12 @@ sandbox check described above, creates parent directories inside the root, and w
 `asyncio.to_thread` **only for the local disk write** — that is filesystem I/O, not network, and is
 the one permitted use.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_waterfall_resolver.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/resolver.py tests/test_waterfall_resolver.py
