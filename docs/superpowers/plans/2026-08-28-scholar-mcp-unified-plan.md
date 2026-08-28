@@ -568,7 +568,7 @@ git commit -m "feat: add async HTTP client, per-host rate limiter, and TTL cache
 > That contradicts spec section 5.1, which maps `<boxed-text>` to a Markdown `>` blockquote, and
 > also breaks on legitimate prose containing `<` or `>`. Assert on an XML-tag regex instead.
 
-- [ ] **Step 1: Write the failing test for the JATS parser**
+- [x] **Step 1: Write the failing test for the JATS parser**
 
 ```python
 # tests/test_jats_parser.py
@@ -691,12 +691,12 @@ def test_list_and_select_sections():
     assert select_sections(md, ["Nonexistent"]).strip() == ""
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_jats_parser.py`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `scholar_mcp/parsers/jats.py`**
+- [x] **Step 3: Implement `scholar_mcp/parsers/jats.py`**
 
 Parse with `BeautifulSoup(xml, "lxml-xml")` (tolerant of malformed input, unlike
 `xml.etree.ElementTree`). Decompose the removed elements listed in spec section 5.1
@@ -706,12 +706,12 @@ render remaining nodes in document order. Map `<sec>` nesting depth to heading l
 `######`. `list_sections` / `select_sections` operate on the rendered Markdown by scanning ATX
 headings, so they work for PDF-derived text too once headings are detected.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_jats_parser.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/scholar_mcp/parsers/ tests/test_jats_parser.py
