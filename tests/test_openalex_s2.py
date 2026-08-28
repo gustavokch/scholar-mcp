@@ -194,7 +194,7 @@ async def test_s2_search_sends_api_key_header(client):
 
 @respx.mock
 async def test_s2_recommendations(client):
-    respx.get(url__startswith="https://api.semanticscholar.org/recommendations/v1/papers/forpaper/").mock(
+    route = respx.get(url__startswith="https://api.semanticscholar.org/recommendations/v1/papers/forpaper/").mock(
         return_value=httpx.Response(200, json=S2_RECS_JSON)
     )
     provider = SemanticScholarProvider(client, api_key=None)
@@ -203,6 +203,8 @@ async def test_s2_recommendations(client):
     assert recs[0].title == "Recommended Paper"
     assert recs[0].doi == "10.5555/rec1"
     assert recs[0].authors == ["Bengio, Yoshua"]
+    # Verify paper_id was URL-encoded to avoid splitting URL path segments
+    assert "DOI%3A10.1038%2Fnature123" in str(route.calls[0].request.url)
 
 
 @respx.mock

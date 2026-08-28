@@ -1,4 +1,5 @@
 from typing import Any
+import urllib.parse
 
 from scholar_mcp.models import PaperMetadata, RelatedPaper
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -76,8 +77,9 @@ class SemanticScholarProvider:
         self, paper_id: str, limit: int = 10
     ) -> list[RelatedPaper]:
         try:
+            quoted_id = urllib.parse.quote(paper_id, safe="")
             resp = await self.http_client.get(
-                f"{S2_RECS_BASE}/papers/forpaper/{paper_id}",
+                f"{S2_RECS_BASE}/papers/forpaper/{quoted_id}",
                 params={"limit": min(max(1, limit), 100), "fields": PAPER_FIELDS},
                 headers=self._headers(),
             )
