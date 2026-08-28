@@ -103,3 +103,121 @@ async def test_resolver_get_citations_falls_back_to_openalex():
     assert len(cits) == 1
     assert cits[0].title == "Citing Paper"
     await resolver.http_client.aclose()
+
+
+from scholar_mcp.providers.semantic_scholar import S2_BASE, SemanticScholarProvider
+
+S2_SEARCH_JSON = {
+    "data": [
+        {
+            "paperId": "abc123",
+            "title": "S2 Found Paper",
+            "year": 2022,
+            "venue": "NeurIPS",
+            "abstract": "An S2 abstract.",
+            "citationCount": 100,
+            "authors": [{"name": "LeCun, Yann"}],
+            "externalIds": {"DOI": "10.5555/s2paper", "ArXiv": "2201.00001"},
+            "openAccessPdf": {"url": "https://example.com/s2.pdf"},
+        }
+    ]
+}
+
+S2_RECS_JSON = {
+    "recommendedPapers": [
+        {
+            "paperId": "def456",
+            "title": "Recommended Paper",
+            "year": 2023,
+            "venue": "ICML",
+            "authors": [{"name": "Bengio, Yoshua"}],
+            "externalIds": {"DOI": "10.5555/rec1"},
+        }
+    ]
+}
+
+
+@respx.mock
+async def test_s2_search(client):
+    route = respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json=S2_SEARCH_JSON)
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+    papers = await provider.search("deep learning", num_results=5, year_start=2020, year_end=2023)
+    assert len(papers) == 1
+    p = papers[0]
+    assert p.title == "S2 Found Paper"
+    assert p.year == "2022"
+    assert p.doi == "10.5555/s2paper"
+    assert p.citation_count == 100
+    assert p.oa_url == "https://example.com/s2.pdf"
+    assert p.oa_status == "oa"
+    assert "year=2020-2023" in str(route.calls[0].request.url)
+
+
+@respx.mock
+async def test_s2_search_sends_api_key_header(client):
+    route = respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json=S2_SEARCH_JSON)
+    )
+    provider = SemanticScholarProvider(client, api_key="secret")
+    await provider.search("test", num_results=1)
+    assert route.calls[0].request.headers.get("x-api-key") == "secret"
+
+
+@respx.mock
+async def test_s2_recommendations(client):
+    respx.get(url__startswith="https://api.semanticscholar.org/recommendations/v1/papers/forpaper/").mock(
+        return_value=httpx.Response(200, json=S2_RECS_JSON)
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+    recs = await provider.fetch_recommendations("DOI:10.1038/nature123", limit=5)
+    assert len(recs) == 1
+    assert recs[0].title == "Recommended Paper"
+    assert recs[0].doi == "10.5555/rec1"
+    assert recs[0].authors == ["Bengio, Yoshua"]
+
+
+@respx.mock
+async def test_s2_errors_return_empty(client):
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    provider = SemanticScholarProvider(client, api_key=None)
+    assert await provider.search("nothing", num_results=5) == []
+
+
+@respx.mock
+async def test_resolver_search_source_s2():
+    from scholar_mcp.resolver import WaterfallResolver
+
+    respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
+        return_value=httpx.Response(200, json=S2_SEARCH_JSON)
+    )
+    # annotate_oa_status batch call after search
+    respx.get(url__startswith="https://www.ebi.ac.uk/europepmc/webservices/rest/search").mock(
+        return_value=httpx.Response(200, json={"resultList": {"result": []}})
+    )
+    resolver = WaterfallResolver(settings=Settings())
+    papers = await resolver.search("deep learning", source="s2", num_results=5)
+    assert len(papers) == 1
+    assert papers[0].title == "S2 Found Paper"
+    await resolver.http_client.aclose()
+
+
+@respx.mock
+async def test_resolver_related_papers_falls_back_to_s2():
+    from scholar_mcp.resolver import WaterfallResolver
+
+    # No pmid anywhere (arXiv-only paper); PubMed path yields nothing, S2 answers.
+    respx.get(url__startswith="https://www.ncbi.nlm.nih.gov/pmc/utils/idconv").mock(
+        return_value=httpx.Response(200, json={"records": []})
+    )
+    respx.get(
+        url__startswith="https://api.semanticscholar.org/recommendations/v1/papers/forpaper/"
+    ).mock(return_value=httpx.Response(200, json=S2_RECS_JSON))
+    resolver = WaterfallResolver(settings=Settings())
+    recs = await resolver.get_related_papers("arXiv:2305.18290", limit=5)
+    assert len(recs) == 1
+    assert recs[0].title == "Recommended Paper"
+    await resolver.http_client.aclose()

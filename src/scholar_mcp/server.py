@@ -35,7 +35,7 @@ async def search_papers(
 
     Args:
         query: Search keywords or query string.
-        source: 'auto' (PubMed first, top up with CrossRef), 'pubmed', or 'crossref'.
+        source: 'auto' (PubMed first, top up with CrossRef), 'pubmed', 'crossref', or 's2' (Semantic Scholar).
         num_results: Maximum number of results to return (max 50).
         year_start: Filter papers published in or after this year.
         year_end: Filter papers published in or before this year.
@@ -262,7 +262,7 @@ async def get_related_papers(
     identifier: str,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Retrieve computationally related and similar papers via PubMed / Europe PMC.
+    """Retrieve computationally related and similar papers via PubMed, with Semantic Scholar recommendations as fallback.
 
     Args:
         identifier: DOI, PMID, PMCID, arXiv ID, or paper title.
