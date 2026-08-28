@@ -7,6 +7,7 @@ class IdentifierMap:
     pmid: str | None = None
     pmcid: str | None = None
     doi: str | None = None
+    arxiv: str | None = None
     title: str | None = None
     match_score: float | None = None  # set when resolved from a title query
     ambiguous: bool = False  # True when the best title match is below threshold

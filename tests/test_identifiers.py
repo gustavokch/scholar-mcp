@@ -107,3 +107,32 @@ async def test_resolution_survives_upstream_failure():
     res = await resolve_identifiers("32000000", client, TTLCache(), Settings())
     assert res.pmid == "32000000"  # input is preserved even when enrichment fails
     await client.aclose()
+
+
+def test_clean_identifier_detects_arxiv():
+    assert clean_identifier("arXiv:2305.18290") == ("arxiv", "2305.18290")
+    assert clean_identifier("2305.18290v2") == ("arxiv", "2305.18290v2")
+    assert clean_identifier("arxiv:hep-th/9901001") == ("arxiv", "hep-th/9901001")
+    assert clean_identifier("https://arxiv.org/abs/2305.18290") == ("arxiv", "2305.18290")
+    assert clean_identifier("https://arxiv.org/pdf/2305.18290v3.pdf") == ("arxiv", "2305.18290v3")
+    # No false positives
+    assert clean_identifier("34567890") == ("pmid", "34567890")
+    assert clean_identifier("10.1038/s41586-020-2003-7")[0] == "doi"
+
+
+@respx.mock
+async def test_resolve_from_arxiv_sets_doi():
+    client = AsyncHttpClient(settings=Settings())
+    res = await resolve_identifiers("arXiv:2305.18290", client, TTLCache(), Settings())
+    assert res.arxiv == "2305.18290"
+    assert res.doi == "10.48550/arXiv.2305.18290"
+    await client.aclose()
+
+
+@respx.mock
+async def test_resolve_arxiv_doi_backfills_arxiv():
+    client = AsyncHttpClient(settings=Settings())
+    res = await resolve_identifiers("10.48550/arXiv.2305.18290", client, TTLCache(), Settings())
+    assert res.arxiv == "2305.18290"
+    assert res.doi == "10.48550/arXiv.2305.18290"
+    await client.aclose()
