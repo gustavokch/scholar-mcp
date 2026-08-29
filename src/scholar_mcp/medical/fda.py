@@ -210,10 +210,17 @@ class FDAClient:
             purpose = " ".join(drug.purpose).lower()
             warnings = " ".join(drug.warnings).lower()
             dosage = " ".join(drug.dosage_and_administration).lower()
+            indications = " ".join(drug.indications_and_usage).lower()
+            populations = " ".join(drug.use_in_specific_populations).lower()
 
-            has_pediatric = any(
-                term in purpose or term in warnings or term in dosage
-                for term in PEDIATRIC_TERMS
+            has_pediatric = (
+                bool(drug.pediatric_dosing)
+                or bool(drug.pediatric_warnings)
+                or any(
+                    term in text
+                    for term in PEDIATRIC_TERMS
+                    for text in (purpose, warnings, dosage, indications, populations)
+                )
             )
             if has_pediatric:
                 pediatric_drugs.append(drug)

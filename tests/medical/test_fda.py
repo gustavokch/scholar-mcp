@@ -107,3 +107,20 @@ async def test_search_pediatric_drugs_filters_adult_labels(tmp_path: Path):
     assert drugs == []
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_pediatric_drugs_matches_use_in_specific_populations(tmp_path: Path):
+    client, cache, http_client = await _make_client(tmp_path)
+    payload = _label_payload("Kid Relief", generic="Acetaminophen", ndc="99999-001")
+    payload["results"][0]["use_in_specific_populations"] = [
+        "Safety and effectiveness in pediatric patients have been established."
+    ]
+
+    respx.get(FDA_URL).respond(json=payload)
+
+    drugs, meta = await client.search_pediatric_drugs("kid relief", limit=5)
+    assert len(drugs) == 1
+    assert drugs[0].openfda.brand_name == ["Kid Relief"]
+    await cache.close()
+    await http_client.aclose()
