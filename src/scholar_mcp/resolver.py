@@ -27,6 +27,7 @@ from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.providers.scihub import SciHubProvider
 from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
 from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE, UnpaywallProvider
+from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -71,6 +72,13 @@ class WaterfallResolver:
         self.crossref = CrossRefProvider(self.http_client)
         self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
         self.s2 = SemanticScholarProvider(self.http_client, api_key=self.settings.s2_api_key)
+        self.ranking_pipeline = RankingPipeline(
+            openalex=self.openalex,
+            europe_pmc=self.europe_pmc,
+            crossref=self.crossref,
+            cache=self.cache,
+            settings=self.settings,
+        )
 
     async def resolve_ids(self, identifier: str) -> IdentifierMap:
         return await resolve_identifiers(identifier, self.http_client, self.cache, self.settings)
@@ -377,6 +385,7 @@ class WaterfallResolver:
         query: str,
         source: str = "auto",
         num_results: int = 10,
+        rerank: bool = True,
         author: str | None = None,
         journal: str | None = None,
         year_start: int | None = None,
@@ -385,10 +394,24 @@ class WaterfallResolver:
         limit = min(num_results, 50)
         source_mode = source.lower().strip()
 
+        # Compute candidate pool depth if reranking is enabled
+        should_rerank = rerank and self.settings.ranking_enabled
+        if should_rerank:
+            candidate_pool_size = min(
+                self.settings.ranking_max_candidates,
+                max(
+                    limit * self.settings.ranking_candidate_multiplier,
+                    self.settings.ranking_min_candidates,
+                ),
+            )
+            fetch_limit = candidate_pool_size
+        else:
+            fetch_limit = limit
+
         if source_mode == "pubmed":
             papers = await self.pubmed.search(
                 query,
-                num_results=limit,
+                num_results=fetch_limit,
                 author=author,
                 journal=journal,
                 year_start=year_start,
@@ -397,7 +420,7 @@ class WaterfallResolver:
         elif source_mode == "crossref":
             papers = await self.crossref.search(
                 query,
-                num_results=limit,
+                num_results=fetch_limit,
                 author=author,
                 journal=journal,
                 year_start=year_start,
@@ -408,25 +431,25 @@ class WaterfallResolver:
                 return []
             papers = await self.s2.search(
                 query,
-                num_results=limit,
+                num_results=fetch_limit,
                 author=author,
                 journal=journal,
                 year_start=year_start,
                 year_end=year_end,
             )
         else:  # auto
-            # 1. Query PubMed for num_results
+            # 1. Query PubMed for fetch_limit
             papers = await self.pubmed.search(
                 query,
-                num_results=limit,
+                num_results=fetch_limit,
                 author=author,
                 journal=journal,
                 year_start=year_start,
                 year_end=year_end,
             )
-            # 2. If PubMed returns fewer than num_results, top up from CrossRef
-            if len(papers) < limit:
-                needed = limit - len(papers)
+            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
+            if len(papers) < fetch_limit:
+                needed = fetch_limit - len(papers)
                 crossref_papers = await self.crossref.search(
                     query,
                     num_results=needed * 2,
@@ -448,12 +471,18 @@ class WaterfallResolver:
                         seen_dois.add(cp.doi.lower())
                     if cp.title:
                         seen_titles.add(cp.title.lower().strip())
-                    if len(papers) >= limit:
+                    if len(papers) >= fetch_limit:
                         break
 
+        # Re-rank if requested and candidates present
+        if should_rerank and papers:
+            papers = await self.ranking_pipeline.rank_papers(papers, top_n=limit)
+        else:
+            papers = papers[:limit]
+
         # Annotate OA status in one batched call
-        await annotate_oa_status(papers[:limit], self.http_client)
-        return papers[:limit]
+        await annotate_oa_status(papers, self.http_client)
+        return papers
 
     async def get_references(
         self,

@@ -235,3 +235,40 @@ async def test_fetch_abstract_falls_back_to_arxiv():
     assert meta is not None
     assert meta.title == "A"
     r.arxiv.fetch_metadata.assert_awaited_once_with("2305.18290")
+
+
+async def test_waterfall_resolver_search_with_rerank():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    mock_papers = [
+        PaperMetadata(title="Paper 1", pmid="1", doi="10.1001/1", year="2015", citation_count=500),
+        PaperMetadata(title="Paper 2", pmid="2", doi="10.1001/2", year="2026", citation_count=10),
+    ]
+    r.pubmed.search = AsyncMock(return_value=mock_papers)
+    r.ranking_pipeline.rank_papers = AsyncMock(
+        return_value=[
+            PaperMetadata(title="Paper 2", pmid="2", doi="10.1001/2", score=1.2),
+            PaperMetadata(title="Paper 1", pmid="1", doi="10.1001/1", score=0.8),
+        ]
+    )
+
+    results = await r.search("cancer", source="pubmed", num_results=2, rerank=True)
+    assert len(results) == 2
+    assert results[0].title == "Paper 2"
+    assert results[0].score == 1.2
+    r.ranking_pipeline.rank_papers.assert_awaited_once()
+
+
+async def test_waterfall_resolver_search_without_rerank():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    mock_papers = [
+        PaperMetadata(title="Paper 1", pmid="1", doi="10.1001/1", year="2015"),
+        PaperMetadata(title="Paper 2", pmid="2", doi="10.1001/2", year="2026"),
+    ]
+    r.pubmed.search = AsyncMock(return_value=mock_papers)
+    r.ranking_pipeline.rank_papers = AsyncMock()
+
+    results = await r.search("cancer", source="pubmed", num_results=2, rerank=False)
+    assert len(results) == 2
+    assert results[0].title == "Paper 1"
+    r.ranking_pipeline.rank_papers.assert_not_awaited()
+
