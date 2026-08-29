@@ -156,6 +156,7 @@ def are_duplicates(
                 if y1 and y2:
                     return y1 == y2
                 return True
+            return False
         elif not a1 and not a2:
             if y1 and y2:
                 return y1 == y2

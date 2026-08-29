@@ -78,3 +78,18 @@ def test_deduplicate_papers_keeps_richer_metadata():
     assert stats["total_input"] == 3
     match_a = next(p for p in unique if p["title"] == "Study A")
     assert match_a["abstract"] == "Detailed abstract with more text"
+
+
+def test_are_duplicates_different_authors_same_title():
+    p1 = {
+        "title": "Treatment of Hypertension",
+        "authors": ["Smith J"],
+        "year": "2020",
+    }
+    p2 = {
+        "title": "Treatment of Hypertension",
+        "authors": ["Johnson M"],
+        "year": "2020",
+    }
+    assert are_duplicates(p1, p2) is False
+
