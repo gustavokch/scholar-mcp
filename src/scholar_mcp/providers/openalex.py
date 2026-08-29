@@ -147,3 +147,68 @@ class OpenAlexProvider:
             return citations[:limit]
         except Exception:
             return []
+
+    async def fetch_citation_counts_batch(
+        self,
+        dois: list[str] | None = None,
+        pmids: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Fetch citation counts for multiple DOIs and PMIDs in single batched OpenAlex query."""
+        clean_dois = [
+            _strip_doi_url(d) or d.strip()
+            for d in (dois or [])
+            if d and (_strip_doi_url(d) or d.strip())
+        ]
+        clean_pmids = [p.strip() for p in (pmids or []) if p and p.strip()]
+
+        if not clean_dois and not clean_pmids:
+            return {}
+
+        filter_parts: list[str] = []
+        if clean_dois:
+            filter_parts.append(f"doi:{'|'.join(clean_dois[:50])}")
+        if clean_pmids:
+            filter_parts.append(f"pmid:{'|'.join(clean_pmids[:50])}")
+
+        filter_str = ",".join(filter_parts)
+        params = self._params({"filter": filter_str, "per-page": 50})
+
+        try:
+            resp = await self.http_client.get(f"{OPENALEX_BASE}/works", params=params)
+            if resp is None or resp.status_code != 200:
+                return {}
+
+            data = resp.json()
+            results = data.get("results", [])
+            counts: dict[str, int] = {}
+
+            for work in results:
+                if not isinstance(work, dict):
+                    continue
+                c = work.get("cited_by_count")
+                if c is None or not isinstance(c, int):
+                    continue
+
+                # Map work DOI
+                w_doi = _strip_doi_url(work.get("doi"))
+                if w_doi:
+                    counts[w_doi.lower()] = c
+
+                # Map work PMID and other IDs
+                ids_dict = work.get("ids", {})
+                if isinstance(ids_dict, dict):
+                    raw_pmid = ids_dict.get("pmid")
+                    if raw_pmid:
+                        pmid_val = str(raw_pmid).split("/")[-1].strip()
+                        if pmid_val:
+                            counts[pmid_val] = c
+                    raw_doi = ids_dict.get("doi")
+                    if raw_doi:
+                        d_val = _strip_doi_url(str(raw_doi))
+                        if d_val:
+                            counts[d_val.lower()] = c
+
+            return counts
+        except Exception:
+            return {}
+

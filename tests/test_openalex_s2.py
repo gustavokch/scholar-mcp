@@ -381,3 +381,40 @@ async def test_openalex_author_and_doi_edge_cases(client):
     assert meta.authors == ["Dr. Good"]
     assert meta.institutions == ["MIT"]
 
+
+@respx.mock
+async def test_openalex_fetch_citation_counts_batch(client):
+    batch_response = {
+        "results": [
+            {
+                "doi": "https://doi.org/10.1038/s41586-020-2649-2",
+                "ids": {
+                    "pmid": "https://pubmed.ncbi.nlm.nih.gov/32814902",
+                    "doi": "https://doi.org/10.1038/s41586-020-2649-2",
+                },
+                "cited_by_count": 1250,
+            },
+            {
+                "doi": "https://doi.org/10.1016/j.cell.2021.01.001",
+                "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/33503445"},
+                "cited_by_count": 340,
+            },
+        ]
+    }
+
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(200, json=batch_response)
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    dois = ["10.1038/s41586-020-2649-2", "10.1016/j.cell.2021.01.001"]
+    pmids = ["32814902", "33503445"]
+
+    counts = await provider.fetch_citation_counts_batch(dois=dois, pmids=pmids)
+
+    assert counts.get("10.1038/s41586-020-2649-2") == 1250
+    assert counts.get("32814902") == 1250
+    assert counts.get("10.1016/j.cell.2021.01.001") == 340
+    assert counts.get("33503445") == 340
+
+
