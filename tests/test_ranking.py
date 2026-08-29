@@ -1,7 +1,15 @@
 import math
+import httpx
 import pytest
+import respx
+from scholar_mcp.config import Settings
 from scholar_mcp.models import PaperMetadata
-from scholar_mcp.ranking import RankingWeights, ScoringEngine, ScoringMetrics
+from scholar_mcp.providers.crossref import CrossRefProvider
+from scholar_mcp.providers.europe_pmc import EuropePMCProvider
+from scholar_mcp.providers.openalex import OPENALEX_BASE, OpenAlexProvider
+from scholar_mcp.ranking import RankingPipeline, RankingWeights, ScoringEngine, ScoringMetrics
+from scholar_mcp.utils.cache import TTLCache
+from scholar_mcp.utils.http import AsyncHttpClient
 
 
 def test_calculate_z_scores_basic():
@@ -85,3 +93,75 @@ def test_score_candidates_ordering():
 
     # Scores must be sorted descending
     assert ranked[0].score >= ranked[1].score >= ranked[2].score
+
+
+@respx.mock
+async def test_ranking_pipeline_enrich_and_rank():
+    settings = Settings()
+    client = AsyncHttpClient(settings)
+    cache = TTLCache(maxsize=100, ttl_seconds=3600)
+    openalex = OpenAlexProvider(client)
+    europe_pmc = EuropePMCProvider(client)
+    crossref = CrossRefProvider(client)
+
+    pipeline = RankingPipeline(
+        openalex=openalex,
+        europe_pmc=europe_pmc,
+        crossref=crossref,
+        cache=cache,
+        settings=settings,
+    )
+
+    # Mock OpenAlex batch works response
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1001/paper1",
+                        "ids": {"pmid": "111"},
+                        "cited_by_count": 500,
+                    },
+                    {
+                        "doi": "https://doi.org/10.1001/paper2",
+                        "ids": {"pmid": "222"},
+                        "cited_by_count": 10,
+                    },
+                ]
+            },
+        )
+    )
+
+    candidates = [
+        PaperMetadata(title="Paper 1", doi="10.1001/paper1", pmid="111", year="2020"),
+        PaperMetadata(title="Paper 2", doi="10.1001/paper2", pmid="222", year="2025"),
+        PaperMetadata(title="Paper 3 (No OpenAlex)", doi="10.1001/paper3", pmid="333", year="2026"),
+    ]
+
+    # Mock Europe PMC search for Paper 3 fallback
+    respx.get(url__startswith="https://www.ebi.ac.uk/europepmc/webservices/rest/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [{"doi": "10.1001/paper3", "pmid": "333", "citedByCount": 25}]
+                }
+            },
+        )
+    )
+
+    ranked = await pipeline.rank_papers(candidates, top_n=2)
+
+    assert len(ranked) == 2
+    assert ranked[0].score is not None
+    assert ranked[1].score is not None
+    assert ranked[0].score >= ranked[1].score
+
+    # Verify cached values
+    assert await cache.get("cit:pmid:111") == 500
+    assert await cache.get("cit:pmid:222") == 10
+    assert await cache.get("cit:doi:10.1001/paper3") == 25
+
+    await client.aclose()
+

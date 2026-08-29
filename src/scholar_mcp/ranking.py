@@ -1,10 +1,18 @@
+import asyncio
 from dataclasses import asdict, dataclass
 import datetime
 import math
 import re
 from typing import Any
 
+from scholar_mcp.config import Settings
 from scholar_mcp.models import PaperMetadata
+from scholar_mcp.providers.crossref import CrossRefProvider
+from scholar_mcp.providers.europe_pmc import EuropePMCProvider
+from scholar_mcp.providers.openalex import OpenAlexProvider
+from scholar_mcp.utils.cache import TTLCache
+from scholar_mcp.utils.http import AsyncHttpClient
+
 
 
 @dataclass
@@ -163,3 +171,171 @@ class ScoringEngine:
 
         scored_papers.sort(key=sort_key, reverse=True)
         return scored_papers
+
+
+class RankingPipeline:
+    """Orchestrates candidate citation enrichment, feature extraction, and re-ranking."""
+
+    def __init__(
+        self,
+        openalex: OpenAlexProvider,
+        europe_pmc: EuropePMCProvider,
+        crossref: CrossRefProvider,
+        cache: TTLCache,
+        settings: Settings | None = None,
+    ) -> None:
+        self.openalex = openalex
+        self.europe_pmc = europe_pmc
+        self.crossref = crossref
+        self.cache = cache
+        self.settings = settings or Settings.load()
+
+    def _cache_key(self, identifier: str) -> str:
+        return f"cit:{identifier.lower().strip()}"
+
+    async def _fetch_epmc_citations(self, pmid: str | None, doi: str | None) -> int | None:
+        query_part = f'EXT_ID:"{pmid}"' if pmid else f'DOI:"{doi}"'
+        try:
+            resp = await self.europe_pmc.http_client.get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": query_part, "format": "json", "resultType": "core"},
+            )
+            if resp is not None and resp.status_code == 200:
+                results = resp.json().get("resultList", {}).get("result", [])
+                if results and isinstance(results[0], dict):
+                    c = results[0].get("citedByCount")
+                    if isinstance(c, int):
+                        return c
+        except Exception:
+            pass
+        return None
+
+    async def _fetch_crossref_citations(self, doi: str) -> int | None:
+        try:
+            meta = await self.crossref.fetch_metadata(doi)
+            if meta and meta.citation_count is not None:
+                return meta.citation_count
+        except Exception:
+            pass
+        return None
+
+    async def enrich_citations(self, papers: list[PaperMetadata]) -> list[PaperMetadata]:
+        """Enrich candidates with citation counts via cache, OpenAlex batch, and fallback."""
+        missing_indices: list[int] = []
+        for idx, p in enumerate(papers):
+            if p.citation_count is not None:
+                continue
+
+            # Check cache
+            cached_count = None
+            if p.pmid:
+                cached_count = await self.cache.get(self._cache_key(f"pmid:{p.pmid}"))
+            if cached_count is None and p.doi:
+                cached_count = await self.cache.get(self._cache_key(f"doi:{p.doi}"))
+
+            if cached_count is not None:
+                p.citation_count = cached_count
+            else:
+                missing_indices.append(idx)
+
+        if not missing_indices:
+            return papers
+
+        missing_dois = [papers[i].doi for i in missing_indices if papers[i].doi]
+        missing_pmids = [papers[i].pmid for i in missing_indices if papers[i].pmid]
+
+        # 1. OpenAlex Batch lookup
+        oa_counts: dict[str, int] = {}
+        if self.settings.enable_openalex:
+            try:
+                oa_counts = await self.openalex.fetch_citation_counts_batch(
+                    dois=missing_dois,
+                    pmids=missing_pmids,
+                )
+            except Exception:
+                oa_counts = {}
+
+        still_missing: list[int] = []
+        for i in missing_indices:
+            p = papers[i]
+            count = None
+            if p.doi and p.doi.lower() in oa_counts:
+                count = oa_counts[p.doi.lower()]
+            elif p.pmid and p.pmid in oa_counts:
+                count = oa_counts[p.pmid]
+
+            if count is not None:
+                p.citation_count = count
+                if p.pmid:
+                    await self.cache.set(self._cache_key(f"pmid:{p.pmid}"), count)
+                if p.doi:
+                    await self.cache.set(self._cache_key(f"doi:{p.doi}"), count)
+            else:
+                still_missing.append(i)
+
+        # 2. Parallel Fallback (Europe PMC / CrossRef)
+        if still_missing:
+
+            async def resolve_single_fallback(idx: int) -> tuple[int, int | None]:
+                paper = papers[idx]
+                c_val = await self._fetch_epmc_citations(paper.pmid, paper.doi)
+                if c_val is None and paper.doi:
+                    c_val = await self._fetch_crossref_citations(paper.doi)
+                return idx, c_val
+
+            tasks = [resolve_single_fallback(i) for i in still_missing]
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, tuple):
+                        i, c_val = res
+                        final_c = c_val if c_val is not None else 0
+                        papers[i].citation_count = final_c
+                        if papers[i].pmid:
+                            await self.cache.set(
+                                self._cache_key(f"pmid:{papers[i].pmid}"), final_c
+                            )
+                        if papers[i].doi:
+                            await self.cache.set(
+                                self._cache_key(f"doi:{papers[i].doi}"), final_c
+                            )
+            except Exception:
+                for i in still_missing:
+                    if papers[i].citation_count is None:
+                        papers[i].citation_count = 0
+
+        # Guarantee non-None citation count
+        for p in papers:
+            if p.citation_count is None:
+                p.citation_count = 0
+
+        return papers
+
+    async def rank_papers(
+        self,
+        papers: list[PaperMetadata],
+        weights: RankingWeights | None = None,
+        top_n: int = 10,
+    ) -> list[PaperMetadata]:
+        if not papers:
+            return []
+
+        w = weights or RankingWeights(
+            relevance=self.settings.ranking_weight_relevance,
+            citations=self.settings.ranking_weight_citations,
+            recency=self.settings.ranking_weight_recency,
+            recency_half_life_years=self.settings.ranking_recency_half_life_years,
+        )
+
+        try:
+            # Enrich citations with 1.5s timeout protection
+            enriched = await asyncio.wait_for(self.enrich_citations(papers), timeout=1.5)
+        except Exception:
+            for p in papers:
+                if p.citation_count is None:
+                    p.citation_count = 0
+            enriched = papers
+
+        scored = ScoringEngine.score_candidates(enriched, weights=w)
+        return scored[:top_n]
+
