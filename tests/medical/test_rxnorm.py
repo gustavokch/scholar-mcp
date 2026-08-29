@@ -71,3 +71,33 @@ async def test_search_drug_nomenclature_empty(tmp_path: Path):
     assert drugs == []
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drug_nomenclature_filters_empty_concepts(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = RxNormClient(http_client=http_client, cache=cache, settings=settings)
+
+    respx.get(RXNORM_URL).respond(
+        json={
+            "drugGroup": {
+                "conceptGroup": [
+                    {
+                        "conceptProperties": [
+                            {"rxcui": "161", "name": "Acetaminophen"},
+                            {"rxcui": "", "name": "Missing RxCUI"},
+                            {"rxcui": "999", "name": ""},
+                        ]
+                    }
+                ]
+            }
+        }
+    )
+
+    drugs, meta = await client.search_drug_nomenclature("acetaminophen")
+    assert len(drugs) == 1
+    assert drugs[0].rxcui == "161"
+    await cache.close()
+    await http_client.aclose()

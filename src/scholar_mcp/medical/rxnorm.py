@@ -52,6 +52,8 @@ class RxNormClient:
                         continue
                     rxcui = str(p.get("rxcui", ""))
                     name = str(p.get("name", ""))
+                    if not rxcui or not name:
+                        continue
                     tty = str(p.get("tty", ""))
                     language = str(p.get("language", "ENG"))
                     suppress = str(p.get("suppress", ""))
