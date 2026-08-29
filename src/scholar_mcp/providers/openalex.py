@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import Any
 import urllib.parse
@@ -148,31 +149,11 @@ class OpenAlexProvider:
         except Exception:
             return []
 
-    async def fetch_citation_counts_batch(
+    async def _fetch_citation_counts_single_filter(
         self,
-        dois: list[str] | None = None,
-        pmids: list[str] | None = None,
+        filter_str: str,
     ) -> dict[str, int]:
-        """Fetch citation counts for multiple DOIs and PMIDs in single batched OpenAlex query."""
-        clean_dois = [
-            _strip_doi_url(d) or d.strip()
-            for d in (dois or [])
-            if d and (_strip_doi_url(d) or d.strip())
-        ]
-        clean_pmids = [p.strip() for p in (pmids or []) if p and p.strip()]
-
-        if not clean_dois and not clean_pmids:
-            return {}
-
-        filter_parts: list[str] = []
-        if clean_dois:
-            filter_parts.append(f"doi:{'|'.join(clean_dois[:50])}")
-        if clean_pmids:
-            filter_parts.append(f"pmid:{'|'.join(clean_pmids[:50])}")
-
-        filter_str = ",".join(filter_parts)
         params = self._params({"filter": filter_str, "per-page": 50})
-
         try:
             resp = await self.http_client.get(f"{OPENALEX_BASE}/works", params=params)
             if resp is None or resp.status_code != 200:
@@ -211,4 +192,35 @@ class OpenAlexProvider:
             return counts
         except Exception:
             return {}
+
+    async def fetch_citation_counts_batch(
+        self,
+        dois: list[str] | None = None,
+        pmids: list[str] | None = None,
+    ) -> dict[str, int]:
+        """Fetch citation counts for multiple DOIs and PMIDs via batched OpenAlex query."""
+        clean_dois = [
+            _strip_doi_url(d) or d.strip()
+            for d in (dois or [])
+            if d and (_strip_doi_url(d) or d.strip())
+        ]
+        clean_pmids = [p.strip() for p in (pmids or []) if p and p.strip()]
+
+        if not clean_dois and not clean_pmids:
+            return {}
+
+        tasks = []
+        if clean_dois:
+            filter_str = f"doi:{'|'.join(clean_dois[:50])}"
+            tasks.append(self._fetch_citation_counts_single_filter(filter_str))
+        if clean_pmids:
+            filter_str = f"pmid:{'|'.join(clean_pmids[:50])}"
+            tasks.append(self._fetch_citation_counts_single_filter(filter_str))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        combined: dict[str, int] = {}
+        for res in results:
+            if isinstance(res, dict):
+                combined.update(res)
+        return combined
 
