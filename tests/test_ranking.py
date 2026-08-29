@@ -165,3 +165,51 @@ async def test_ranking_pipeline_enrich_and_rank():
 
     await client.aclose()
 
+
+@respx.mock
+async def test_ranking_pipeline_normalizes_doi_url():
+    settings = Settings()
+    client = AsyncHttpClient(settings)
+    cache = TTLCache(maxsize=100, ttl_seconds=3600)
+    openalex = OpenAlexProvider(client)
+    europe_pmc = EuropePMCProvider(client)
+    crossref = CrossRefProvider(client)
+
+    pipeline = RankingPipeline(
+        openalex=openalex,
+        europe_pmc=europe_pmc,
+        crossref=crossref,
+        cache=cache,
+        settings=settings,
+    )
+
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1038/s41586-020-0001",
+                        "cited_by_count": 420,
+                    }
+                ]
+            },
+        )
+    )
+
+    # Candidate has full DOI URL and no PMID
+    candidates = [
+        PaperMetadata(
+            title="DOI URL Paper",
+            doi="https://doi.org/10.1038/s41586-020-0001",
+            year="2020",
+        )
+    ]
+
+    enriched = await pipeline.enrich_citations(candidates)
+    assert enriched[0].citation_count == 420
+    assert await cache.get("cit:doi:10.1038/s41586-020-0001") == 420
+
+    await client.aclose()
+
+

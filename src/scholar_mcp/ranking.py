@@ -9,7 +9,7 @@ from scholar_mcp.config import Settings
 from scholar_mcp.models import PaperMetadata
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider
-from scholar_mcp.providers.openalex import OpenAlexProvider
+from scholar_mcp.providers.openalex import OpenAlexProvider, _strip_doi_url
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -228,10 +228,11 @@ class RankingPipeline:
 
             # Check cache
             cached_count = None
+            clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
             if p.pmid:
-                cached_count = await self.cache.get(self._cache_key(f"pmid:{p.pmid}"))
-            if cached_count is None and p.doi:
-                cached_count = await self.cache.get(self._cache_key(f"doi:{p.doi}"))
+                cached_count = await self.cache.get(self._cache_key(f"pmid:{p.pmid.strip()}"))
+            if cached_count is None and clean_doi:
+                cached_count = await self.cache.get(self._cache_key(f"doi:{clean_doi}"))
 
             if cached_count is not None:
                 p.citation_count = cached_count
@@ -241,7 +242,11 @@ class RankingPipeline:
         if not missing_indices:
             return papers
 
-        missing_dois = [papers[i].doi for i in missing_indices if papers[i].doi]
+        missing_dois = [
+            _strip_doi_url(papers[i].doi) or papers[i].doi.strip()
+            for i in missing_indices
+            if papers[i].doi
+        ]
         missing_pmids = [papers[i].pmid for i in missing_indices if papers[i].pmid]
 
         # 1. OpenAlex Batch lookup
@@ -258,18 +263,19 @@ class RankingPipeline:
         still_missing: list[int] = []
         for i in missing_indices:
             p = papers[i]
+            clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
             count = None
-            if p.doi and p.doi.lower() in oa_counts:
-                count = oa_counts[p.doi.lower()]
-            elif p.pmid and p.pmid in oa_counts:
-                count = oa_counts[p.pmid]
+            if clean_doi and clean_doi in oa_counts:
+                count = oa_counts[clean_doi]
+            elif p.pmid and p.pmid.strip() in oa_counts:
+                count = oa_counts[p.pmid.strip()]
 
             if count is not None:
                 p.citation_count = count
                 if p.pmid:
-                    await self.cache.set(self._cache_key(f"pmid:{p.pmid}"), count)
-                if p.doi:
-                    await self.cache.set(self._cache_key(f"doi:{p.doi}"), count)
+                    await self.cache.set(self._cache_key(f"pmid:{p.pmid.strip()}"), count)
+                if clean_doi:
+                    await self.cache.set(self._cache_key(f"doi:{clean_doi}"), count)
             else:
                 still_missing.append(i)
 
@@ -293,11 +299,14 @@ class RankingPipeline:
                         papers[i].citation_count = final_c
                         if papers[i].pmid:
                             await self.cache.set(
-                                self._cache_key(f"pmid:{papers[i].pmid}"), final_c
+                                self._cache_key(f"pmid:{papers[i].pmid.strip()}"), final_c
                             )
-                        if papers[i].doi:
+                        c_doi = (
+                            _strip_doi_url(papers[i].doi) or papers[i].doi.strip()
+                        ).lower() if papers[i].doi else None
+                        if c_doi:
                             await self.cache.set(
-                                self._cache_key(f"doi:{papers[i].doi}"), final_c
+                                self._cache_key(f"doi:{c_doi}"), final_c
                             )
             except Exception:
                 for i in still_missing:
