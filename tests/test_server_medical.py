@@ -1,3 +1,4 @@
+from typing import Any, get_type_hints
 from unittest.mock import AsyncMock
 
 from scholar_mcp import server as srv
@@ -24,6 +25,13 @@ MEDICAL_TOOLS = {
 def test_all_medical_tools_registered():
     for name in MEDICAL_TOOLS:
         assert callable(getattr(srv, name)), f"{name} is not exposed by scholar_mcp.server"
+
+
+def test_medical_tools_return_dict_type_annotation():
+    for name in MEDICAL_TOOLS:
+        fn = getattr(srv, name)
+        hints = get_type_hints(fn)
+        assert hints["return"] == dict[str, Any], f"{name} return type is not dict[str, Any]"
 
 
 async def test_search_drugs_tool(monkeypatch):

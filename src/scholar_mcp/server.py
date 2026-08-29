@@ -327,7 +327,7 @@ async def deep_paper_analysis(identifier: str) -> str:
 if settings.enable_medical_tools:
 
     @mcp.tool()
-    async def search_drugs(query: str, limit: int = 10) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_drugs(query: str, limit: int = 10) -> dict[str, Any]:
         """Search for drug information using the FDA database.
 
         Args:
@@ -357,7 +357,7 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "fda"}
 
     @mcp.tool()
-    async def search_pediatric_drugs(query: str, limit: int = 10) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_pediatric_drugs(query: str, limit: int = 10) -> dict[str, Any]:
         """Search for FDA-approved drugs with pediatric indications or dosing.
 
         Args:
@@ -372,7 +372,7 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "fda"}
 
     @mcp.tool()
-    async def search_drug_nomenclature(query: str) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_drug_nomenclature(query: str) -> dict[str, Any]:
         """Search for standardized drug concepts and nomenclature using RxNorm.
 
         Args:
@@ -389,7 +389,7 @@ if settings.enable_medical_tools:
         indicator: str,
         country: str | None = None,
         limit: int = 10,
-    ) -> list[dict[str, Any]] | dict[str, Any]:
+    ) -> dict[str, Any]:
         """Query WHO Global Health Observatory for global and country-specific health indicators.
 
         Args:
@@ -409,7 +409,7 @@ if settings.enable_medical_tools:
         indicator: str,
         country: str | None = None,
         limit: int = 10,
-    ) -> list[dict[str, Any]] | dict[str, Any]:
+    ) -> dict[str, Any]:
         """Retrieve pediatric and child health statistics from WHO Global Health Observatory.
 
         Args:
@@ -428,7 +428,7 @@ if settings.enable_medical_tools:
     async def search_clinical_guidelines(
         query: str,
         organization: str | None = None,
-    ) -> list[dict[str, Any]] | dict[str, Any]:
+    ) -> dict[str, Any]:
         """Search PubMed for clinical practice guidelines with heuristic relevance scoring.
 
         Args:
@@ -445,7 +445,7 @@ if settings.enable_medical_tools:
     async def search_pediatric_guidelines(
         query: str,
         source: str = "all",
-    ) -> list[dict[str, Any]] | dict[str, Any]:
+    ) -> dict[str, Any]:
         """Search pediatric clinical practice guidelines across AAP sources.
 
         Args:
@@ -464,7 +464,7 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
 
     @mcp.tool()
-    async def search_aap_guidelines(query: str) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_aap_guidelines(query: str) -> dict[str, Any]:
         """Search Bright Futures and AAP Policy statements concurrently with deduplication.
 
         Args:
@@ -480,7 +480,7 @@ if settings.enable_medical_tools:
     async def search_pediatric_literature(
         query: str,
         max_results: int = 10,
-    ) -> list[dict[str, Any]] | dict[str, Any]:
+    ) -> dict[str, Any]:
         """Search leading pediatric journals indexed in PubMed.
 
         Args:
@@ -495,7 +495,7 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
 
     @mcp.tool()
-    async def search_medical_databases(query: str) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_medical_databases(query: str) -> dict[str, Any]:
         """Search across PubMed, ClinicalTrials.gov, and Cochrane Library with cross-database deduplication.
 
         Args:
@@ -508,7 +508,7 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "databases"}
 
     @mcp.tool()
-    async def search_medical_journals(query: str) -> list[dict[str, Any]] | dict[str, Any]:
+    async def search_medical_journals(query: str) -> dict[str, Any]:
         """Search top-tier general medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine) via PubMed.
 
         Args:
