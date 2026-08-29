@@ -111,6 +111,21 @@ def calculate_guideline_score(
     )
 
 
+def resolve_organization_aliases(organization: str) -> list[str]:
+    org_lower = organization.lower().strip()
+    aliases = {org_lower}
+
+    # Abbreviation given -> add its full-name expansions.
+    aliases.update(ORG_ABBREVIATIONS.get(org_lower, []))
+
+    # Full name given -> add the abbreviation it expands from.
+    for abbrev, full_names in ORG_ABBREVIATIONS.items():
+        if org_lower in full_names or any(org_lower in fn or fn in org_lower for fn in full_names):
+            aliases.add(abbrev)
+
+    return list(aliases)
+
+
 class GuidelinesEngine:
     def __init__(
         self,
@@ -152,8 +167,7 @@ class GuidelinesEngine:
 
         # Filter by organization if specified
         if organization:
-            org_lower = organization.lower().strip()
-            aliases = ORG_ABBREVIATIONS.get(org_lower, []) + [org_lower]
+            aliases = resolve_organization_aliases(organization)
 
             filtered_candidates: list[tuple[MedicalArticle, bool]] = []
             for art, has_pub in candidates:

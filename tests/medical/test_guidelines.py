@@ -81,3 +81,33 @@ async def test_search_clinical_guidelines_layers(tmp_path: Path):
 
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_organization_expansion(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+
+    respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["1000"]}})
+    respx.get(EFETCH_URL).respond(
+        content=(
+            "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1000</PMID>"
+            "<Article><Journal><Title>Circulation</Title></Journal>"
+            "<ArticleTitle>AHA guideline for hypertension: consensus recommendation.</ArticleTitle>"
+            "<Abstract><AbstractText>Expert consensus recommendation on blood pressure "
+            "management.</AbstractText></Abstract>"
+            "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+        ).encode()
+    )
+
+    guidelines, meta = await engine.search_clinical_guidelines(
+        "hypertension", organization="American Heart Association"
+    )
+    assert len(guidelines) >= 1
+    assert guidelines[0].pmid == "1000"
+
+    await cache.close()
+    await http_client.aclose()
