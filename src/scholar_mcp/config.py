@@ -42,6 +42,24 @@ class Settings:
     ranking_min_candidates: int = 20
     ranking_max_candidates: int = 50
     ranking_enrichment_timeout: float = 1.5
+    # Medical subsystem and persistent SQLite cache settings
+    cache_db_path: Path = field(
+        default_factory=lambda: Path("~/.cache/scholar_mcp/cache.db").expanduser()
+    )
+    cache_max_entries: int = 1000
+    cache_ttl_fda: int = 86400
+    cache_ttl_pubmed: int = 3600
+    cache_ttl_who: int = 604800
+    cache_ttl_rxnorm: int = 2592000
+    cache_ttl_guidelines: int = 604800
+    cache_ttl_bright_futures: int = 2592000
+    cache_ttl_aap_policy: int = 604800
+    cache_ttl_pediatric_journals: int = 3600
+    cache_ttl_child_health: int = 604800
+    cache_ttl_pediatric_drugs: int = 86400
+    cache_ttl_clinical_trials: int = 86400
+    enable_playwright_fallback: bool = True
+    enable_medical_tools: bool = True
 
     @property
     def ncbi_rate_limit(self) -> float:
@@ -104,4 +122,25 @@ class Settings:
             ranking_min_candidates=int(os.getenv("RANKING_MIN_CANDIDATES", "20")),
             ranking_max_candidates=int(os.getenv("RANKING_MAX_CANDIDATES", "50")),
             ranking_enrichment_timeout=float(os.getenv("RANKING_ENRICHMENT_TIMEOUT", "1.5")),
+            cache_db_path=Path(
+                os.getenv("SCHOLAR_CACHE_DB", "~/.cache/scholar_mcp/cache.db")
+            ).expanduser(),
+            cache_max_entries=int(os.getenv("CACHE_MAX_SIZE", "1000")),
+            cache_ttl_fda=int(os.getenv("CACHE_TTL_FDA", "86400")),
+            cache_ttl_pubmed=int(os.getenv("CACHE_TTL_PUBMED", "3600")),
+            cache_ttl_who=int(os.getenv("CACHE_TTL_WHO", "604800")),
+            cache_ttl_rxnorm=int(os.getenv("CACHE_TTL_RXNORM", "2592000")),
+            cache_ttl_guidelines=int(os.getenv("CACHE_TTL_GUIDELINES", "604800")),
+            cache_ttl_bright_futures=int(os.getenv("CACHE_TTL_BRIGHT_FUTURES", "2592000")),
+            cache_ttl_aap_policy=int(os.getenv("CACHE_TTL_AAP_POLICY", "604800")),
+            cache_ttl_pediatric_journals=int(
+                os.getenv("CACHE_TTL_PEDIATRIC_JOURNALS", "3600")
+            ),
+            cache_ttl_child_health=int(os.getenv("CACHE_TTL_CHILD_HEALTH", "604800")),
+            cache_ttl_pediatric_drugs=int(os.getenv("CACHE_TTL_PEDIATRIC_DRUGS", "86400")),
+            cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
+            enable_playwright_fallback=_bool(
+                os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"), True
+            ),
+            enable_medical_tools=_bool(os.getenv("ENABLE_MEDICAL_TOOLS"), True),
         )
