@@ -91,6 +91,39 @@ async def test_indicator_discovery_falls_back_to_variations(tmp_path: Path):
 
 
 @respx.mock
+async def test_get_health_statistics_non_numeric_fields(tmp_path: Path):
+    client, cache, http_client = _client(tmp_path)
+    respx.get(f"{GHO_BASE}/Indicator").respond(
+        json={
+            "value": [
+                {"IndicatorCode": "WHOSIS_000002", "IndicatorName": "Malformed indicator"}
+            ]
+        }
+    )
+    respx.get(f"{GHO_BASE}/WHOSIS_000002").respond(
+        json={
+            "value": [
+                {
+                    "SpatialDim": "USA",
+                    "TimeDim": "2020",
+                    "NumericValue": "",
+                    "Low": "N/A",
+                    "High": None,
+                    "Unit": "years",
+                },
+            ]
+        }
+    )
+
+    records, meta = await client.get_health_statistics("malformed indicator", country="USA", limit=5)
+    assert records[0].numeric_value is None
+    assert records[0].low == 0.0
+    assert records[0].high == 0.0
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_get_child_health_statistics(tmp_path: Path):
     client, cache, http_client = _client(tmp_path)
     respx.get(f"{GHO_BASE}/MDG_0000000029").respond(

@@ -64,6 +64,15 @@ def extract_age_group(indicator_name: str) -> str:
     return ""
 
 
+def _safe_float(value: Any, default: float | None = 0.0) -> float | None:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_indicator_record(
     row: dict[str, Any],
     code: str,
@@ -74,10 +83,10 @@ def _parse_indicator_record(
     time_dim = str(row.get("TimeDim") or "")
     time_dim_type = str(row.get("TimeDimType") or "Year")
     numeric_val = row.get("NumericValue")
-    val_float = float(numeric_val) if numeric_val is not None else None
+    val_float = _safe_float(numeric_val, default=None)
     value_str = str(numeric_val) if numeric_val is not None else str(row.get("Value") or "")
-    low = float(row.get("Low") or 0.0)
-    high = float(row.get("High") or 0.0)
+    low = _safe_float(row.get("Low"), default=0.0)
+    high = _safe_float(row.get("High"), default=0.0)
     unit = str(row.get("Unit") or "")
     sex = str(row.get("Sex") or "")
     age_group = str(row.get("AgeGroup") or extract_age_group(name))
