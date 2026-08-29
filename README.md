@@ -156,6 +156,34 @@ Constructs a structured prompt template containing the full text for comprehensi
 deep_paper_analysis_prompt(identifier="10.1038/s41586-020-2003-7")
 ```
 
+---
+
+## Medical Tools
+
+`scholar-mcp` includes native medical intelligence tools backed by openFDA, RxNav, WHO Global Health Observatory, ClinicalTrials.gov, PubMed, and AAP clinical guidelines with persistent SQLite caching and cross-source deduplication.
+
+Install with the optional `medical` extra to enable browser-based scraping fallbacks for Cochrane and AAP portals:
+```bash
+pip install 'scholar-mcp[medical]'
+```
+
+### Medical Tool Suite
+
+| Tool | Source | Description |
+|---|---|---|
+| `search_drugs` | openFDA | Search drug labels, generic/brand names, active ingredients, and indications. |
+| `get_drug_details` | openFDA | Fetch full structured FDA drug label sections by NDC code. |
+| `search_pediatric_drugs` | openFDA | Search FDA labels filtered for pediatric indications and dosing. |
+| `search_drug_nomenclature` | RxNav | Search standardized RxNorm drug concepts, synonyms, RxCUIs, and UMLS CUIs. |
+| `get_health_statistics` | WHO GHO | Query global and country-specific health indicators with synonym expansion. |
+| `get_child_health_statistics` | WHO GHO | Retrieve pediatric and infant health metrics from WHO GHO. |
+| `search_clinical_guidelines` | PubMed | Search PubMed for clinical practice guidelines with heuristic relevance scoring. |
+| `search_pediatric_guidelines` | Bright Futures / AAP Policy | Search pediatric clinical practice guidelines across AAP sources. |
+| `search_aap_guidelines` | Bright Futures & AAP | Concurrent search across AAP Bright Futures and Policy Statements with deduplication. |
+| `search_pediatric_literature` | PubMed | Targeted search across 7 premier pediatric medical journals. |
+| `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
+| `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
+| `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
 
 ---
 
@@ -182,6 +210,21 @@ All options are configured via environment variables:
 | `SCHOLAR_MAX_CONCURRENCY` | `5` | Semaphore limit for concurrent batch requests. |
 | `SCHOLAR_CACHE_TTL` | `3600` | Cache time-to-live in seconds for IDs and metadata. |
 | `SCHOLAR_TITLE_MATCH_THRESHOLD` | `80.0` | CrossRef minimum score for resolving title queries. |
+| `SCHOLAR_CACHE_DB` | `~/.cache/scholar_mcp/cache.db` | Persistent SQLite cache database path. |
+| `CACHE_MAX_SIZE` | `1000` | Maximum entries in persistent SQLite cache before LRU eviction. |
+| `CACHE_TTL_FDA` | `86400` | openFDA drug label cache TTL in seconds (24h). |
+| `CACHE_TTL_PUBMED` | `3600` | Medical PubMed search cache TTL in seconds (1h). |
+| `CACHE_TTL_WHO` | `604800` | WHO Global Health Observatory cache TTL in seconds (7d). |
+| `CACHE_TTL_RXNORM` | `2592000` | RxNorm drug nomenclature cache TTL in seconds (30d). |
+| `CACHE_TTL_GUIDELINES` | `604800` | Clinical practice guidelines cache TTL in seconds (7d). |
+| `CACHE_TTL_BRIGHT_FUTURES` | `2592000` | AAP Bright Futures scraping cache TTL in seconds (30d). |
+| `CACHE_TTL_AAP_POLICY` | `604800` | AAP Policy statements scraping cache TTL in seconds (7d). |
+| `CACHE_TTL_PEDIATRIC_JOURNALS` | `3600` | Pediatric journals literature cache TTL in seconds (1h). |
+| `CACHE_TTL_CHILD_HEALTH` | `604800` | WHO child health indicators cache TTL in seconds (7d). |
+| `CACHE_TTL_PEDIATRIC_DRUGS` | `86400` | Pediatric drug search cache TTL in seconds (24h). |
+| `CACHE_TTL_CLINICAL_TRIALS` | `86400` | ClinicalTrials.gov cache TTL in seconds (24h). |
+| `ENABLE_PLAYWRIGHT_FALLBACK` | `true` | Enable Playwright headless browser fallback for scraping. |
+| `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
 
 ---
 
