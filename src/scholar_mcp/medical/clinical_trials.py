@@ -1,0 +1,84 @@
+from typing import Any
+
+from scholar_mcp.config import Settings
+from scholar_mcp.medical.models import MedicalArticle
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+CT_URL = "https://clinicaltrials.gov/api/v2/studies"
+
+
+class ClinicalTrialsClient:
+    def __init__(
+        self,
+        http_client: AsyncHttpClient,
+        cache: SQLiteCacheManager,
+        settings: Settings,
+    ) -> None:
+        self.http_client = http_client
+        self.cache = cache
+        self.settings = settings
+
+    async def search_clinical_trials(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> tuple[list[MedicalArticle], CacheMetadata]:
+        cache_key = f"clinical_trials:{query}:{limit}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and cached_data is not None:
+            return [MedicalArticle.from_dict(d) for d in cached_data], meta
+
+        articles: list[MedicalArticle] = []
+        try:
+            resp = await self.http_client.get(
+                CT_URL,
+                params={
+                    "query.term": query,
+                    "pageSize": str(limit),
+                    "format": "json",
+                },
+            )
+            data = resp.json()
+            studies = data.get("studies", [])
+            for study in studies:
+                if not study or not isinstance(study, dict):
+                    continue
+                ps = study.get("protocolSection") or {}
+                im = ps.get("identificationModule") or {}
+                dm = ps.get("descriptionModule") or {}
+                status = ps.get("statusModule") or {}
+                sponsors = ps.get("sponsorCollaboratorsModule") or {}
+
+                lead = (
+                    (im.get("leadSponsor") or {}).get("name")
+                    or (sponsors.get("leadSponsor") or {}).get("name")
+                )
+                authors = [lead] if lead else []
+
+                title = im.get("briefTitle") or im.get("officialTitle") or "Clinical Trial"
+                abstract = dm.get("briefSummary") or im.get("briefSummary") or ""
+                nct_id = im.get("nctId", "")
+                year = (status.get("startDateStruct") or {}).get("date", "")
+                url = f"https://clinicaltrials.gov/study/{nct_id}" if nct_id else ""
+
+                articles.append(
+                    MedicalArticle(
+                        title=title,
+                        authors=authors,
+                        abstract=abstract,
+                        journal="ClinicalTrials.gov",
+                        year=year,
+                        url=url,
+                        source_database="ClinicalTrials.gov",
+                    )
+                )
+        except Exception:
+            return [], CacheMetadata(cached=False, cache_age=0)
+
+        await self.cache.set(
+            cache_key,
+            [a.to_dict() for a in articles],
+            source="clinical_trials",
+        )
+        return articles, CacheMetadata(cached=False, cache_age=0)
