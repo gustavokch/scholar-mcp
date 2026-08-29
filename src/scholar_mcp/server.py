@@ -26,17 +26,19 @@ async def search_papers(
     query: str,
     source: str = "auto",
     num_results: int = 10,
+    rerank: bool = True,
     year_start: int | None = None,
     year_end: int | None = None,
     author: str | None = None,
     journal: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search for academic papers across PubMed and CrossRef.
+    """Search for academic papers across PubMed and CrossRef with smart re-ranking.
 
     Args:
         query: Search keywords or query string.
         source: 'auto' (PubMed first, top up with CrossRef), 'pubmed', 'crossref', or 's2' (Semantic Scholar).
         num_results: Maximum number of results to return (max 50).
+        rerank: Whether to re-rank results using citation impact, recency decay, and Z-scores (default True).
         year_start: Filter papers published in or after this year.
         year_end: Filter papers published in or before this year.
         author: Filter by author name.
@@ -48,6 +50,7 @@ async def search_papers(
             query=query,
             source=source,
             num_results=clamped_num,
+            rerank=rerank,
             year_start=year_start,
             year_end=year_end,
             author=author,
@@ -56,6 +59,7 @@ async def search_papers(
         return [r.to_dict() for r in results]
     except Exception as ex:
         return [{"status": "error", "error": str(ex)}]
+
 
 
 @mcp.tool()

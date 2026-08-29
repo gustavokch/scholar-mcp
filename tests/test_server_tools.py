@@ -38,6 +38,25 @@ async def test_search_papers_tool(resolver):
     assert results[0]["oa_status"] == "oa"
 
 
+async def test_search_papers_tool_forwards_rerank(resolver):
+    resolver.search.return_value = [
+        PaperMetadata(
+            title="Ranked Paper",
+            doi="10.1/ranked",
+            score=1.5,
+            ranking_metrics={"z_citation": 0.5},
+        )
+    ]
+    results = await srv.search_papers("crispr", num_results=5, rerank=True)
+    assert results[0]["score"] == 1.5
+    assert results[0]["ranking_metrics"] == {"z_citation": 0.5}
+    assert resolver.search.await_args.kwargs["rerank"] is True
+
+    await srv.search_papers("crispr", num_results=5, rerank=False)
+    assert resolver.search.await_args.kwargs["rerank"] is False
+
+
+
 async def test_search_papers_clamps_num_results(resolver):
     resolver.search.return_value = []
     await srv.search_papers("crispr", num_results=500)

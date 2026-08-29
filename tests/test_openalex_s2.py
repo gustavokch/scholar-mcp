@@ -381,3 +381,71 @@ async def test_openalex_author_and_doi_edge_cases(client):
     assert meta.authors == ["Dr. Good"]
     assert meta.institutions == ["MIT"]
 
+
+@respx.mock
+async def test_openalex_fetch_citation_counts_batch(client):
+    batch_response = {
+        "results": [
+            {
+                "doi": "https://doi.org/10.1038/s41586-020-2649-2",
+                "ids": {
+                    "pmid": "https://pubmed.ncbi.nlm.nih.gov/32814902",
+                    "doi": "https://doi.org/10.1038/s41586-020-2649-2",
+                },
+                "cited_by_count": 1250,
+            },
+            {
+                "doi": "https://doi.org/10.1016/j.cell.2021.01.001",
+                "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/33503445"},
+                "cited_by_count": 340,
+            },
+        ]
+    }
+
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(200, json=batch_response)
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    dois = ["10.1038/s41586-020-2649-2", "10.1016/j.cell.2021.01.001"]
+    pmids = ["32814902", "33503445"]
+
+    counts = await provider.fetch_citation_counts_batch(dois=dois, pmids=pmids)
+
+    assert counts.get("10.1038/s41586-020-2649-2") == 1250
+    assert counts.get("32814902") == 1250
+    assert counts.get("10.1016/j.cell.2021.01.001") == 340
+    assert counts.get("33503445") == 340
+
+
+@respx.mock
+async def test_openalex_fetch_citation_counts_batch_independent_filters(client):
+    doi_route = respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1038/only-doi",
+                        "ids": {"doi": "https://doi.org/10.1038/only-doi"},
+                        "cited_by_count": 88,
+                    }
+                ]
+            },
+        )
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    counts = await provider.fetch_citation_counts_batch(
+        dois=["10.1038/only-doi"], pmids=["99999999"]
+    )
+
+    assert counts.get("10.1038/only-doi") == 88
+    # When both dois and pmids are passed, separate requests are made (not combined with comma in single request)
+    assert doi_route.call_count >= 2
+    filter_params = [call.request.url.params.get("filter") for call in doi_route.calls]
+    assert any("doi:" in str(f) and "pmid:" not in str(f) for f in filter_params)
+    assert any("pmid:" in str(f) and "doi:" not in str(f) for f in filter_params)
+
+
+

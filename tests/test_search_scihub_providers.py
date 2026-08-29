@@ -35,7 +35,7 @@ def test_pubmed_query_builder_applies_filters():
 
 @respx.mock
 async def test_pubmed_search_returns_metadata(client):
-    respx.get(url__startswith=ESEARCH).mock(
+    esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
     )
     respx.get(url__startswith=ESUMMARY).mock(
@@ -55,11 +55,42 @@ async def test_pubmed_search_returns_metadata(client):
             },
         )
     )
-    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5)
+    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5, sort="relevance")
     assert len(results) == 1
     assert results[0].title == "A PubMed Paper"
     assert results[0].pmid == "32000000"
     assert results[0].doi == "10.1038/nature123"
+    # Verify relevance sort does not force pub_date
+    request = esearch_route.calls.last.request
+    assert request.url.params.get("sort") is None or request.url.params.get("sort") == ""
+
+
+@respx.mock
+async def test_pubmed_search_sort_date(client):
+    esearch_route = respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+    )
+    respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["32000000"],
+                    "32000000": {
+                        "title": "A PubMed Paper",
+                        "authors": [{"name": "Doudna J"}],
+                        "pubdate": "2020 Mar",
+                        "fulljournalname": "Nature",
+                        "elocationid": "doi: 10.1038/nature123",
+                    },
+                }
+            },
+        )
+    )
+    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5, sort="pub_date")
+    assert len(results) == 1
+    request = esearch_route.calls.last.request
+    assert request.url.params.get("sort") == "pub_date"
 
 
 @respx.mock

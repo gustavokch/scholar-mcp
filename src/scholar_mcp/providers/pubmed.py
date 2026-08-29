@@ -47,15 +47,19 @@ class PubMedProvider:
         journal: str | None = None,
         year_start: int | None = None,
         year_end: int | None = None,
+        sort: str = "relevance",
     ) -> list[PaperMetadata]:
         term = self.build_query(query, author, journal, year_start, year_end)
-        search_params = {
+        search_params: dict[str, Any] = {
             "db": "pubmed",
             "term": term,
-            "retmax": min(num_results, 50),
+            "retmax": min(num_results, 200),
             "retmode": "json",
-            "sort": "pub_date",
         }
+        if sort in ("pub_date", "date"):
+            search_params["sort"] = "pub_date"
+        elif sort and sort != "relevance":
+            search_params["sort"] = sort
 
         try:
             resp = await self.http_client.get(ESEARCH_URL, params=search_params)

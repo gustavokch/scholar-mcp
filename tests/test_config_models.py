@@ -138,3 +138,61 @@ async def test_s2_rate_limit_depends_on_api_key(monkeypatch):
         assert c2._limiter_for("api.semanticscholar.org").rate_per_sec == 5.0
     finally:
         await c2.aclose()
+
+
+def test_paper_metadata_ranking_fields():
+    meta = PaperMetadata(
+        title="Sample Paper",
+        score=1.42,
+        ranking_metrics={"z_citation": 0.8, "z_recency": 0.6},
+    )
+    d = meta.to_dict()
+    assert d["score"] == 1.42
+    assert d["ranking_metrics"] == {"z_citation": 0.8, "z_recency": 0.6}
+
+
+def test_settings_ranking_defaults(monkeypatch):
+    monkeypatch.delenv("RANKING_ENABLED", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_RELEVANCE", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_CITATIONS", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_RECENCY", raising=False)
+    monkeypatch.delenv("RANKING_RECENCY_HALF_LIFE_YEARS", raising=False)
+    monkeypatch.delenv("RANKING_CANDIDATE_MULTIPLIER", raising=False)
+    monkeypatch.delenv("RANKING_MIN_CANDIDATES", raising=False)
+    monkeypatch.delenv("RANKING_MAX_CANDIDATES", raising=False)
+    monkeypatch.delenv("RANKING_ENRICHMENT_TIMEOUT", raising=False)
+
+    s = Settings.load()
+    assert s.ranking_enabled is True
+    assert s.ranking_weight_relevance == 0.4
+    assert s.ranking_weight_citations == 0.3
+    assert s.ranking_weight_recency == 0.3
+    assert s.ranking_recency_half_life_years == 7.0
+    assert s.ranking_candidate_multiplier == 3
+    assert s.ranking_min_candidates == 20
+    assert s.ranking_max_candidates == 50
+    assert s.ranking_enrichment_timeout == 1.5
+
+
+def test_settings_ranking_custom_env(monkeypatch):
+    monkeypatch.setenv("RANKING_ENABLED", "0")
+    monkeypatch.setenv("RANKING_WEIGHT_RELEVANCE", "0.5")
+    monkeypatch.setenv("RANKING_WEIGHT_CITATIONS", "0.2")
+    monkeypatch.setenv("RANKING_WEIGHT_RECENCY", "0.3")
+    monkeypatch.setenv("RANKING_RECENCY_HALF_LIFE_YEARS", "5.0")
+    monkeypatch.setenv("RANKING_CANDIDATE_MULTIPLIER", "4")
+    monkeypatch.setenv("RANKING_MIN_CANDIDATES", "15")
+    monkeypatch.setenv("RANKING_MAX_CANDIDATES", "40")
+    monkeypatch.setenv("RANKING_ENRICHMENT_TIMEOUT", "2.5")
+
+    s = Settings.load()
+    assert s.ranking_enabled is False
+    assert s.ranking_weight_relevance == 0.5
+    assert s.ranking_weight_citations == 0.2
+    assert s.ranking_weight_recency == 0.3
+    assert s.ranking_recency_half_life_years == 5.0
+    assert s.ranking_candidate_multiplier == 4
+    assert s.ranking_min_candidates == 15
+    assert s.ranking_max_candidates == 40
+    assert s.ranking_enrichment_timeout == 2.5
+

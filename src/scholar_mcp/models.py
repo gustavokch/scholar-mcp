@@ -43,6 +43,8 @@ class PaperMetadata:
     citation_count: int | None = None
     oa_url: str | None = None
     institutions: list[str] = field(default_factory=list)
+    score: float | None = None
+    ranking_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
