@@ -160,6 +160,7 @@ def test_settings_ranking_defaults(monkeypatch):
     monkeypatch.delenv("RANKING_CANDIDATE_MULTIPLIER", raising=False)
     monkeypatch.delenv("RANKING_MIN_CANDIDATES", raising=False)
     monkeypatch.delenv("RANKING_MAX_CANDIDATES", raising=False)
+    monkeypatch.delenv("RANKING_ENRICHMENT_TIMEOUT", raising=False)
 
     s = Settings.load()
     assert s.ranking_enabled is True
@@ -170,6 +171,7 @@ def test_settings_ranking_defaults(monkeypatch):
     assert s.ranking_candidate_multiplier == 3
     assert s.ranking_min_candidates == 20
     assert s.ranking_max_candidates == 50
+    assert s.ranking_enrichment_timeout == 1.5
 
 
 def test_settings_ranking_custom_env(monkeypatch):
@@ -181,6 +183,7 @@ def test_settings_ranking_custom_env(monkeypatch):
     monkeypatch.setenv("RANKING_CANDIDATE_MULTIPLIER", "4")
     monkeypatch.setenv("RANKING_MIN_CANDIDATES", "15")
     monkeypatch.setenv("RANKING_MAX_CANDIDATES", "40")
+    monkeypatch.setenv("RANKING_ENRICHMENT_TIMEOUT", "2.5")
 
     s = Settings.load()
     assert s.ranking_enabled is False
@@ -191,4 +194,5 @@ def test_settings_ranking_custom_env(monkeypatch):
     assert s.ranking_candidate_multiplier == 4
     assert s.ranking_min_candidates == 15
     assert s.ranking_max_candidates == 40
+    assert s.ranking_enrichment_timeout == 2.5
 

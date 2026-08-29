@@ -337,8 +337,11 @@ class RankingPipeline:
         )
 
         try:
-            # Enrich citations with 1.5s timeout protection
-            enriched = await asyncio.wait_for(self.enrich_citations(papers), timeout=1.5)
+            # Enrich citations with timeout protection
+            enriched = await asyncio.wait_for(
+                self.enrich_citations(papers),
+                timeout=self.settings.ranking_enrichment_timeout,
+            )
         except Exception:
             for p in papers:
                 if p.citation_count is None:

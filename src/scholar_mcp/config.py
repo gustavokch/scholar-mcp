@@ -41,6 +41,7 @@ class Settings:
     ranking_candidate_multiplier: int = 3
     ranking_min_candidates: int = 20
     ranking_max_candidates: int = 50
+    ranking_enrichment_timeout: float = 1.5
 
     @property
     def ncbi_rate_limit(self) -> float:
@@ -102,4 +103,5 @@ class Settings:
             ranking_candidate_multiplier=int(os.getenv("RANKING_CANDIDATE_MULTIPLIER", "3")),
             ranking_min_candidates=int(os.getenv("RANKING_MIN_CANDIDATES", "20")),
             ranking_max_candidates=int(os.getenv("RANKING_MAX_CANDIDATES", "50")),
+            ranking_enrichment_timeout=float(os.getenv("RANKING_ENRICHMENT_TIMEOUT", "1.5")),
         )
