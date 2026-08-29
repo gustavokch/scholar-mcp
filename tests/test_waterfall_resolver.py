@@ -256,6 +256,7 @@ async def test_waterfall_resolver_search_with_rerank():
     assert results[0].title == "Paper 2"
     assert results[0].score == 1.2
     r.ranking_pipeline.rank_papers.assert_awaited_once()
+    assert r.pubmed.search.await_args.kwargs.get("sort") == "relevance"
 
 
 async def test_waterfall_resolver_search_without_rerank():
@@ -271,4 +272,5 @@ async def test_waterfall_resolver_search_without_rerank():
     assert len(results) == 2
     assert results[0].title == "Paper 1"
     r.ranking_pipeline.rank_papers.assert_not_awaited()
+    assert r.pubmed.search.await_args.kwargs.get("sort") == "relevance"
 

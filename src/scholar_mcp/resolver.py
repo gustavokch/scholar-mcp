@@ -416,6 +416,7 @@ class WaterfallResolver:
                 journal=journal,
                 year_start=year_start,
                 year_end=year_end,
+                sort="relevance",
             )
         elif source_mode == "crossref":
             papers = await self.crossref.search(
@@ -446,6 +447,7 @@ class WaterfallResolver:
                 journal=journal,
                 year_start=year_start,
                 year_end=year_end,
+                sort="relevance",
             )
             # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
             if len(papers) < fetch_limit:
