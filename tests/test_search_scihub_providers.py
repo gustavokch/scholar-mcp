@@ -60,9 +60,9 @@ async def test_pubmed_search_returns_metadata(client):
     assert results[0].title == "A PubMed Paper"
     assert results[0].pmid == "32000000"
     assert results[0].doi == "10.1038/nature123"
-    # Verify relevance sort does not force pub_date
+    # Verify relevance sort is requested from NCBI (default esearch order is date, not relevance)
     request = esearch_route.calls.last.request
-    assert request.url.params.get("sort") is None or request.url.params.get("sort") == ""
+    assert request.url.params.get("sort") == "relevance"
 
 
 @respx.mock

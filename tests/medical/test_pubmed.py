@@ -73,6 +73,24 @@ async def test_search_articles_flow(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_articles_requests_relevance_sort(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        esearch_route = respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
+        )
+
+        await client.search_articles("metformin", max_results=5)
+        assert esearch_route.calls.last.request.url.params.get("sort") == "relevance"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_articles_empty_id_list(tmp_path: Path):
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
@@ -85,3 +103,54 @@ async def test_search_articles_empty_id_list(tmp_path: Path):
     assert articles == []
     await cache.close()
     await http_client.aclose()
+
+
+TWO_ARTICLE_XML = """<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>11111</PMID>
+      <Article>
+        <Journal><Title>Journal A</Title></Journal>
+        <ArticleTitle>Metformin trial one</ArticleTitle>
+        <Abstract><AbstractText>First cohort.</AbstractText></Abstract>
+        <ArticleDate><Year>2020</Year></ArticleDate>
+        <ELocationID EIdType="doi">10.1000/one</ELocationID>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>22222</PMID>
+      <Article>
+        <Journal><Title>Journal B</Title></Journal>
+        <ArticleTitle>Metformin trial two</ArticleTitle>
+        <Abstract><AbstractText>Second cohort.</AbstractText></Abstract>
+        <ArticleDate><Year>2020</Year></ArticleDate>
+        <ELocationID EIdType="doi">10.1000/two</ELocationID>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>"""
+
+
+@respx.mock
+async def test_search_articles_blends_ncbi_best_match_position(tmp_path: Path):
+    """Two articles with identical lexical relevance and year must not score
+    equally: the esearch Best Match position is part of the relevance signal."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": ["11111", "22222"]}}
+        )
+        respx.get(EFETCH_URL).respond(content=TWO_ARTICLE_XML.encode())
+
+        articles, _ = await client.search_articles("metformin", max_results=5)
+        assert [a.pmid for a in articles] == ["11111", "22222"]
+        assert articles[0].score > articles[1].score
+    finally:
+        await cache.close()
+        await http_client.aclose()

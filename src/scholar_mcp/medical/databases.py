@@ -7,6 +7,7 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.clinical_trials import ClinicalTrialsClient
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
+from scholar_mcp.medical.ranking import rank_medical_articles
 from scholar_mcp.utils.deduplication import deduplicate_papers
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -161,7 +162,10 @@ class MedicalDatabasesEngine:
             papers.extend(a.to_dict() for a in res[0])
 
         unique, _ = deduplicate_papers(papers)
-        final_articles = [MedicalArticle.from_dict(p) for p in unique[:20]]
+        ranked = rank_medical_articles(
+            [MedicalArticle.from_dict(p) for p in unique], query
+        )
+        final_articles = ranked[:20]
 
         await self.cache.set(
             cache_key,
@@ -184,7 +188,14 @@ class MedicalDatabasesEngine:
         articles, _ = await self.pubmed.search_articles(term, max_results=15)
 
         deduped, _ = deduplicate_papers([a.to_dict() for a in articles])
-        final_articles = [MedicalArticle.from_dict(p) for p in deduped[:15]]
+        # Rank on the raw user query, not `term`: the journal filters would
+        # otherwise contribute their own tokens ("medicine", "lancet") as query
+        # terms. Rank before slicing so the cap keeps the best 15, not the
+        # first 15.
+        ranked = rank_medical_articles(
+            [MedicalArticle.from_dict(p) for p in deduped], query
+        )
+        final_articles = ranked[:15]
 
         await self.cache.set(
             cache_key,
