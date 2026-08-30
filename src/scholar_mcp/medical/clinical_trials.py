@@ -70,11 +70,12 @@ class ClinicalTrialsClient:
                         journal="ClinicalTrials.gov",
                         year=year,
                         url=url,
+                        nct_id=nct_id or None,
                         source_database="ClinicalTrials.gov",
                     )
                 )
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
