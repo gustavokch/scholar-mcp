@@ -11,10 +11,27 @@ from scholar_mcp.medical.models import (
 from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
 
+FETCH_ERROR_NOTE = "[Fetch error: an upstream source failed; results may be incomplete]"
+
+# Shown instead of a "no results" line when the search itself failed. Reporting
+# a failed fetch as an empty result set invites the caller to read it as proof
+# of absence, which on a medical question is the more harmful error.
+FETCH_FAILED_LINE = (
+    "The search could not be completed because an upstream source failed. "
+    "This is not evidence that no results exist."
+)
+
+
 def append_cache_info(text: str, meta: CacheMetadata) -> str:
+    if meta.error:
+        return f"{text}\n\n{FETCH_ERROR_NOTE}"
     if meta.cached:
         return f"{text}\n\n[Cached: {meta.cache_age}s old]"
     return f"{text}\n\n[Fresh response]"
+
+
+def _empty_state(message: str, meta: CacheMetadata) -> str:
+    return FETCH_FAILED_LINE if meta.error else message
 
 
 def format_drug_search_results(
@@ -24,7 +41,7 @@ def format_drug_search_results(
 ) -> dict[str, Any]:
     lines = [f"## Drug Search Results: {query}", ""]
     if not drugs:
-        lines.append("No drug labels found matching the query.")
+        lines.append(_empty_state("No drug labels found matching the query.", meta))
     else:
         for drug in drugs:
             of = drug.openfda
@@ -49,7 +66,9 @@ def format_drug_details(
     meta: CacheMetadata,
 ) -> dict[str, Any]:
     if drug is None:
-        markdown = append_cache_info(f"No FDA drug label found for NDC: {ndc}", meta)
+        markdown = append_cache_info(
+            _empty_state(f"No FDA drug label found for NDC: {ndc}", meta), meta
+        )
         return {"data": None, "markdown": markdown}
 
     of = drug.openfda
@@ -111,7 +130,7 @@ def format_rxnorm_drugs(
 ) -> dict[str, Any]:
     lines = [f"## RxNorm Drug Nomenclature: {query}", ""]
     if not drugs:
-        lines.append(f"No RxNorm drug concepts found for: {query}")
+        lines.append(_empty_state(f"No RxNorm drug concepts found for: {query}", meta))
     else:
         for drug in drugs:
             lines.append(f"- **{drug.name}** (RxCUI: {drug.rxcui}, Term Type: {drug.tty or 'N/A'})")
@@ -131,7 +150,7 @@ def format_health_indicators(
 ) -> dict[str, Any]:
     lines = [f"## WHO Global Health Statistics: {query}", ""]
     if not records:
-        lines.append(f"No health statistics found for: {query}")
+        lines.append(_empty_state(f"No health statistics found for: {query}", meta))
     else:
         for record in records:
             val = record.value or (str(record.numeric_value) if record.numeric_value is not None else "N/A")
@@ -152,7 +171,7 @@ def format_guidelines(
 ) -> dict[str, Any]:
     lines = [f"## Clinical Practice Guidelines: {query}", ""]
     if not guidelines:
-        lines.append(f"No clinical guidelines found for: {query}")
+        lines.append(_empty_state(f"No clinical guidelines found for: {query}", meta))
     else:
         for g in guidelines:
             lines.append(f"### {g.title}")
@@ -180,7 +199,7 @@ def format_pediatric_guidelines(
 ) -> dict[str, Any]:
     lines = [f"## Pediatric Guidelines: {query}", ""]
     if not guidelines:
-        lines.append(f"No pediatric guidelines found for: {query}")
+        lines.append(_empty_state(f"No pediatric guidelines found for: {query}", meta))
     else:
         for g in guidelines:
             lines.append(f"### {g.title}")
@@ -210,7 +229,7 @@ def format_medical_articles(
 ) -> dict[str, Any]:
     lines = [f"## Medical Literature Results: {query}", ""]
     if not articles:
-        lines.append(f"No medical literature found for: {query}")
+        lines.append(_empty_state(f"No medical literature found for: {query}", meta))
     else:
         for a in articles:
             lines.append(f"### {a.title}")
