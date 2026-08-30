@@ -178,3 +178,50 @@ async def test_search_medical_journals_composes_query(tmp_path: Path):
     assert len(articles) == 1
     await cache.close()
     await http_client.aclose()
+
+
+async def test_search_medical_journals_ranks_on_user_query_before_truncation(tmp_path: Path):
+    """The journal search sends `(query) AND ("NEJM"[Journal] OR ...)` to PubMed.
+
+    Ranking must use the raw user query -- not that composed term, whose journal
+    names would score as query terms -- and must run before the [:15] slice.
+    """
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    # Filler titles echo the journal-name tokens in the composed PubMed term.
+    filler = [
+        MedicalArticle(
+            title=f"Nature Medicine journal commentary {i}",
+            year=str(2000 + i),
+            doi=f"10.1000/filler{i}",
+        )
+        for i in range(20)
+    ]
+    on_topic = MedicalArticle(
+        title="Metformin diabetes outcomes",
+        year="2015",
+        doi="10.1000/ontopic",
+    )
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [*filler, on_topic],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+
+    engine = MedicalDatabasesEngine(
+        pubmed=mock_pubmed,
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+    try:
+        articles, _ = await engine.search_medical_journals("metformin diabetes")
+        assert len(articles) == 15
+        assert articles[0].title == "Metformin diabetes outcomes"
+    finally:
+        await cache.close()
+        await http_client.aclose()

@@ -188,7 +188,14 @@ class MedicalDatabasesEngine:
         articles, _ = await self.pubmed.search_articles(term, max_results=15)
 
         deduped, _ = deduplicate_papers([a.to_dict() for a in articles])
-        final_articles = [MedicalArticle.from_dict(p) for p in deduped[:15]]
+        # Rank on the raw user query, not `term`: the journal filters would
+        # otherwise contribute their own tokens ("medicine", "lancet") as query
+        # terms. Rank before slicing so the cap keeps the best 15, not the
+        # first 15.
+        ranked = rank_medical_articles(
+            [MedicalArticle.from_dict(p) for p in deduped], query
+        )
+        final_articles = ranked[:15]
 
         await self.cache.set(
             cache_key,
