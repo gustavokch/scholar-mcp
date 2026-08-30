@@ -58,7 +58,10 @@ class PubMedProvider:
         }
         if sort in ("pub_date", "date"):
             search_params["sort"] = "pub_date"
-        elif sort and sort != "relevance":
+        elif sort == "relevance":
+            # NCBI's default (no sort param) is most-recent-first; relevance must be explicit.
+            search_params["sort"] = "relevance"
+        elif sort:
             search_params["sort"] = sort
 
         try:

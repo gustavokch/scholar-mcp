@@ -80,6 +80,24 @@ async def test_search_medical_databases_combines_and_deduplicates(tmp_path: Path
 
 
 @respx.mock
+async def test_search_medical_databases_ranks_by_relevance(tmp_path: Path):
+    engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
+    try:
+        # PubMed article does not mention the query; trial title does. Relevance must win over source order.
+        mock_pubmed.search_articles.return_value = (
+            [MedicalArticle(title="General practice survey", year="2020")],
+            CacheMetadata(cached=False, cache_age=0),
+        )
+
+        articles, meta = await engine.search_medical_databases("diabetes")
+        assert articles[0].title == "Diabetes Clinical Trial"
+        assert articles[0].score is not None
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_medical_databases_survives_source_failure(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
     respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))

@@ -193,6 +193,7 @@ class MedicalArticle:
     full_text_available: bool = False
     full_text: str | None = None
     source_database: str = "PubMed"
+    score: float | None = None  # set by rank_medical_articles
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
