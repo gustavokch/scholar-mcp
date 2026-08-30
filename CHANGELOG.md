@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Medical PubMed relevance ranking**: `rank_medical_articles` now normalizes relevance as field coverage (title/abstract) instead of a raw weighted-hit count, so genuine lexical matches aren't outweighed by recency.
+- **NCBI source-position blend**: single-source PubMed results carry a `position_weight=0.35` prior (`1/sqrt(rank+1)`) into the relevance score, keeping NCBI's own Best-Match ordering influential; multi-source merges stay at `position_weight=0.0`.
+- **Rank before truncate**: `search_medical_databases` and `search_medical_journals` re-rank the deduplicated candidate pool before slicing to 20/15, instead of truncating first.
+- **Journal search ranks on raw query**: `search_medical_journals` ranks against the user's original query, not the `[Journal]`-filter-expanded PubMed search term.
+- Tokenizer (`_tokenize`) now guards against `None` input.
+
 ## [1.0.0] — 2026-08-28
 
 ### Changed (Breaking Changes)
