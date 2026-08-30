@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -146,3 +147,44 @@ async def test_get_child_health_statistics(tmp_path: Path):
     assert records[0].numeric_value == 6.2
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_get_health_statistics_marks_error_and_skips_cache_on_failure(tmp_path: Path):
+    client, cache, http_client = _client(tmp_path)
+    try:
+        route = respx.get(url__startswith=GHO_BASE).mock(
+            side_effect=httpx.ConnectError("boom")
+        )
+
+        records, meta = await client.get_health_statistics("life expectancy")
+        assert records == []
+        assert meta.error is True
+
+        # A failed indicator lookup must not be cached as "no such indicator".
+        after_first = route.call_count
+        await client.get_health_statistics("life expectancy")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_child_health_statistics_marks_error_on_failure(tmp_path: Path):
+    client, cache, http_client = _client(tmp_path)
+    try:
+        route = respx.get(url__startswith=GHO_BASE).mock(
+            side_effect=httpx.ConnectError("boom")
+        )
+
+        records, meta = await client.get_child_health_statistics("mortality")
+        assert records == []
+        assert meta.error is True
+
+        after_first = route.call_count
+        await client.get_child_health_statistics("mortality")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()

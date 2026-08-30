@@ -1,12 +1,15 @@
+import logging
 import re
 from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import WHOIndicatorRecord
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 WHO_API_BASE = "https://ghoapi.azureedge.net/api"
+
+logger = logging.getLogger(__name__)
 
 INDICATOR_SYNONYMS: dict[str, list[str]] = {
     "maternal mortality": ["maternal", "mortality", "maternal death"],
@@ -136,6 +139,7 @@ class WHOClient:
 
         # Find indicators matching search term
         indicators: list[dict[str, Any]] = []
+        errored = False
 
         # 1. Try primary query
         try:
@@ -146,11 +150,14 @@ class WHOClient:
                     "$format": "json",
                 },
             )
+            if resp is None:
+                raise FetchError("who indicator request failed")
             vals = resp.json().get("value", [])
             if vals:
                 indicators = vals
         except Exception:
-            pass
+            logger.warning("WHO indicator lookup failed for %r", indicator, exc_info=True)
+            errored = True
 
         # 2. Fallback to variations if primary query returned no indicators
         if not indicators:
@@ -164,14 +171,24 @@ class WHOClient:
                             "$format": "json",
                         },
                     )
+                    if resp is None:
+                        raise FetchError("who indicator variation request failed")
                     vals = resp.json().get("value", [])
                     if vals:
                         indicators = vals
                         break
                 except Exception:
+                    logger.warning(
+                        "WHO indicator variation lookup failed for %r", term, exc_info=True
+                    )
+                    errored = True
                     continue
 
         if not indicators:
+            # Only a genuine "no matching indicator" answer is cacheable; caching
+            # a failed lookup would suppress the query for the whole TTL.
+            if errored:
+                return [], CacheMetadata(cached=False, cache_age=0, error=True)
             await self.cache.set(cache_key, [], source="who")
             return [], CacheMetadata(cached=False, cache_age=0)
 
@@ -195,6 +212,8 @@ class WHOClient:
                     f"{WHO_API_BASE}/{code}",
                     params=params,
                 )
+                if resp is None:
+                    raise FetchError("who record request failed")
                 rows = resp.json().get("value", [])
                 # Deduplicate by SpatialDim keeping most recent TimeDim
                 by_spatial: dict[str, dict[str, Any]] = {}
@@ -207,18 +226,23 @@ class WHOClient:
                 for r in by_spatial.values():
                     all_records.append(_parse_indicator_record(r, code, name))
             except Exception:
+                logger.warning("WHO record fetch failed for %r", code, exc_info=True)
+                errored = True
                 continue
 
         # Sort by TimeDim desc
         all_records.sort(key=lambda r: r.time_dim, reverse=True)
         final_records = all_records[:limit]
 
+        if errored and not final_records:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [r.to_dict() for r in final_records],
             source="who",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0)
+        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def get_child_health_statistics(
         self,
@@ -232,6 +256,7 @@ class WHOClient:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
 
         all_records: list[WHOIndicatorRecord] = []
+        errored = False
 
         for code in WHO_CHILD_HEALTH_INDICATORS:
             params: dict[str, str] = {
@@ -246,19 +271,28 @@ class WHOClient:
                     f"{WHO_API_BASE}/{code}",
                     params=params,
                 )
+                if resp is None:
+                    raise FetchError("who child-health record request failed")
                 rows = resp.json().get("value", [])
                 for row in rows:
                     record = _parse_indicator_record(row, code)
                     all_records.append(record)
             except Exception:
+                logger.warning(
+                    "WHO child-health record fetch failed for %r", code, exc_info=True
+                )
+                errored = True
                 continue
 
         all_records.sort(key=lambda r: r.time_dim, reverse=True)
         final_records = all_records[:limit]
+
+        if errored and not final_records:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
             [r.to_dict() for r in final_records],
             source="child_health",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0)
+        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
