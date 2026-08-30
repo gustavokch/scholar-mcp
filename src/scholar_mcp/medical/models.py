@@ -188,6 +188,7 @@ class MedicalArticle:
     pmid: str | None = None
     pmc_id: str | None = None
     doi: str | None = None
+    nct_id: str | None = None
     url: str = ""
     citations: str = ""
     full_text_available: bool = False

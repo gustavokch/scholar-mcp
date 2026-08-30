@@ -154,3 +154,73 @@ def test_format_medical_articles():
     assert "Study on Asthma" in out["markdown"]
     assert "Pediatrics" in out["markdown"]
     assert len(out["data"]) == 1
+
+
+ERROR_META = CacheMetadata(cached=False, cache_age=0, error=True)
+FRESH_META = CacheMetadata(cached=False, cache_age=0)
+
+
+def test_append_cache_info_marks_fetch_error():
+    out = append_cache_info("Result content", ERROR_META)
+    assert "Fetch error" in out
+    assert "[Fresh response]" not in out
+    assert not any(ch in out for ch in "🔄📦🚨⚠️")
+
+
+def test_format_medical_articles_does_not_claim_absence_on_error():
+    out = format_medical_articles([], "asthma", ERROR_META)
+    assert "No medical literature found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_medical_articles_still_reports_absence_without_error():
+    out = format_medical_articles([], "asthma", FRESH_META)
+    assert "No medical literature found for: asthma" in out["markdown"]
+
+
+def test_format_drug_search_results_does_not_claim_absence_on_error():
+    out = format_drug_search_results([], "ibuprofen", ERROR_META)
+    assert "No drug labels found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_drug_details_does_not_claim_absence_on_error():
+    out = format_drug_details(None, "0002-4462", ERROR_META)
+    assert "No FDA drug label found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_rxnorm_drugs_does_not_claim_absence_on_error():
+    out = format_rxnorm_drugs([], "ibuprofen", ERROR_META)
+    assert "No RxNorm drug concepts found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_health_indicators_does_not_claim_absence_on_error():
+    out = format_health_indicators([], "measles", ERROR_META)
+    assert "No health statistics found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_guidelines_does_not_claim_absence_on_error():
+    out = format_guidelines([], "asthma", ERROR_META)
+    assert "No clinical guidelines found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_pediatric_guidelines_does_not_claim_absence_on_error():
+    out = format_pediatric_guidelines([], "nutrition", ERROR_META)
+    assert "No pediatric guidelines found" not in out["markdown"]
+    assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_medical_articles_renders_nct_id():
+    article = MedicalArticle(
+        title="Asthma Trial",
+        journal="ClinicalTrials.gov",
+        nct_id="NCT01234567",
+        url="https://clinicaltrials.gov/study/NCT01234567",
+        source_database="ClinicalTrials.gov",
+    )
+    out = format_medical_articles([article], "asthma", FRESH_META)
+    assert "- **NCT ID:** NCT01234567" in out["markdown"]

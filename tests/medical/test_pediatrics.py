@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -109,3 +110,61 @@ async def test_search_pediatric_literature_composes_journal_query(tmp_path: Path
     assert "European Journal of Pediatrics" in term
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_bright_futures_marks_error_and_skips_cache_on_failure(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(BF_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_bright_futures("nutrition")
+        assert guidelines == []
+        assert meta.error is True
+
+        after_first = route.call_count
+        await engine.search_bright_futures("nutrition")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_aap_policy_marks_error_on_failure(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(AAP_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_aap_policy("nutrition")
+        assert guidelines == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_aap_guidelines_marks_error_when_one_source_fails(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(BF_URL).respond(
+            html="""
+        <html><body>
+          <div class="search-result">
+            <h3 class="title"><a href="/guidelines/infant-nutrition">
+              Infant Nutrition Guidelines (0-12 months)</a></h3>
+            <p class="description">Recommendations on complementary feeding.</p>
+          </div>
+        </body></html>
+        """
+        )
+        respx.get(AAP_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_aap_guidelines("nutrition")
+        # Partial results are still returned, but flagged as incomplete.
+        assert guidelines
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()

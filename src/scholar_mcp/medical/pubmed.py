@@ -1,3 +1,4 @@
+import logging
 import re
 from bs4 import BeautifulSoup
 
@@ -5,11 +6,13 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.ranking import SOURCE_POSITION_WEIGHT, rank_medical_articles
 from scholar_mcp.utils.deduplication import deduplicate_papers
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+
+logger = logging.getLogger(__name__)
 
 
 def parse_pubmed_xml(xml_text: str) -> list[MedicalArticle]:
@@ -146,10 +149,16 @@ class MedicalPubMedClient:
 
         try:
             resp = await self.http_client.get(ESEARCH_URL, params=search_params)
+            # AsyncHttpClient.get returns None once retries are exhausted or on
+            # a >=400 status; check it explicitly rather than letting the miss
+            # surface as an AttributeError below.
+            if resp is None:
+                raise FetchError("esearch request failed")
             data = resp.json()
             idlist = data.get("esearchresult", {}).get("idlist", [])
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            logger.warning("PubMed esearch failed for %r", query, exc_info=True)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         if not idlist:
             await self.cache.set(cache_key, [], source="pubmed")
@@ -164,9 +173,12 @@ class MedicalPubMedClient:
 
         try:
             fetch_resp = await self.http_client.get(EFETCH_URL, params=fetch_params)
+            if fetch_resp is None:
+                raise FetchError("efetch request failed")
             articles = parse_pubmed_xml(fetch_resp.text)
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            logger.warning("PubMed efetch failed for %r", query, exc_info=True)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Deduplicate
         deduped_dicts, _ = deduplicate_papers([a.to_dict() for a in articles])

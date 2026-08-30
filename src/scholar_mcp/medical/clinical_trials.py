@@ -1,11 +1,14 @@
+import logging
 from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 CT_URL = "https://clinicaltrials.gov/api/v2/studies"
+
+logger = logging.getLogger(__name__)
 
 
 class ClinicalTrialsClient:
@@ -39,6 +42,11 @@ class ClinicalTrialsClient:
                     "format": "json",
                 },
             )
+            # AsyncHttpClient.get returns None once retries are exhausted or on
+            # a >=400 status; check it explicitly rather than letting the miss
+            # surface as an AttributeError below.
+            if resp is None:
+                raise FetchError("clinical trials request failed")
             data = resp.json()
             studies = data.get("studies", [])
             for study in studies:
@@ -70,11 +78,13 @@ class ClinicalTrialsClient:
                         journal="ClinicalTrials.gov",
                         year=year,
                         url=url,
+                        nct_id=nct_id or None,
                         source_database="ClinicalTrials.gov",
                     )
                 )
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            logger.warning("Clinical trials search failed for %r", query, exc_info=True)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,

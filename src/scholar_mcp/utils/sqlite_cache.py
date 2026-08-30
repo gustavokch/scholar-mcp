@@ -28,6 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_cache_lru ON cache_entries(last_accessed);
 class CacheMetadata:
     cached: bool
     cache_age: int
+    error: bool = False
 
 
 class SQLiteCacheManager:

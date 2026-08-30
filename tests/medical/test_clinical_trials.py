@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -42,6 +43,7 @@ async def test_search_clinical_trials(tmp_path: Path):
     assert articles[0].journal == "ClinicalTrials.gov"
     assert articles[0].year == "2021-01"
     assert articles[0].url == "https://clinicaltrials.gov/study/NCT01234567"
+    assert articles[0].nct_id == "NCT01234567"
     assert articles[0].source_database == "ClinicalTrials.gov"
     assert articles[0].abstract == "This study evaluates safety and efficacy."
 
@@ -69,5 +71,29 @@ async def test_search_clinical_trials_handles_missing_fields(tmp_path: Path):
     assert len(articles) == 1
     assert articles[0].title == "Clinical Trial"  # fallback title
     assert articles[0].authors == []
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_trials_marks_error_on_fetch_failure(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+
+    route = respx.get(CT_URL).mock(side_effect=httpx.ConnectError("connection refused"))
+
+    articles, meta = await client.search_clinical_trials("asthma")
+    assert articles == []
+    assert meta.cached is False
+    assert meta.error is True
+
+    # The failure must not be cached: a second call re-issues the request.
+    # Exact counts are retry-dependent, so only require fresh traffic.
+    after_first = route.call_count
+    await client.search_clinical_trials("asthma")
+    assert route.call_count > after_first
+
     await cache.close()
     await http_client.aclose()

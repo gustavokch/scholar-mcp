@@ -163,6 +163,59 @@ async def test_search_medical_databases_survives_source_failure(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_medical_databases_marks_error_when_all_sources_fail(tmp_path: Path):
+    """Empty + errored must reach the caller and must not be cached."""
+    engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
+    mock_pubmed.search_articles.return_value = ([], CacheMetadata(cached=False, cache_age=0, error=True))
+    mock_ct = AsyncMock()
+    mock_ct.search_clinical_trials.return_value = ([], CacheMetadata(cached=False, cache_age=0, error=True))
+    engine.clinical_trials = mock_ct
+    respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))
+
+    articles, meta = await engine.search_medical_databases("diabetes")
+    assert articles == []
+    assert meta.error is True
+
+    # The failure must not be cached: a second call re-issues the request.
+    # Exact counts are retry-dependent, so only require fresh traffic.
+    after_first = respx.get(COCHRANE_URL).call_count
+    await engine.search_medical_databases("diabetes")
+    assert respx.get(COCHRANE_URL).call_count > after_first
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_medical_databases_marks_partial_source_failure(tmp_path: Path):
+    """Cochrane down while PubMed/ClinicalTrials succeed: results still return,
+    but the caller must learn the set is incomplete."""
+    engine, cache, http_client, _ = await _engine(tmp_path)
+    respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))
+
+    articles, meta = await engine.search_medical_databases("diabetes")
+    assert len(articles) == 2
+    assert meta.error is True
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_medical_journals_propagates_pubmed_error(tmp_path: Path):
+    engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
+    mock_pubmed.search_articles.return_value = ([], CacheMetadata(cached=False, cache_age=0, error=True))
+
+    articles, meta = await engine.search_medical_journals("diabetes")
+    assert articles == []
+    assert meta.error is True
+
+    after_first = mock_pubmed.search_articles.await_count
+    await engine.search_medical_journals("diabetes")
+    assert mock_pubmed.search_articles.await_count > after_first
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_search_medical_journals_composes_query(tmp_path: Path):
     engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
     mock_pubmed.search_articles.return_value = (

@@ -1,11 +1,14 @@
+import logging
 from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import RxNormDrug
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 RXNORM_DRUGS_URL = "https://rxnav.nlm.nih.gov/REST/drugs.json"
+
+logger = logging.getLogger(__name__)
 
 
 def _as_list(value: Any) -> list[str]:
@@ -43,6 +46,8 @@ class RxNormClient:
                 RXNORM_DRUGS_URL,
                 params={"name": query},
             )
+            if resp is None:
+                raise FetchError("rxnorm request failed")
             data = resp.json()
             concept_groups = data.get("drugGroup", {}).get("conceptGroup", [])
             for group in concept_groups:
@@ -72,7 +77,8 @@ class RxNormClient:
                         )
                     )
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            logger.warning("RxNorm lookup failed for %r", query, exc_info=True)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
