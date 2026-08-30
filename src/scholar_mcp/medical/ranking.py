@@ -51,16 +51,22 @@ def rank_medical_articles(
         return articles
 
     now_year = current_year if current_year is not None else datetime.datetime.now().year
-    denorm = (_TITLE_WEIGHT + _ABSTRACT_WEIGHT) * len(terms)
+    # Relevance is expressed as field coverage rather than a raw weighted hit
+    # count. Dividing by (title + abstract) weights would assume every term
+    # appears in both fields, capping a title-only match at 2/3 and an
+    # abstract-only match at 1/3 -- low enough that the 0..1 recency term could
+    # outrank genuine lexical evidence.
+    _ABSTRACT_RATIO = _ABSTRACT_WEIGHT / _TITLE_WEIGHT
+    term_count = len(terms)
 
     scored: list[tuple[float, int, MedicalArticle]] = []
     for idx, article in enumerate(articles):
         title_terms = set(_tokenize(article.title))
         abstract_terms = set(_tokenize(article.abstract))
 
-        title_hits = sum(1 for t in terms if t in title_terms)
-        abstract_hits = sum(1 for t in terms if t in abstract_terms)
-        relevance = (_TITLE_WEIGHT * title_hits + _ABSTRACT_WEIGHT * abstract_hits) / denorm
+        title_coverage = sum(1 for t in terms if t in title_terms) / term_count
+        abstract_coverage = sum(1 for t in terms if t in abstract_terms) / term_count
+        relevance = min(1.0, title_coverage + _ABSTRACT_RATIO * abstract_coverage)
 
         recency, _ = ScoringEngine.calculate_recency_feature(
             article.year,

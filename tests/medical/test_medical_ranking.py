@@ -1,3 +1,5 @@
+import pytest
+
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.ranking import rank_medical_articles
 
@@ -75,3 +77,40 @@ def test_punctuation_heavy_query_ranks_correctly():
     ]
     ranked = rank_medical_articles(articles, query)
     assert ranked[0].title == "Metformin and diabetes outcomes"
+
+
+def test_abstract_match_outranks_irrelevant_recent_article():
+    """Lexical evidence must be able to outweigh the 0..1 recency term.
+
+    Before the coverage fix, an abstract-only full match capped at 0.33 of the
+    relevance range, so a zero-match 2026 article (0.3000) beat a 2010 article
+    matching every query term in its abstract (0.2949).
+    """
+    query = "metformin diabetes"
+    articles = [
+        _article("Weekly news roundup", abstract="Unrelated content.", year="2026"),
+        _article(
+            "Cohort study of outcomes",
+            abstract="We study metformin therapy in diabetes patients.",
+            year="2010",
+        ),
+    ]
+    ranked = rank_medical_articles(articles, query, current_year=2026)
+    assert ranked[0].title == "Cohort study of outcomes"
+
+
+def test_full_title_match_reaches_max_relevance():
+    query = "metformin diabetes"
+    articles = [_article("Metformin diabetes", year="2026")]
+    ranked = rank_medical_articles(articles, query, current_year=2026)
+    assert ranked[0].score == pytest.approx(1.0)
+
+
+def test_full_abstract_only_match_reaches_half_relevance():
+    query = "metformin diabetes"
+    articles = [
+        _article("Cohort study", abstract="Metformin in diabetes.", year="2026")
+    ]
+    ranked = rank_medical_articles(articles, query, current_year=2026)
+    # 0.7 * 0.5 relevance + 0.3 * 1.0 recency
+    assert ranked[0].score == pytest.approx(0.65)
