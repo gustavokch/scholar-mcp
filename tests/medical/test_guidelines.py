@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -111,3 +112,25 @@ async def test_search_clinical_guidelines_organization_expansion(tmp_path: Path)
 
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_marks_error_on_pubmed_failure(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        route = respx.get(ESEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_clinical_guidelines("asthma")
+        assert guidelines == []
+        assert meta.error is True
+
+        after_first = route.call_count
+        await engine.search_clinical_guidelines("asthma")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()

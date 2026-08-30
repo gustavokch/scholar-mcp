@@ -150,7 +150,8 @@ class GuidelinesEngine:
         # Layer 1: Search with formal publication type filters
         pt_query = " OR ".join(GUIDELINE_PUBLICATION_TYPES)
         l1_query = f"({query}) AND ({pt_query})"
-        articles_l1, _ = await self.pubmed.search_articles(l1_query, max_results=20)
+        articles_l1, meta_l1 = await self.pubmed.search_articles(l1_query, max_results=20)
+        errored = meta_l1.error
 
         candidates: list[tuple[MedicalArticle, bool]] = [(a, True) for a in articles_l1]
         seen_pmids = {a.pmid for a in articles_l1 if a.pmid}
@@ -159,7 +160,8 @@ class GuidelinesEngine:
         if len(candidates) < LAYER_THRESHOLD:
             kw_terms = " OR ".join(f"{kw}[tiab]" for kw in GUIDELINE_KEYWORDS[:5])
             l2_query = f"({query}) AND ({kw_terms})"
-            articles_l2, _ = await self.pubmed.search_articles(l2_query, max_results=20)
+            articles_l2, meta_l2 = await self.pubmed.search_articles(l2_query, max_results=20)
+            errored = errored or meta_l2.error
             for a in articles_l2:
                 if a.pmid and a.pmid not in seen_pmids:
                     seen_pmids.add(a.pmid)
@@ -199,9 +201,12 @@ class GuidelinesEngine:
 
         guidelines.sort(key=lambda g: g.score, reverse=True)
 
+        if errored and not guidelines:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [g.to_dict() for g in guidelines],
             source="guidelines",
         )
-        return guidelines, CacheMetadata(cached=False, cache_age=0)
+        return guidelines, CacheMetadata(cached=False, cache_age=0, error=errored)
