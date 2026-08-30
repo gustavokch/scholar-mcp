@@ -52,3 +52,26 @@ def test_scores_populated_on_articles():
     ranked = rank_medical_articles(articles, query)
     assert ranked[0].score is not None
     assert 0.0 <= ranked[0].score <= 1.0
+
+
+def test_none_text_does_not_raise():
+    # Article with explicit None abstract must not crash tokenization.
+    article = MedicalArticle(title="Metformin trial", abstract=None)  # type: ignore[arg-type]
+    ranked = rank_medical_articles([article], "metformin")
+    assert ranked[0].score is not None
+
+
+def test_stopword_only_query_preserves_order():
+    articles = [_article("Second paper"), _article("First paper")]
+    ranked = rank_medical_articles(articles, "in the of and")
+    assert [a.title for a in ranked] == ["Second paper", "First paper"]
+
+
+def test_punctuation_heavy_query_ranks_correctly():
+    query = "metformin, diabetes!"
+    articles = [
+        _article("Other topic", abstract="Nothing."),
+        _article("Metformin and diabetes outcomes"),
+    ]
+    ranked = rank_medical_articles(articles, query)
+    assert ranked[0].title == "Metformin and diabetes outcomes"

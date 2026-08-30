@@ -1,5 +1,4 @@
 import datetime
-import math
 import re
 
 from scholar_mcp.medical.models import MedicalArticle
@@ -24,7 +23,9 @@ _STOPWORDS = {
 }
 
 
-def _tokenize(text: str) -> list[str]:
+def _tokenize(text: str | None) -> list[str]:
+    if not text:
+        return []
     return [
         t for t in _WORD_SPLIT_RE.split(text.lower())
         if len(t) >= 2 and t not in _STOPWORDS
