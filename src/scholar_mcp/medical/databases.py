@@ -162,9 +162,10 @@ class MedicalDatabasesEngine:
             papers.extend(a.to_dict() for a in res[0])
 
         unique, _ = deduplicate_papers(papers)
-        final_articles = rank_medical_articles(
-            [MedicalArticle.from_dict(p) for p in unique[:20]], query
+        ranked = rank_medical_articles(
+            [MedicalArticle.from_dict(p) for p in unique], query
         )
+        final_articles = ranked[:20]
 
         await self.cache.set(
             cache_key,
