@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 from typing import Any
 from bs4 import BeautifulSoup
@@ -9,8 +10,10 @@ from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.medical.ranking import rank_medical_articles
 from scholar_mcp.utils.deduplication import deduplicate_papers
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+logger = logging.getLogger(__name__)
 
 COCHRANE_BASE = "https://www.cochranelibrary.com"
 COCHRANE_URL = "https://www.cochranelibrary.com/search"
@@ -65,6 +68,11 @@ class MedicalDatabasesEngine:
                 params={"q": query},
                 headers={"User-Agent": BROWSER_UA},
             )
+            # AsyncHttpClient.get returns None once retries are exhausted or on
+            # a >=400 status; check it explicitly rather than letting the miss
+            # surface as an AttributeError below.
+            if resp is None:
+                raise FetchError("cochrane request failed")
             html_text = resp.text
             soup = BeautifulSoup(html_text, "html.parser")
             for item in soup.select(COCHRANE_ITEM_SELECTORS):
@@ -93,7 +101,8 @@ class MedicalDatabasesEngine:
                     )
                 )
         except Exception:
-            return [], CacheMetadata(cached=False, cache_age=0)
+            logger.warning("Cochrane search failed for %r", query, exc_info=True)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Fallback to Playwright if enabled and no items found
         if not articles and self.settings.enable_playwright_fallback:
@@ -156,9 +165,17 @@ class MedicalDatabasesEngine:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         papers: list[dict[str, Any]] = []
+        errored = False
         for res in results:
-            if isinstance(res, BaseException) or not res or not res[0]:
+            if isinstance(res, BaseException):
+                # gather returned the exception instead of a result
+                logger.warning("Medical database sub-search raised", exc_info=res)
+                errored = True
                 continue
+            if not res or not res[0]:
+                errored = errored or res[1].error
+                continue
+            errored = errored or res[1].error
             papers.extend(a.to_dict() for a in res[0])
 
         unique, _ = deduplicate_papers(papers)
@@ -167,12 +184,17 @@ class MedicalDatabasesEngine:
         )
         final_articles = ranked[:20]
 
+        # A failed fetch that produced nothing must reach the caller as a
+        # failure rather than being cached as a genuine absence.
+        if errored and not final_articles:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [a.to_dict() for a in final_articles],
             source="pubmed",
         )
-        return final_articles, CacheMetadata(cached=False, cache_age=0)
+        return final_articles, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def search_medical_journals(
         self,
@@ -185,7 +207,7 @@ class MedicalDatabasesEngine:
 
         journal_filters = " OR ".join(f'"{j}"[Journal]' for j in TOP_JOURNALS)
         term = f"({query}) AND ({journal_filters})"
-        articles, _ = await self.pubmed.search_articles(term, max_results=15)
+        articles, pubmed_meta = await self.pubmed.search_articles(term, max_results=15)
 
         deduped, _ = deduplicate_papers([a.to_dict() for a in articles])
         # Rank on the raw user query, not `term`: the journal filters would
@@ -197,9 +219,14 @@ class MedicalDatabasesEngine:
         )
         final_articles = ranked[:15]
 
+        # A failed fetch that produced nothing must reach the caller as a
+        # failure rather than being cached as a genuine absence.
+        if pubmed_meta.error and not final_articles:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [a.to_dict() for a in final_articles],
             source="pubmed",
         )
-        return final_articles, CacheMetadata(cached=False, cache_age=0)
+        return final_articles, CacheMetadata(cached=False, cache_age=0, error=pubmed_meta.error)
