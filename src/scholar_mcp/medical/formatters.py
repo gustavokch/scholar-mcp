@@ -242,6 +242,8 @@ def format_medical_articles(
                 lines.append(f"- **PMID:** {a.pmid}")
             if a.doi:
                 lines.append(f"- **DOI:** {a.doi}")
+            if a.nct_id:
+                lines.append(f"- **NCT ID:** {a.nct_id}")
             if a.url:
                 lines.append(f"- **URL:** {a.url}")
             if a.abstract:

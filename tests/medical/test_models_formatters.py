@@ -212,3 +212,15 @@ def test_format_pediatric_guidelines_does_not_claim_absence_on_error():
     out = format_pediatric_guidelines([], "nutrition", ERROR_META)
     assert "No pediatric guidelines found" not in out["markdown"]
     assert "not evidence that no results exist" in out["markdown"]
+
+
+def test_format_medical_articles_renders_nct_id():
+    article = MedicalArticle(
+        title="Asthma Trial",
+        journal="ClinicalTrials.gov",
+        nct_id="NCT01234567",
+        url="https://clinicaltrials.gov/study/NCT01234567",
+        source_database="ClinicalTrials.gov",
+    )
+    out = format_medical_articles([article], "asthma", FRESH_META)
+    assert "- **NCT ID:** NCT01234567" in out["markdown"]
