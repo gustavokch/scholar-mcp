@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
-from scholar_mcp.medical.ranking import rank_medical_articles
+from scholar_mcp.medical.ranking import SOURCE_POSITION_WEIGHT, rank_medical_articles
 from scholar_mcp.utils.deduplication import deduplicate_papers
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -170,8 +170,12 @@ class MedicalPubMedClient:
 
         # Deduplicate
         deduped_dicts, _ = deduplicate_papers([a.to_dict() for a in articles])
+        # esearch was asked for Best Match, so the incoming order carries NCBI's
+        # own relevance signal; blend it in rather than discarding it.
         final_articles = rank_medical_articles(
-            [MedicalArticle.from_dict(d) for d in deduped_dicts], query
+            [MedicalArticle.from_dict(d) for d in deduped_dicts],
+            query,
+            position_weight=SOURCE_POSITION_WEIGHT,
         )
 
         await self.cache.set(

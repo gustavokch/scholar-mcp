@@ -114,3 +114,38 @@ def test_full_abstract_only_match_reaches_half_relevance():
     ranked = rank_medical_articles(articles, query, current_year=2026)
     # 0.7 * 0.5 relevance + 0.3 * 1.0 recency
     assert ranked[0].score == pytest.approx(0.65)
+
+
+def test_position_weight_preserves_source_order_on_ties():
+    query = "asthma"
+    articles = [
+        _article("Asthma outcomes A", year="2020"),
+        _article("Asthma outcomes B", year="2020"),
+    ]
+    ranked = rank_medical_articles(
+        articles, query, current_year=2026, position_weight=0.35
+    )
+    assert ranked[0].title == "Asthma outcomes A"
+    assert ranked[0].score > ranked[1].score
+
+
+def test_position_weight_does_not_override_strong_lexical_signal():
+    query = "metformin diabetes"
+    articles = [
+        _article("Unrelated first result", year="2020"),
+        _article("Metformin diabetes trial", year="2020"),
+    ]
+    ranked = rank_medical_articles(
+        articles, query, current_year=2026, position_weight=0.35
+    )
+    assert ranked[0].title == "Metformin diabetes trial"
+
+
+def test_position_weight_defaults_to_zero():
+    query = "asthma"
+    articles = [
+        _article("Asthma outcomes A", year="2020"),
+        _article("Asthma outcomes B", year="2020"),
+    ]
+    ranked = rank_medical_articles(articles, query, current_year=2026)
+    assert ranked[0].score == ranked[1].score

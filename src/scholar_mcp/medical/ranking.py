@@ -10,6 +10,12 @@ RELEVANCE_WEIGHT = 0.7
 RECENCY_HALF_LIFE_YEARS = 7.0
 DEFAULT_AGE_YEARS = 10.0
 
+# Share of the relevance component given to the source's own ordering when that
+# ordering is meaningful (a single relevance-sorted source, e.g. NCBI Best
+# Match). Keeps the trained upstream ranking influential without letting it
+# override a clear lexical mismatch.
+SOURCE_POSITION_WEIGHT = 0.35
+
 _TITLE_WEIGHT = 2.0
 _ABSTRACT_WEIGHT = 1.0
 
@@ -36,19 +42,29 @@ def rank_medical_articles(
     articles: list[MedicalArticle],
     query: str,
     current_year: int | None = None,
+    position_weight: float = 0.0,
 ) -> list[MedicalArticle]:
-    """Re-rank articles by query-term overlap and recency.
+    """Re-rank articles by query-term overlap, source position, and recency.
 
     Lexical relevance counts title hits twice as heavily as abstract hits;
     recency uses the same exponential half-life decay as the scholar path.
-    Pure function: no network calls, source order breaks ties.
+
+    ``position_weight`` blends the source ordering into the relevance component
+    using the scholar path's ``1/sqrt(rank + 1)`` prior. Pass a non-zero weight
+    only when the input list is already relevance-ordered by a single source
+    (for example NCBI Best Match). Leave it at 0.0 for merged multi-source
+    pools, where list position reflects task order rather than relevance.
+
+    Makes no network calls. Assigns ``article.score`` on the given objects in
+    place and returns a new list ordered by that score, source order breaking
+    ties.
     """
     if not articles:
         return []
 
     terms = _tokenize(query)
     if not terms:
-        return articles
+        return list(articles)
 
     now_year = current_year if current_year is not None else datetime.datetime.now().year
     # Relevance is expressed as field coverage rather than a raw weighted hit
@@ -58,6 +74,7 @@ def rank_medical_articles(
     # outrank genuine lexical evidence.
     _ABSTRACT_RATIO = _ABSTRACT_WEIGHT / _TITLE_WEIGHT
     term_count = len(terms)
+    lexical_weight = 1.0 - position_weight
 
     scored: list[tuple[float, int, MedicalArticle]] = []
     for idx, article in enumerate(articles):
@@ -66,7 +83,13 @@ def rank_medical_articles(
 
         title_coverage = sum(1 for t in terms if t in title_terms) / term_count
         abstract_coverage = sum(1 for t in terms if t in abstract_terms) / term_count
-        relevance = min(1.0, title_coverage + _ABSTRACT_RATIO * abstract_coverage)
+        lexical = min(1.0, title_coverage + _ABSTRACT_RATIO * abstract_coverage)
+
+        if position_weight:
+            position = ScoringEngine.calculate_relevance(idx)
+            relevance = lexical_weight * lexical + position_weight * position
+        else:
+            relevance = lexical
 
         recency, _ = ScoringEngine.calculate_recency_feature(
             article.year,
