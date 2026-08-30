@@ -1,12 +1,15 @@
+import logging
 import re
 from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import DrugLabel, OpenFDAData
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 FDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
+
+logger = logging.getLogger(__name__)
 
 COMMON_DRUG_WORDS = {
     "medication",
@@ -119,6 +122,7 @@ class FDAClient:
 
         all_results: list[DrugLabel] = []
         seen_ndcs: set[str] = set()
+        errored = False
 
         for sq in search_queries:
             try:
@@ -126,6 +130,8 @@ class FDAClient:
                     FDA_LABEL_URL,
                     params={"search": sq, "limit": str(limit)},
                 )
+                if resp is None:
+                    raise FetchError("fda label request failed")
                 data = resp.json()
                 results = data.get("results", [])
                 for raw in results:
@@ -141,14 +147,22 @@ class FDAClient:
                 if len(all_results) >= limit:
                     break
             except Exception:
+                logger.warning("FDA label search failed for %r", sq, exc_info=True)
+                errored = True
                 continue
+
+        # Caching an empty list produced by a failed fetch would serve that
+        # failure for the whole TTL, so skip the write when nothing was found
+        # and every query variant errored.
+        if errored and not all_results:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
             [d.to_dict() for d in all_results],
             source="fda",
         )
-        return all_results, CacheMetadata(cached=False, cache_age=0)
+        return all_results, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def get_drug_by_ndc(
         self,
@@ -161,11 +175,15 @@ class FDAClient:
                 return DrugLabel.from_dict(cached_data), meta
             return None, meta
 
+        errored = False
+
         try:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
                 params={"search": f'openfda.product_ndc:"{ndc}"', "limit": "1"},
             )
+            if resp is None:
+                raise FetchError("fda ndc request failed")
             data = resp.json()
             results = data.get("results", [])
             if results:
@@ -173,7 +191,8 @@ class FDAClient:
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")
                 return drug, CacheMetadata(cached=False, cache_age=0)
         except Exception:
-            pass
+            logger.warning("FDA exact NDC lookup failed for %r", ndc, exc_info=True)
+            errored = True
 
         # Try fallback query without exact quotes
         try:
@@ -181,6 +200,8 @@ class FDAClient:
                 FDA_LABEL_URL,
                 params={"search": f"openfda.product_ndc:{ndc}", "limit": "1"},
             )
+            if resp is None:
+                raise FetchError("fda ndc fallback request failed")
             data = resp.json()
             results = data.get("results", [])
             if results:
@@ -188,7 +209,13 @@ class FDAClient:
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")
                 return drug, CacheMetadata(cached=False, cache_age=0)
         except Exception:
-            pass
+            logger.warning("FDA fallback NDC lookup failed for %r", ndc, exc_info=True)
+            errored = True
+
+        # Only a genuine "no such label" answer is worth caching; caching a
+        # fetch failure would suppress the lookup for the whole TTL.
+        if errored:
+            return None, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(cache_key, None, source="fda")
         return None, CacheMetadata(cached=False, cache_age=0)
@@ -203,7 +230,7 @@ class FDAClient:
         if meta.cached and cached_data is not None:
             return [DrugLabel.from_dict(d) for d in cached_data], meta
 
-        base_drugs, _ = await self.search_drugs(query, limit=limit * 2)
+        base_drugs, base_meta = await self.search_drugs(query, limit=limit * 2)
 
         pediatric_drugs: list[DrugLabel] = []
         for drug in base_drugs:
@@ -226,9 +253,12 @@ class FDAClient:
                 pediatric_drugs.append(drug)
 
         final_drugs = pediatric_drugs[:limit]
+        if base_meta.error and not final_drugs:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [d.to_dict() for d in final_drugs],
             source="pediatric_drugs",
         )
-        return final_drugs, CacheMetadata(cached=False, cache_age=0)
+        return final_drugs, CacheMetadata(cached=False, cache_age=0, error=base_meta.error)

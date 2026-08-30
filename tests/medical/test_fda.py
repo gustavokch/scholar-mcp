@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -124,3 +125,87 @@ async def test_search_pediatric_drugs_matches_use_in_specific_populations(tmp_pa
     assert drugs[0].openfda.brand_name == ["Kid Relief"]
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_marks_error_and_skips_cache_when_all_queries_fail(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = FDAClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(FDA_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        drugs, meta = await client.search_drugs("ibuprofen")
+        assert drugs == []
+        assert meta.error is True
+
+        # Caching a network failure would serve the empty list for the whole
+        # TTL, so a second call must re-issue the request.
+        after_first = route.call_count
+        await client.search_drugs("ibuprofen")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_marks_error_and_skips_cache_on_failure(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = FDAClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(FDA_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        drug, meta = await client.get_drug_by_ndc("50580-488")
+        assert drug is None
+        assert meta.error is True
+
+        after_first = route.call_count
+        await client.get_drug_by_ndc("50580-488")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_still_caches_genuine_absence(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = FDAClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(FDA_URL).respond(json={"results": []})
+
+        drug, meta = await client.get_drug_by_ndc("50580-488")
+        assert drug is None
+        assert meta.error is False
+
+        after_first = route.call_count
+        drug2, meta2 = await client.get_drug_by_ndc("50580-488")
+        assert drug2 is None
+        assert meta2.cached is True
+        assert route.call_count == after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_pediatric_drugs_propagates_fetch_error(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = FDAClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(FDA_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        drugs, meta = await client.search_pediatric_drugs("ibuprofen")
+        assert drugs == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
