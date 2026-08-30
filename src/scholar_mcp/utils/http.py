@@ -12,6 +12,16 @@ from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
+class FetchError(RuntimeError):
+    """Raised by callers when AsyncHttpClient returns None for a request.
+
+    `AsyncHttpClient.get` reports failure by returning None, so a caller that
+    ignores it only discovers the miss when the response is dereferenced. Client
+    code raises this instead, so the failure is explicit and can be logged and
+    flagged as `CacheMetadata.error`.
+    """
+
+
 class AsyncHttpClient:
     """Shared HTTP client with rate-limiting, retries, and NCBI credential injection."""
 

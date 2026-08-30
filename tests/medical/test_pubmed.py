@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
@@ -151,6 +152,64 @@ async def test_search_articles_blends_ncbi_best_match_position(tmp_path: Path):
         articles, _ = await client.search_articles("metformin", max_results=5)
         assert [a.pmid for a in articles] == ["11111", "22222"]
         assert articles[0].score > articles[1].score
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_articles_marks_error_on_esearch_failure(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(ESEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        articles, meta = await client.search_articles("metformin", max_results=5)
+        assert articles == []
+        assert meta.error is True
+
+        # The failure must not be cached: a second call re-issues the request.
+        # Exact counts are retry-dependent, so only require fresh traffic.
+        after_first = route.call_count
+        await client.search_articles("metformin", max_results=5)
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_articles_marks_error_on_efetch_failure(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["12345"]}})
+        respx.get(EFETCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        articles, meta = await client.search_articles("metformin", max_results=5)
+        assert articles == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_articles_leaves_error_false_on_success(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["12345"]}})
+        respx.get(EFETCH_URL).respond(content=PUBMED_XML.encode())
+
+        _, meta = await client.search_articles("metformin", max_results=5)
+        assert meta.error is False
     finally:
         await cache.close()
         await http_client.aclose()
