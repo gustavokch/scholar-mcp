@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import re
 from bs4 import BeautifulSoup
@@ -6,7 +7,7 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle, PediatricGuideline
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 BF_BASE = "https://brightfutures.aap.org"
@@ -28,6 +29,8 @@ AGE_TERM_RE = re.compile(
     re.IGNORECASE,
 )
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_age_group(text: str) -> str:
@@ -79,7 +82,12 @@ class PediatricsEngine:
         item_selectors: str,
         base_url: str,
         source: str,
-    ) -> list[PediatricGuideline]:
+    ) -> tuple[list[PediatricGuideline], bool]:
+        """Scrape one guideline source.
+
+        Returns the guidelines and whether the fetch failed, so callers can
+        distinguish an unreachable source from one that genuinely has no match.
+        """
         if self.jitter_range:
             await asyncio.sleep(random.uniform(*self.jitter_range))
 
@@ -89,9 +97,12 @@ class PediatricsEngine:
                 params=params,
                 headers={"User-Agent": BROWSER_UA},
             )
+            if resp is None:
+                raise FetchError("guideline page request failed")
             html_text = resp.text
         except Exception:
-            return []
+            logger.warning("Pediatric guideline scrape failed for %s", url, exc_info=True)
+            return [], True
 
         soup = BeautifulSoup(html_text, "html.parser")
         guidelines: list[PediatricGuideline] = []
@@ -189,9 +200,11 @@ class PediatricsEngine:
                         )
                     )
             except Exception:
-                pass
+                logger.warning(
+                    "Playwright fallback failed for %s", url, exc_info=True
+                )
 
-        return guidelines
+        return guidelines, False
 
     async def search_bright_futures(
         self,
@@ -202,13 +215,16 @@ class PediatricsEngine:
         if meta.cached and cached_data is not None:
             return [PediatricGuideline.from_dict(d) for d in cached_data], meta
 
-        results = await self._scrape_html(
+        results, errored = await self._scrape_html(
             BF_URL,
             {"q": query},
             BF_ITEM_SELECTORS,
             BF_BASE,
             "bright-futures",
         )
+
+        if errored:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
@@ -226,13 +242,16 @@ class PediatricsEngine:
         if meta.cached and cached_data is not None:
             return [PediatricGuideline.from_dict(d) for d in cached_data], meta
 
-        results = await self._scrape_html(
+        results, errored = await self._scrape_html(
             AAP_URL,
             {"q": query},
             AAP_ITEM_SELECTORS,
             AAP_BASE,
             "aap-policy",
         )
+
+        if errored:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
@@ -257,10 +276,15 @@ class PediatricsEngine:
         )
 
         all_items: list[PediatricGuideline] = []
-        if isinstance(bf_res, tuple):
-            all_items.extend(bf_res[0])
-        if isinstance(aap_res, tuple):
-            all_items.extend(aap_res[0])
+        errored = False
+        for res in (bf_res, aap_res):
+            if isinstance(res, tuple):
+                all_items.extend(res[0])
+                errored = errored or res[1].error
+            else:
+                # gather returned the exception instead of a result
+                logger.warning("Pediatric guideline sub-search raised", exc_info=res)
+                errored = True
 
         seen: set[str] = set()
         deduped: list[PediatricGuideline] = []
@@ -270,12 +294,15 @@ class PediatricsEngine:
                 seen.add(norm)
                 deduped.append(g)
 
+        if errored and not deduped:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         await self.cache.set(
             cache_key,
             [g.to_dict() for g in deduped],
             source="guidelines",
         )
-        return deduped, CacheMetadata(cached=False, cache_age=0)
+        return deduped, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def search_pediatric_literature(
         self,
@@ -289,11 +316,14 @@ class PediatricsEngine:
 
         journal_filters = " OR ".join(f'"{j}"[Journal]' for j in PEDIATRIC_JOURNALS)
         term = f"({query}) AND ({journal_filters})"
-        articles, _ = await self.pubmed.search_articles(term, max_results=max_results)
+        articles, pubmed_meta = await self.pubmed.search_articles(term, max_results=max_results)
+
+        if pubmed_meta.error and not articles:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
             [a.to_dict() for a in articles],
             source="pediatric_journals",
         )
-        return articles, CacheMetadata(cached=False, cache_age=0)
+        return articles, CacheMetadata(cached=False, cache_age=0, error=pubmed_meta.error)
