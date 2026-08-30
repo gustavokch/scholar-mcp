@@ -82,12 +82,18 @@ async def test_search_clinical_trials_marks_error_on_fetch_failure(tmp_path: Pat
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
 
-    respx.get(CT_URL).mock(side_effect=httpx.ConnectError("connection refused"))
+    route = respx.get(CT_URL).mock(side_effect=httpx.ConnectError("connection refused"))
 
     articles, meta = await client.search_clinical_trials("asthma")
     assert articles == []
     assert meta.cached is False
     assert meta.error is True
+
+    # The failure must not be cached: a second call re-issues the request.
+    # Exact counts are retry-dependent, so only require fresh traffic.
+    after_first = route.call_count
+    await client.search_clinical_trials("asthma")
+    assert route.call_count > after_first
 
     await cache.close()
     await http_client.aclose()
