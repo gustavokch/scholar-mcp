@@ -58,6 +58,12 @@ def rank_medical_articles(
     Makes no network calls. Assigns ``article.score`` on the given objects in
     place and returns a new list ordered by that score, source order breaking
     ties.
+
+    Scoring contract: ``final_score = RELEVANCE_WEIGHT * relevance +
+    RECENCY_WEIGHT * recency`` (0.7 / 0.3). Relevance is field coverage
+    (title terms weighted 2x abstract terms) blended with ``position_weight``
+    as described above. Recency uses ``ScoringEngine.calculate_recency_feature``
+    with a 7-year half-life and a 10-year default age for missing years.
     """
     if not articles:
         return []
