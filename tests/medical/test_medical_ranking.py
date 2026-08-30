@@ -149,3 +149,11 @@ def test_position_weight_defaults_to_zero():
     ]
     ranked = rank_medical_articles(articles, query, current_year=2026)
     assert ranked[0].score == ranked[1].score
+
+
+def test_stopword_only_query_returns_new_list():
+    """Every call returns a fresh list, scored path or not."""
+    articles = [_article("Second paper"), _article("First paper")]
+    ranked = rank_medical_articles(articles, "in the of and")
+    assert ranked is not articles
+    assert [a.title for a in ranked] == ["Second paper", "First paper"]

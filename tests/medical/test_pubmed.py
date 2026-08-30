@@ -79,13 +79,12 @@ async def test_search_articles_requests_relevance_sort(tmp_path: Path):
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
     try:
-        with respx.mock:
-            esearch_route = respx.get(ESEARCH_URL).respond(
-                json={"esearchresult": {"idlist": []}}
-            )
+        esearch_route = respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
+        )
 
-            await client.search_articles("metformin", max_results=5)
-            assert esearch_route.calls.last.request.url.params.get("sort") == "relevance"
+        await client.search_articles("metformin", max_results=5)
+        assert esearch_route.calls.last.request.url.params.get("sort") == "relevance"
     finally:
         await cache.close()
         await http_client.aclose()
