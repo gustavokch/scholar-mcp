@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
+from scholar_mcp.ranking import classify_evidence_grade
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -115,6 +116,14 @@ class PubMedProvider:
                     if isinstance(aid, dict) and aid.get("idtype") == "doi":
                         doi = aid.get("value")
 
+                pubtypes = rec.get("pubtype", [])
+                if not isinstance(pubtypes, list):
+                    pubtypes = []
+                study_type = "; ".join(pubtypes) if pubtypes else None
+                evidence_grade = classify_evidence_grade(pubtypes)
+
+                issn = rec.get("issn") or rec.get("essn") or None
+
                 papers.append(
                     PaperMetadata(
                         title=title,
@@ -125,6 +134,9 @@ class PubMedProvider:
                         pmid=str(uid),
                         abstract="",
                         oa_status="unknown",
+                        issn=issn,
+                        study_type=study_type,
+                        evidence_grade=evidence_grade,
                     )
                 )
 
