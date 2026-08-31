@@ -28,3 +28,6 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scimago raw CSV download (see src/scholar_mcp/data/SOURCES.md)
+data/raw/
