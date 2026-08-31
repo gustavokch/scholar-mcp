@@ -245,6 +245,73 @@ async def test_ranking_pipeline_enrich_and_rank():
 
 
 @respx.mock
+async def test_enrich_citations_warm_cache_keeps_authority():
+    settings = Settings()
+    client = AsyncHttpClient(settings)
+    cache = TTLCache(maxsize=100, ttl_seconds=3600)
+
+    pipeline = RankingPipeline(
+        openalex=OpenAlexProvider(client),
+        europe_pmc=EuropePMCProvider(client),
+        crossref=CrossRefProvider(client),
+        cache=cache,
+        settings=settings,
+    )
+
+    works_route = respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1001/auth1",
+                        "ids": {"pmid": "777"},
+                        "cited_by_count": 300,
+                        "authorships": [
+                            {"author": {"id": "https://openalex.org/A9999"}},
+                            {"author": {"id": "https://openalex.org/A8888"}},
+                        ],
+                    }
+                ]
+            },
+        )
+    )
+    authors_route = respx.get(url__startswith=f"{OPENALEX_BASE}/authors?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "https://openalex.org/A8888", "summary_stats": {"h_index": 41}}
+                ]
+            },
+        )
+    )
+
+    try:
+        cold = [
+            PaperMetadata(title="Authority Paper", doi="10.1001/auth1", pmid="777", year="2024")
+        ]
+        cold = await pipeline.enrich_citations(cold)
+        assert cold[0].citation_count == 300
+        assert cold[0].last_author_h_index == 41
+        assert await cache.get("cit:ah:a8888") == 41
+
+        warm = [
+            PaperMetadata(title="Authority Paper", doi="10.1001/auth1", pmid="777", year="2024")
+        ]
+        warm = await pipeline.enrich_citations(warm)
+        assert warm[0].citation_count == 300
+        assert warm[0].last_author_h_index == 41
+
+        # Warm run served entirely from cache: cold run made one /works call
+        # per filter (doi + pmid) and one /authors call; warm added none.
+        assert works_route.call_count == 2
+        assert authors_route.call_count == 1
+    finally:
+        await client.aclose()
+
+
+@respx.mock
 async def test_ranking_pipeline_normalizes_doi_url():
     settings = Settings()
     client = AsyncHttpClient(settings)

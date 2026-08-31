@@ -453,24 +453,36 @@ class RankingPipeline:
     async def enrich_citations(self, papers: list[PaperMetadata]) -> list[PaperMetadata]:
         """Enrich candidates with citation counts via cache, OpenAlex batch, and fallback."""
         missing_indices: list[int] = []
+        last_author_ids: dict[int, str] = {}
         for idx, p in enumerate(papers):
             if p.citation_count is not None:
                 continue
 
             # Check cache
             cached_count = None
+            cached_author_id = None
             clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
             if p.pmid:
                 cached_count = await self.cache.get(self._cache_key(f"pmid:{p.pmid.strip()}"))
+                if cached_count is not None:
+                    cached_author_id = await self.cache.get(
+                        self._cache_key(f"la:pmid:{p.pmid.strip()}")
+                    )
             if cached_count is None and clean_doi:
                 cached_count = await self.cache.get(self._cache_key(f"doi:{clean_doi}"))
+                if cached_count is not None:
+                    cached_author_id = await self.cache.get(
+                        self._cache_key(f"la:doi:{clean_doi}")
+                    )
 
             if cached_count is not None:
                 p.citation_count = cached_count
+                if isinstance(cached_author_id, str) and cached_author_id:
+                    last_author_ids[idx] = cached_author_id
             else:
                 missing_indices.append(idx)
 
-        if not missing_indices:
+        if not missing_indices and not last_author_ids:
             return papers
 
         missing_dois = [
@@ -491,7 +503,6 @@ class RankingPipeline:
             except Exception:
                 oa_details = {}
 
-        last_author_ids: dict[int, str] = {}
         still_missing: list[int] = []
         for i in missing_indices:
             p = papers[i]
@@ -511,6 +522,16 @@ class RankingPipeline:
                     await self.cache.set(self._cache_key(f"doi:{clean_doi}"), count)
                 if entry.get("last_author_id"):
                     last_author_ids[i] = entry["last_author_id"]
+                    if p.pmid:
+                        await self.cache.set(
+                            self._cache_key(f"la:pmid:{p.pmid.strip()}"),
+                            entry["last_author_id"],
+                        )
+                    if clean_doi:
+                        await self.cache.set(
+                            self._cache_key(f"la:doi:{clean_doi}"),
+                            entry["last_author_id"],
+                        )
             else:
                 still_missing.append(i)
 
@@ -550,12 +571,26 @@ class RankingPipeline:
 
         # 3. Author authority: batch-fetch last-author h-index for papers
         # resolved via OpenAlex (same precondition as citation enrichment).
+        # h-indices are cached per author ID so warm-cache searches keep the
+        # authority signal instead of silently dropping it.
         if self.settings.enable_openalex and last_author_ids:
             unique_author_ids = list({aid for aid in last_author_ids.values()})
-            try:
-                h_index_map = await self.openalex.fetch_author_h_indices_batch(unique_author_ids)
-            except Exception:
-                h_index_map = {}
+            h_index_map: dict[str, int] = {}
+            uncached_ids: list[str] = []
+            for aid in unique_author_ids:
+                cached_h = await self.cache.get(self._cache_key(f"ah:{aid}"))
+                if cached_h is not None:
+                    h_index_map[aid] = cached_h
+                else:
+                    uncached_ids.append(aid)
+            if uncached_ids:
+                try:
+                    fetched = await self.openalex.fetch_author_h_indices_batch(uncached_ids)
+                except Exception:
+                    fetched = {}
+                for aid, h_index in fetched.items():
+                    h_index_map[aid] = h_index
+                    await self.cache.set(self._cache_key(f"ah:{aid}"), h_index)
             for idx, author_id in last_author_ids.items():
                 h_index = h_index_map.get(author_id)
                 if h_index is not None:
