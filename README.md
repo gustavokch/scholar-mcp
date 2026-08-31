@@ -67,13 +67,14 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 ## Tools
 
 ### 1. `search_papers`
-Search academic papers across PubMed, CrossRef, and Semantic Scholar with structured filters and Europe PMC Open Access annotation.
+Search academic papers across PubMed, CrossRef, and Semantic Scholar with structured filters, query-aware re-ranking, and evidence-grade / journal-impact / author-authority signals (see [Ranking Signals](#ranking-signals)).
 
 ```python
 search_papers(
     query="crispr cas9 off target effects",
     source="auto",      # "auto" (PubMed + CrossRef top-up), "pubmed", "crossref", or "s2" (Semantic Scholar)
     num_results=10,     # Max 50
+    rerank=True,        # Re-rank with query-aware scoring + impact signals
     year_start=2020,
     year_end=2024,
     author="Doudna J",
@@ -156,6 +157,57 @@ Constructs a structured prompt template containing the full text for comprehensi
 deep_paper_analysis_prompt(identifier="10.1038/s41586-020-2003-7")
 ```
 
+### 10. `check_citations`
+Verify each claim is supported by its cited paper (claim-to-source grounding). For every `{"text", "identifier"}` pair, returns a verdict (`SUPPORTED` / `WEAK` / `UNSUPPORTED` / `NOT_FOUND`), a `coverage_score` in `[0, 1]`, the best-matching evidence sentence, and the resolved source title. Max 25 claims per batch; per-claim failures are isolated.
+
+```python
+check_citations(
+    claims=[
+        {"text": "Statins reduce all-cause mortality by 14% in primary prevention.",
+         "identifier": "10.1016/S0140-6736(19)32420-1"},
+        {"text": "mRNA vaccines confer 95% efficacy against severe COVID-19.",
+         "identifier": "PMID:33301246"},
+    ],
+    deep=False,  # True: fetch full text via the waterfall; False: abstract only
+)
+```
+
+Verdict thresholds: `coverage >= 0.5` → `SUPPORTED`; `>= 0.15` → `WEAK`; else `UNSUPPORTED`. Source unreachable → `NOT_FOUND`. Thresholds are configurable (see [Configuration Options](#configuration-options)).
+
+---
+
+## Ranking Signals
+
+`search_papers` re-ranks candidates with six signals, each Z-score standardized across the candidate pool, then weighted and summed. The relevance component is **query-aware**: it blends lexical coverage of the search query against title (weighted 2x) and abstract with the source's own `1/sqrt(rank + 1)` position prior.
+
+| Signal | Default weight | Source | Empty-state behavior |
+|---|---|---|---|
+| `relevance` | 0.30 | title + abstract lexical coverage vs query | requires query text |
+| `citations` | 0.20 | OpenAlex batch, Europe PMC, CrossRef fallback | `0` if unresolved |
+| `recency` | 0.15 | exponential half-life decay, 7-year half-life | default age 10y if year missing |
+| `evidence_grade` | 0.20 | Oxford CEBM-style ladder from PubMed `PublicationType` (1a/1b/2b/3b/4/5) | `0` if not a PubMed hit or no grade matches |
+| `journal_impact` | 0.10 | Scimago SJR lookup by ISSN / normalized name | neutral `0.0` until `scimago_sjr.json` is populated |
+| `author_authority` | 0.05 | last-author h-index via OpenAlex batch | `0` if author not resolved |
+
+Position prior (`RANKING_POSITION_WEIGHT`, default `0.25`) blends the source ordering into the relevance component — useful for single-source pools (e.g. NCBI Best Match); leave at 0 for merged multi-source pools.
+
+### Evidence grade ladder
+
+Mapped from PubMed `PublicationType` via `classify_evidence_grade`. When a paper carries multiple types the best (lowest-rank) grade wins:
+
+| Grade | Publication types |
+|---|---|
+| `1a` | meta-analysis, systematic review |
+| `1b` | randomized controlled trial |
+| `2b` | observational study, comparative study, multicenter study |
+| `3b` | case-control studies |
+| `4` | case reports |
+| `5` | review, editorial, comment, practice guideline |
+
+### Journal impact data (Scimago SJR)
+
+The `journal_impact` signal requires `src/scholar_mcp/data/scimago_sjr.json` to be populated. The file ships **empty** (`{"issn": {}, "name": {}}`); until it is populated, every paper receives a neutral `0.0` for that signal. Procedure: see [`src/scholar_mcp/data/SOURCES.md`](src/scholar_mcp/data/SOURCES.md).
+
 ---
 
 ## Medical Tools
@@ -225,6 +277,21 @@ All options are configured via environment variables:
 | `CACHE_TTL_CLINICAL_TRIALS` | `86400` | ClinicalTrials.gov cache TTL in seconds (24h). |
 | `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
+| `RANKING_ENABLED` | `true` | Master switch for `search_papers` re-ranking. |
+| `RANKING_WEIGHT_RELEVANCE` | `0.30` | Weight of the query-aware relevance signal. |
+| `RANKING_WEIGHT_CITATIONS` | `0.20` | Weight of the log-scaled citation-count signal. |
+| `RANKING_WEIGHT_RECENCY` | `0.15` | Weight of the half-life decayed recency signal. |
+| `RANKING_WEIGHT_EVIDENCE_GRADE` | `0.20` | Weight of the Oxford CEBM-style evidence-grade signal. |
+| `RANKING_WEIGHT_JOURNAL_IMPACT` | `0.10` | Weight of the Scimago SJR journal-impact signal (neutral `0.0` until `scimago_sjr.json` is populated). |
+| `RANKING_WEIGHT_AUTHOR_AUTHORITY` | `0.05` | Weight of the last-author h-index authority signal. |
+| `RANKING_POSITION_WEIGHT` | `0.25` | Blend of the source `1/sqrt(rank + 1)` position prior into the relevance component. |
+| `RANKING_RECENCY_HALF_LIFE_YEARS` | `7.0` | Half-life (years) for the recency decay. |
+| `RANKING_CANDIDATE_MULTIPLIER` | `3` | Over-fetch multiplier: candidate pool size = `num_results * multiplier`. |
+| `RANKING_MIN_CANDIDATES` | `20` | Minimum candidate pool size before re-ranking. |
+| `RANKING_MAX_CANDIDATES` | `50` | Maximum candidate pool size before re-ranking. |
+| `RANKING_ENRICHMENT_TIMEOUT` | `1.5` | Wall-clock budget (seconds) for the citation/authority enrichment stage. |
+| `CITATION_CHECK_SUPPORTED_THRESHOLD` | `0.5` | Minimum `coverage_score` for `check_citations` to return `SUPPORTED`. |
+| `CITATION_CHECK_WEAK_THRESHOLD` | `0.15` | Minimum `coverage_score` for `check_citations` to return `WEAK`; below this is `UNSUPPORTED`. |
 
 ---
 

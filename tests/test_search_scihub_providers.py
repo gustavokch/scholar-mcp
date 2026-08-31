@@ -94,6 +94,39 @@ async def test_pubmed_search_sort_date(client):
 
 
 @respx.mock
+async def test_pubmed_search_captures_pubtype_and_issn(client):
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["111"]}})
+    )
+    respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["111"],
+                    "111": {
+                        "title": "A Randomized Trial of X.",
+                        "authors": [{"name": "Doe J"}],
+                        "pubdate": "2024",
+                        "fulljournalname": "New England Journal of Medicine",
+                        "pubtype": ["Journal Article", "Randomized Controlled Trial"],
+                        "issn": "0028-4793",
+                        "essn": "1533-4406",
+                    },
+                }
+            },
+        )
+    )
+
+    results = await PubMedProvider(client, Settings()).search("x trial", num_results=5)
+
+    assert len(results) == 1
+    assert results[0].study_type == "Journal Article; Randomized Controlled Trial"
+    assert results[0].evidence_grade == "1b"
+    assert results[0].issn == "0028-4793"
+
+
+@respx.mock
 async def test_crossref_search_returns_metadata(client):
     respx.get(url__startswith=CROSSREF).mock(
         return_value=httpx.Response(

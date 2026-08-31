@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Query-aware re-ranking** in `search_papers`. The relevance signal now blends real lexical coverage of the query against title (weighted 2x) and abstract with the source `1/sqrt(rank + 1)` position prior; previously the query was not used for scoring. New `ScoringEngine` primitives: `tokenize`, `text_coverage`, `best_matching_sentence`. `medical/ranking.py` refactored to reuse them (behavior preserved).
+- **Evidence grade ranking signal**. `classify_evidence_grade` maps PubMed `PublicationType` to an Oxford CEBM-style ladder (`1a` / `1b` / `2b` / `3b` / `4` / `5`); the best (lowest-rank) grade wins when a paper carries multiple types. PubMed enrichment now captures `study_type` and `issn` to support it.
+- **Journal impact ranking signal**. `lookup_journal_impact(issn, venue)` resolves a Scimago SJR value with ISSN-first, normalized-name-second lookup. `src/scholar_mcp/data/scimago_sjr.json` ships empty; the signal contributes a neutral `0.0` for every paper until the dataset is populated (procedure: `src/scholar_mcp/data/SOURCES.md`). Regenerator: `scripts/update_scimago_data.py`.
+- **Author authority ranking signal**. Last-author h-index is fetched via OpenAlex batch (`fetch_work_details_batch`, `fetch_author_h_indices_batch`) and stored on `PaperMetadata.last_author_h_index`.
+- **`check_citations` MCP tool**. Verifies each `{"text", "identifier"}` claim against the cited paper's title/abstract (or full text with `deep=True`). Verdicts: `SUPPORTED` / `WEAK` / `UNSUPPORTED` / `NOT_FOUND`. Max 25 claims per batch; per-claim failures are isolated.
+- New `Settings` fields and environment variables: `ranking_weight_evidence_grade` (0.20), `ranking_weight_journal_impact` (0.10), `ranking_weight_author_authority` (0.05), `ranking_position_weight` (0.25), `ranking_recency_half_life_years` (7.0), `ranking_candidate_multiplier` (3), `ranking_min_candidates` (20), `ranking_max_candidates` (50), `ranking_enrichment_timeout` (1.5), `citation_check_supported_threshold` (0.5), `citation_check_weak_threshold` (0.15).
+- New `PaperMetadata` fields: `issn`, `study_type`, `evidence_grade`, `last_author_h_index`.
+
+### Changed
+
+- **Re-balanced default ranking weights**: `relevance` 0.30, `citations` 0.20, `recency` 0.15 (previously 0.4 / 0.3 / 0.3). The remaining 0.35 weight is split across the three new signals (0.20 + 0.10 + 0.05). Sum of the six signal weights is 1.0.
+
 ### Fixed
 
 - **Medical PubMed relevance ranking**: `rank_medical_articles` now normalizes relevance as field coverage (title/abstract) instead of a raw weighted-hit count, so genuine lexical matches aren't outweighed by recency.

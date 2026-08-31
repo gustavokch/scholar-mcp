@@ -2,6 +2,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from scholar_mcp import citation_check
 from scholar_mcp.config import Settings
 from scholar_mcp.models import (
     DownloadResult,
@@ -314,6 +315,32 @@ async def get_related_papers(
         return [rel.to_dict() for rel in related]
     except Exception as ex:
         return [{"status": "error", "error": str(ex)}]
+
+
+@mcp.tool()
+async def check_citations(
+    claims: list[dict[str, str]],
+    deep: bool = False,
+) -> list[dict[str, Any]]:
+    """Verify each claim is supported by its cited paper (claim-to-source grounding).
+
+    Args:
+        claims: List of {"text": <claim sentence>, "identifier": <DOI/PMID/PMCID/arXiv ID>}, max 25.
+        deep: Fetch full text instead of abstract only (slower, more thorough).
+    """
+    try:
+        return await citation_check.check_citations(resolver, claims, deep=deep)
+    except Exception as ex:
+        return [
+            {
+                "identifier": "",
+                "verdict": "ERROR",
+                "coverage_score": 0.0,
+                "best_evidence_sentence": "",
+                "resolved_title": "",
+                "error": str(ex),
+            }
+        ]
 
 
 @mcp.prompt("deep_paper_analysis")

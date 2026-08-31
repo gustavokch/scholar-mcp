@@ -34,14 +34,20 @@ class Settings:
     title_match_threshold: float = 80.0
     download_dir: Path = field(default_factory=lambda: Path("./downloads"))
     ranking_enabled: bool = True
-    ranking_weight_relevance: float = 0.4
-    ranking_weight_citations: float = 0.3
-    ranking_weight_recency: float = 0.3
+    ranking_weight_relevance: float = 0.30
+    ranking_weight_citations: float = 0.20
+    ranking_weight_recency: float = 0.15
+    ranking_weight_evidence_grade: float = 0.20
+    ranking_weight_journal_impact: float = 0.10
+    ranking_weight_author_authority: float = 0.05
+    ranking_position_weight: float = 0.25
     ranking_recency_half_life_years: float = 7.0
     ranking_candidate_multiplier: int = 3
     ranking_min_candidates: int = 20
     ranking_max_candidates: int = 50
     ranking_enrichment_timeout: float = 1.5
+    citation_check_supported_threshold: float = 0.5
+    citation_check_weak_threshold: float = 0.15
     # Medical subsystem and persistent SQLite cache settings
     cache_db_path: Path = field(
         default_factory=lambda: Path("~/.cache/scholar_mcp/cache.db").expanduser()
@@ -112,9 +118,19 @@ class Settings:
             title_match_threshold=float(os.getenv("SCHOLAR_TITLE_MATCH_THRESHOLD", "80")),
             download_dir=Path(os.getenv("SCHOLAR_DOWNLOAD_DIR", "./downloads")),
             ranking_enabled=_bool(os.getenv("RANKING_ENABLED"), True),
-            ranking_weight_relevance=float(os.getenv("RANKING_WEIGHT_RELEVANCE", "0.4")),
-            ranking_weight_citations=float(os.getenv("RANKING_WEIGHT_CITATIONS", "0.3")),
-            ranking_weight_recency=float(os.getenv("RANKING_WEIGHT_RECENCY", "0.3")),
+            ranking_weight_relevance=float(os.getenv("RANKING_WEIGHT_RELEVANCE", "0.30")),
+            ranking_weight_citations=float(os.getenv("RANKING_WEIGHT_CITATIONS", "0.20")),
+            ranking_weight_recency=float(os.getenv("RANKING_WEIGHT_RECENCY", "0.15")),
+            ranking_weight_evidence_grade=float(
+                os.getenv("RANKING_WEIGHT_EVIDENCE_GRADE", "0.20")
+            ),
+            ranking_weight_journal_impact=float(
+                os.getenv("RANKING_WEIGHT_JOURNAL_IMPACT", "0.10")
+            ),
+            ranking_weight_author_authority=float(
+                os.getenv("RANKING_WEIGHT_AUTHOR_AUTHORITY", "0.05")
+            ),
+            ranking_position_weight=float(os.getenv("RANKING_POSITION_WEIGHT", "0.25")),
             ranking_recency_half_life_years=float(
                 os.getenv("RANKING_RECENCY_HALF_LIFE_YEARS", "7.0")
             ),
@@ -122,6 +138,12 @@ class Settings:
             ranking_min_candidates=int(os.getenv("RANKING_MIN_CANDIDATES", "20")),
             ranking_max_candidates=int(os.getenv("RANKING_MAX_CANDIDATES", "50")),
             ranking_enrichment_timeout=float(os.getenv("RANKING_ENRICHMENT_TIMEOUT", "1.5")),
+            citation_check_supported_threshold=float(
+                os.getenv("CITATION_CHECK_SUPPORTED_THRESHOLD", "0.5")
+            ),
+            citation_check_weak_threshold=float(
+                os.getenv("CITATION_CHECK_WEAK_THRESHOLD", "0.15")
+            ),
             cache_db_path=Path(
                 os.getenv("SCHOLAR_CACHE_DB", "~/.cache/scholar_mcp/cache.db")
             ).expanduser(),

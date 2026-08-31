@@ -478,7 +478,7 @@ class WaterfallResolver:
 
         # Re-rank if requested and candidates present
         if should_rerank and papers:
-            papers = await self.ranking_pipeline.rank_papers(papers, top_n=limit)
+            papers = await self.ranking_pipeline.rank_papers(papers, query, top_n=limit)
         else:
             papers = papers[:limit]
 

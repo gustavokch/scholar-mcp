@@ -1,8 +1,11 @@
 import asyncio
 from dataclasses import asdict, dataclass
 import datetime
+from functools import lru_cache
+import json
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 from scholar_mcp.config import Settings
@@ -14,13 +17,138 @@ from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
 
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_TITLE_WEIGHT = 2.0
+_ABSTRACT_WEIGHT = 1.0
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is",
+    "of", "on", "or", "the", "to", "with",
+}
+
+PUBTYPE_TO_GRADE: dict[str, str] = {
+    "meta-analysis": "1a",
+    "systematic review": "1a",
+    "randomized controlled trial": "1b",
+    "observational study": "2b",
+    "comparative study": "2b",
+    "multicenter study": "2b",
+    "case-control studies": "3b",
+    "case reports": "4",
+    "review": "5",
+    "editorial": "5",
+    "comment": "5",
+    "practice guideline": "5",
+}
+
+EVIDENCE_GRADE_RANK: dict[str, int] = {
+    "1a": 1,
+    "1b": 2,
+    "2b": 3,
+    "3b": 4,
+    "4": 5,
+    "5": 6,
+}
+
+
+def classify_evidence_grade(pubtypes: list[str] | None) -> str | None:
+    """Map raw PubMed PublicationType strings to an Oxford CEBM-style grade.
+
+    Picks the single best (lowest-rank) grade when a paper carries multiple
+    publication types (e.g. both "Multicenter Study" and "Randomized
+    Controlled Trial" -> the RCT grade wins).
+    """
+    if not pubtypes:
+        return None
+    best_grade: str | None = None
+    best_rank: int | None = None
+    for pt in pubtypes:
+        grade = PUBTYPE_TO_GRADE.get(pt.strip().lower())
+        if grade is None:
+            continue
+        rank = EVIDENCE_GRADE_RANK[grade]
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best_grade = grade
+    return best_grade
+
+
+_SCIMAGO_DATA_PATH = Path(__file__).parent / "data" / "scimago_sjr.json"
+
+
+def _normalize_issn(issn: str) -> str:
+    return re.sub(r"[^0-9Xx]", "", issn).upper()
+
+
+def _normalize_journal_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_scimago_table() -> dict[str, dict[str, float]]:
+    try:
+        with open(_SCIMAGO_DATA_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "issn": {k: float(v) for k, v in data.get("issn", {}).items()},
+            "name": {k: float(v) for k, v in data.get("name", {}).items()},
+        }
+    except Exception:
+        return {"issn": {}, "name": {}}
+
+
+def lookup_journal_impact(issn: str | None, venue: str | None) -> float | None:
+    table = _load_scimago_table()
+    if issn:
+        value = table["issn"].get(_normalize_issn(issn))
+        if value is not None:
+            return value
+    if venue:
+        value = table["name"].get(_normalize_journal_name(venue))
+        if value is not None:
+            return value
+    return None
+
+
+def parse_scimago_csv(rows: list[dict[str, str]]) -> dict[str, dict[str, float]]:
+    """Parse Scimago Journal Rank CSV export rows (dict-per-row, semicolon-delimited
+    source) into the {"issn": {...}, "name": {...}} table format used by
+    scimago_sjr.json. Shared with scripts/update_scimago_data.py."""
+    issn_table: dict[str, float] = {}
+    name_table: dict[str, float] = {}
+
+    for row in rows:
+        title = (row.get("Title") or "").strip()
+        sjr_raw = (row.get("SJR") or "").strip()
+        issn_raw = (row.get("Issn") or "").strip()
+        if not title or not sjr_raw:
+            continue
+
+        try:
+            sjr_value = float(sjr_raw.replace(",", "."))
+        except ValueError:
+            continue
+
+        name_table[_normalize_journal_name(title)] = sjr_value
+
+        for issn in issn_raw.split(","):
+            issn = issn.strip()
+            if issn:
+                issn_table[_normalize_issn(issn)] = sjr_value
+
+    return {"issn": issn_table, "name": name_table}
+
+
 
 @dataclass
 class RankingWeights:
-    relevance: float = 0.4
-    citations: float = 0.3
-    recency: float = 0.3
+    relevance: float = 0.30
+    citations: float = 0.20
+    recency: float = 0.15
+    evidence_grade: float = 0.20
+    journal_impact: float = 0.10
+    author_authority: float = 0.05
     recency_half_life_years: float = 7.0
+    position_weight: float = 0.25
 
 
 @dataclass
@@ -31,9 +159,15 @@ class ScoringMetrics:
     raw_relevance: float
     raw_citation: float
     raw_recency: float
+    raw_evidence: float
+    raw_impact: float
+    raw_authority: float
     z_relevance: float
     z_citation: float
     z_recency: float
+    z_evidence: float
+    z_impact: float
+    z_authority: float
     final_score: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -59,13 +193,85 @@ class ScoringEngine:
         return [(x - mean) / std for x in values]
 
     @staticmethod
+    def tokenize(text: str | None) -> list[str]:
+        if not text:
+            return []
+        return [
+            t for t in _WORD_SPLIT_RE.split(text.lower())
+            if len(t) >= 2 and t not in _STOPWORDS
+        ]
+
+    @staticmethod
+    def text_coverage(query_terms: list[str], title: str | None, abstract: str | None) -> float:
+        if not query_terms:
+            return 0.0
+        term_count = len(query_terms)
+        title_terms = set(ScoringEngine.tokenize(title))
+        abstract_terms = set(ScoringEngine.tokenize(abstract))
+        title_coverage = sum(1 for t in query_terms if t in title_terms) / term_count
+        abstract_coverage = sum(1 for t in query_terms if t in abstract_terms) / term_count
+        abstract_ratio = _ABSTRACT_WEIGHT / _TITLE_WEIGHT
+        return min(1.0, title_coverage + abstract_ratio * abstract_coverage)
+
+    @staticmethod
+    def best_matching_sentence(query_terms: list[str], text: str) -> tuple[str, float]:
+        if not text or not query_terms:
+            return "", 0.0
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if not sentences:
+            return "", 0.0
+        term_count = len(query_terms)
+        best_sentence = ""
+        best_score = 0.0
+        for sentence in sentences:
+            sentence_terms = set(ScoringEngine.tokenize(sentence))
+            score = sum(1 for t in query_terms if t in sentence_terms) / term_count
+            if score > best_score:
+                best_score = score
+                best_sentence = sentence
+        return best_sentence, best_score
+
+    @staticmethod
     def calculate_relevance(rank_idx: int) -> float:
         return 1.0 / math.sqrt(rank_idx + 1)
+
+    @staticmethod
+    def calculate_query_relevance(
+        rank_idx: int,
+        query_terms: list[str],
+        title: str | None,
+        abstract: str | None,
+        position_weight: float,
+    ) -> float:
+        lexical = ScoringEngine.text_coverage(query_terms, title, abstract)
+        position = ScoringEngine.calculate_relevance(rank_idx)
+        return (1.0 - position_weight) * lexical + position_weight * position
 
     @staticmethod
     def calculate_citation_feature(citations: int | None) -> float:
         count = max(0, citations if citations is not None else 0)
         return math.log(1.0 + count)
+
+    @staticmethod
+    def calculate_evidence_feature(evidence_grade: str | None) -> float:
+        if evidence_grade is None:
+            return 0.0
+        rank = EVIDENCE_GRADE_RANK.get(evidence_grade)
+        if rank is None:
+            return 0.0
+        return 1.0 / rank
+
+    @staticmethod
+    def calculate_impact_feature(sjr: float | None) -> float:
+        if sjr is None or sjr <= 0:
+            return 0.0
+        return math.log(1.0 + sjr)
+
+    @staticmethod
+    def calculate_authority_feature(h_index: int | None) -> float:
+        if h_index is None or h_index <= 0:
+            return 0.0
+        return math.log(1.0 + h_index)
 
     @staticmethod
     def parse_year(year_str: str | None) -> int | None:
@@ -103,37 +309,53 @@ class ScoringEngine:
         cls,
         papers: list[PaperMetadata],
         weights: RankingWeights,
+        query: str,
         current_year: int | None = None,
     ) -> list[PaperMetadata]:
         if not papers:
             return []
 
         now_year = current_year if current_year is not None else datetime.datetime.now().year
+        query_terms = cls.tokenize(query)
 
         raw_rel_list: list[float] = []
         raw_cit_list: list[float] = []
         raw_rec_list: list[float] = []
+        raw_evidence_list: list[float] = []
+        raw_impact_list: list[float] = []
+        raw_authority_list: list[float] = []
         parsed_years: list[int | None] = []
         cit_counts: list[int] = []
 
         for idx, p in enumerate(papers):
-            raw_rel = cls.calculate_relevance(idx)
+            raw_rel = cls.calculate_query_relevance(
+                idx, query_terms, p.title, p.abstract, weights.position_weight
+            )
             raw_cit = cls.calculate_citation_feature(p.citation_count)
             raw_rec, p_year = cls.calculate_recency_feature(
                 p.year,
                 current_year=now_year,
                 half_life_years=weights.recency_half_life_years,
             )
+            raw_evidence = cls.calculate_evidence_feature(p.evidence_grade)
+            raw_impact = cls.calculate_impact_feature(lookup_journal_impact(p.issn, p.venue))
+            raw_authority = cls.calculate_authority_feature(p.last_author_h_index)
 
             raw_rel_list.append(raw_rel)
             raw_cit_list.append(raw_cit)
             raw_rec_list.append(raw_rec)
+            raw_evidence_list.append(raw_evidence)
+            raw_impact_list.append(raw_impact)
+            raw_authority_list.append(raw_authority)
             parsed_years.append(p_year)
             cit_counts.append(p.citation_count if p.citation_count is not None else 0)
 
         z_rel_list = cls.calculate_z_scores(raw_rel_list)
         z_cit_list = cls.calculate_z_scores(raw_cit_list)
         z_rec_list = cls.calculate_z_scores(raw_rec_list)
+        z_evidence_list = cls.calculate_z_scores(raw_evidence_list)
+        z_impact_list = cls.calculate_z_scores(raw_impact_list)
+        z_authority_list = cls.calculate_z_scores(raw_authority_list)
 
         scored_papers: list[PaperMetadata] = []
         for idx, p in enumerate(papers):
@@ -141,6 +363,9 @@ class ScoringEngine:
                 weights.relevance * z_rel_list[idx]
                 + weights.citations * z_cit_list[idx]
                 + weights.recency * z_rec_list[idx]
+                + weights.evidence_grade * z_evidence_list[idx]
+                + weights.journal_impact * z_impact_list[idx]
+                + weights.author_authority * z_authority_list[idx]
             )
 
             metrics = ScoringMetrics(
@@ -150,9 +375,15 @@ class ScoringEngine:
                 raw_relevance=raw_rel_list[idx],
                 raw_citation=raw_cit_list[idx],
                 raw_recency=raw_rec_list[idx],
+                raw_evidence=raw_evidence_list[idx],
+                raw_impact=raw_impact_list[idx],
+                raw_authority=raw_authority_list[idx],
                 z_relevance=z_rel_list[idx],
                 z_citation=z_cit_list[idx],
                 z_recency=z_rec_list[idx],
+                z_evidence=z_evidence_list[idx],
+                z_impact=z_impact_list[idx],
+                z_authority=z_authority_list[idx],
                 final_score=final_score,
             )
 
@@ -222,24 +453,36 @@ class RankingPipeline:
     async def enrich_citations(self, papers: list[PaperMetadata]) -> list[PaperMetadata]:
         """Enrich candidates with citation counts via cache, OpenAlex batch, and fallback."""
         missing_indices: list[int] = []
+        last_author_ids: dict[int, str] = {}
         for idx, p in enumerate(papers):
             if p.citation_count is not None:
                 continue
 
             # Check cache
             cached_count = None
+            cached_author_id = None
             clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
             if p.pmid:
                 cached_count = await self.cache.get(self._cache_key(f"pmid:{p.pmid.strip()}"))
+                if cached_count is not None:
+                    cached_author_id = await self.cache.get(
+                        self._cache_key(f"la:pmid:{p.pmid.strip()}")
+                    )
             if cached_count is None and clean_doi:
                 cached_count = await self.cache.get(self._cache_key(f"doi:{clean_doi}"))
+                if cached_count is not None:
+                    cached_author_id = await self.cache.get(
+                        self._cache_key(f"la:doi:{clean_doi}")
+                    )
 
             if cached_count is not None:
                 p.citation_count = cached_count
+                if isinstance(cached_author_id, str) and cached_author_id:
+                    last_author_ids[idx] = cached_author_id
             else:
                 missing_indices.append(idx)
 
-        if not missing_indices:
+        if not missing_indices and not last_author_ids:
             return papers
 
         missing_dois = [
@@ -249,33 +492,46 @@ class RankingPipeline:
         ]
         missing_pmids = [papers[i].pmid for i in missing_indices if papers[i].pmid]
 
-        # 1. OpenAlex Batch lookup
-        oa_counts: dict[str, int] = {}
+        # 1. OpenAlex Batch lookup (citation count + last-author ID)
+        oa_details: dict[str, dict[str, Any]] = {}
         if self.settings.enable_openalex:
             try:
-                oa_counts = await self.openalex.fetch_citation_counts_batch(
+                oa_details = await self.openalex.fetch_work_details_batch(
                     dois=missing_dois,
                     pmids=missing_pmids,
                 )
             except Exception:
-                oa_counts = {}
+                oa_details = {}
 
         still_missing: list[int] = []
         for i in missing_indices:
             p = papers[i]
             clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
-            count = None
-            if clean_doi and clean_doi in oa_counts:
-                count = oa_counts[clean_doi]
-            elif p.pmid and p.pmid.strip() in oa_counts:
-                count = oa_counts[p.pmid.strip()]
+            entry = None
+            if clean_doi and clean_doi in oa_details:
+                entry = oa_details[clean_doi]
+            elif p.pmid and p.pmid.strip() in oa_details:
+                entry = oa_details[p.pmid.strip()]
 
-            if count is not None:
+            if entry is not None:
+                count = entry["citation_count"]
                 p.citation_count = count
                 if p.pmid:
                     await self.cache.set(self._cache_key(f"pmid:{p.pmid.strip()}"), count)
                 if clean_doi:
                     await self.cache.set(self._cache_key(f"doi:{clean_doi}"), count)
+                if entry.get("last_author_id"):
+                    last_author_ids[i] = entry["last_author_id"]
+                    if p.pmid:
+                        await self.cache.set(
+                            self._cache_key(f"la:pmid:{p.pmid.strip()}"),
+                            entry["last_author_id"],
+                        )
+                    if clean_doi:
+                        await self.cache.set(
+                            self._cache_key(f"la:doi:{clean_doi}"),
+                            entry["last_author_id"],
+                        )
             else:
                 still_missing.append(i)
 
@@ -313,6 +569,33 @@ class RankingPipeline:
                     if papers[i].citation_count is None:
                         papers[i].citation_count = 0
 
+        # 3. Author authority: batch-fetch last-author h-index for papers
+        # resolved via OpenAlex (same precondition as citation enrichment).
+        # h-indices are cached per author ID so warm-cache searches keep the
+        # authority signal instead of silently dropping it.
+        if self.settings.enable_openalex and last_author_ids:
+            unique_author_ids = list({aid for aid in last_author_ids.values()})
+            h_index_map: dict[str, int] = {}
+            uncached_ids: list[str] = []
+            for aid in unique_author_ids:
+                cached_h = await self.cache.get(self._cache_key(f"ah:{aid}"))
+                if cached_h is not None:
+                    h_index_map[aid] = cached_h
+                else:
+                    uncached_ids.append(aid)
+            if uncached_ids:
+                try:
+                    fetched = await self.openalex.fetch_author_h_indices_batch(uncached_ids)
+                except Exception:
+                    fetched = {}
+                for aid, h_index in fetched.items():
+                    h_index_map[aid] = h_index
+                    await self.cache.set(self._cache_key(f"ah:{aid}"), h_index)
+            for idx, author_id in last_author_ids.items():
+                h_index = h_index_map.get(author_id)
+                if h_index is not None:
+                    papers[idx].last_author_h_index = h_index
+
         # Guarantee non-None citation count
         for p in papers:
             if p.citation_count is None:
@@ -323,6 +606,7 @@ class RankingPipeline:
     async def rank_papers(
         self,
         papers: list[PaperMetadata],
+        query: str,
         weights: RankingWeights | None = None,
         top_n: int = 10,
     ) -> list[PaperMetadata]:
@@ -333,7 +617,11 @@ class RankingPipeline:
             relevance=self.settings.ranking_weight_relevance,
             citations=self.settings.ranking_weight_citations,
             recency=self.settings.ranking_weight_recency,
+            evidence_grade=self.settings.ranking_weight_evidence_grade,
+            journal_impact=self.settings.ranking_weight_journal_impact,
+            author_authority=self.settings.ranking_weight_author_authority,
             recency_half_life_years=self.settings.ranking_recency_half_life_years,
+            position_weight=self.settings.ranking_position_weight,
         )
 
         try:
@@ -348,6 +636,6 @@ class RankingPipeline:
                     p.citation_count = 0
             enriched = papers
 
-        scored = ScoringEngine.score_candidates(enriched, weights=w)
+        scored = ScoringEngine.score_candidates(enriched, weights=w, query=query)
         return scored[:top_n]
 
