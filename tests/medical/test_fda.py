@@ -195,6 +195,25 @@ async def test_get_drug_by_ndc_still_caches_genuine_absence(tmp_path: Path):
 
 
 @respx.mock
+async def test_get_drug_by_ndc_treats_404_as_genuine_absence(tmp_path: Path):
+    """A 404 NDC miss is 'no such label', not a fetch failure — cacheable."""
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, json={"error": {"code": "NOT_FOUND"}})
+
+    drug, meta = await client.get_drug_by_ndc("99999-999")
+    assert drug is None
+    assert meta.error is False
+
+    after_first = route.call_count
+    drug2, meta2 = await client.get_drug_by_ndc("99999-999")
+    assert drug2 is None
+    assert meta2.cached is True
+    assert route.call_count == after_first
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_search_pediatric_drugs_propagates_fetch_error(tmp_path: Path):
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
@@ -209,3 +228,171 @@ async def test_search_pediatric_drugs_propagates_fetch_error(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_treats_404_as_no_match_not_error(tmp_path: Path):
+    """api.fda.gov answers 404 for 'no matches found'; that is a valid empty
+    answer, not a fetch failure."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(status_code=404, json={"error": {"code": "NOT_FOUND"}})
+
+    drugs, meta = await client.search_drugs("xylophone")
+    assert drugs == []
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_caches_genuine_404_absence(tmp_path: Path):
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, json={"error": {"code": "NOT_FOUND"}})
+
+    drugs, meta = await client.search_drugs("xylophone")
+    assert drugs == []
+    assert meta.error is False
+
+    after_first = route.call_count
+    drugs2, meta2 = await client.search_drugs("xylophone")
+    assert drugs2 == []
+    assert meta2.cached is True
+    assert route.call_count == after_first
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_unfielded_results_must_match_drug_token(tmp_path: Path):
+    """The unfielded full-text fallback can match a label that happens to
+    contain every word of a multi-word query (e.g. SILICEA matching
+    'ibuprofen pediatric dosing children' on 'pediatric' + 'dosage' + 'children'
+    in the label body). Filter the fallback to require the lead drug token to
+    actually appear in the label, so unrelated labels cannot leak into the
+    pediatric_drugs result set.
+    """
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        # Unfielded returns SILICEA — must be filtered out because the lead
+        # token 'ibuprofen' is nowhere in this label.
+        return httpx.Response(
+            200,
+            json=_label_payload("SILICEA", "SILICEA", ndc="12345-001"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    drugs, meta = await client.search_drugs(
+        "ibuprofen pediatric dosing children", limit=5
+    )
+    assert drugs == []
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_unfielded_filter_ignores_stopword_lead_tokens(tmp_path: Path):
+    """A natural-language query whose first tokens are stopwords ('what',
+    'is', 'the') must not defeat the unfielded-fallback filter by
+    substring-matching unrelated name fields ('the' matches THEOPHYLLINE).
+    Stopwords and short tokens are ignored, and remaining tokens must match
+    on word boundaries."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        # Unfielded returns THEOPHYLLINE — today the substring 'the' inside
+        # 'theophylline' matches the stopword lead token 'the', letting the
+        # junk label through.
+        return httpx.Response(
+            200,
+            json=_label_payload("THEOPHYLLINE", "THEOPHYLLINE", ndc="12345-001"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "what is the dose of aspirin", limit=5
+        )
+        assert drugs == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_falls_back_to_unfielded_query(tmp_path: Path):
+    """A multi-word query can never match a field-restricted quoted phrase;
+    the unfielded full-text variant must still find the label."""
+    client, cache, http_client = await _make_client(tmp_path)
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        return httpx.Response(200, json=_label_payload("Advil", "Ibuprofen"))
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    drugs, meta = await client.search_drugs("ibuprofen dosing children", limit=5)
+    assert len(drugs) == 1
+    assert drugs[0].openfda.brand_name == ["Advil"]
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_does_not_cache_partial_result_on_variant_error(tmp_path: Path):
+    """When some query variants fail but others return results, the partial
+    set must be returned (with error=True) but NOT cached — a partial set
+    pinned for the whole TTL would hide the missing variants."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            # 400 -> non-retryable failure for the fielded variants
+            return httpx.Response(400, json={"error": {"code": "BAD_REQUEST"}})
+        return httpx.Response(200, json=_label_payload("Advil", "Ibuprofen"))
+
+    route = respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs("ibuprofen dosing children", limit=5)
+        assert len(drugs) == 1
+        assert meta.error is True
+
+        after_first = route.call_count
+        drugs2, meta2 = await client.search_drugs("ibuprofen dosing children", limit=5)
+        assert len(drugs2) == 1
+        assert meta2.cached is False, "partial result set must not be cached"
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
+    """A 404 with a non-JSON body (proxy/CDN error page) is still
+    'no such label' — the body must not be parsed, and the result must not
+    surface as a fetch error."""
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, text="<html>Gateway timeout</html>")
+
+    drug, meta = await client.get_drug_by_ndc("99999-999")
+    assert drug is None
+    assert meta.error is False
+    assert route.call_count == 2  # quoted + unquoted variants both tried
+
+    await cache.close()
+    await http_client.aclose()

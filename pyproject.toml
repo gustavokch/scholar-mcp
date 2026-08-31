@@ -30,7 +30,7 @@ dev = [
     "respx>=0.21.0",
 ]
 medical = [
-    "playwright>=1.40.0",
+    "camoufox>=0.5.0",
 ]
 
 [project.urls]

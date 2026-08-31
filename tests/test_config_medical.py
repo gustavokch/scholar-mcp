@@ -17,7 +17,7 @@ def test_medical_settings_defaults():
     assert settings.cache_ttl_pediatric_drugs == 86400
     assert settings.cache_ttl_clinical_trials == 86400
     assert settings.cache_max_entries == 1000
-    assert settings.enable_playwright_fallback is True
+    assert settings.enable_browser_fallback is True
     assert settings.enable_medical_tools is True
     assert isinstance(settings.cache_db_path, Path)
     assert settings.cache_db_path == Path("~/.cache/scholar_mcp/cache.db").expanduser()
@@ -37,5 +37,13 @@ def test_medical_settings_env_override(monkeypatch):
     assert settings.cache_ttl_pediatric_journals == 120
     assert settings.cache_max_entries == 50
     assert settings.enable_medical_tools is False
-    assert settings.enable_playwright_fallback is False
+    assert settings.enable_browser_fallback is False
     assert settings.cache_db_path == Path("/tmp/custom_cache.db")
+
+
+def test_medical_settings_legacy_playwright_env_alias(monkeypatch):
+    """ENABLE_PLAYWRIGHT_FALLBACK remains honored after the browser fallback
+    moved from playwright to camoufox."""
+    monkeypatch.setenv("ENABLE_PLAYWRIGHT_FALLBACK", "false")
+    settings = Settings.load()
+    assert settings.enable_browser_fallback is False

@@ -25,6 +25,17 @@ COMMON_DRUG_WORDS = {
 
 PEDIATRIC_TERMS = ("pediatric", "child", "infant", "neonatal", "pediatric dosing")
 
+# Words that carry no drug-name signal; a query starting "What is the..."
+# must not have its stopword lead tokens match unrelated name fields.
+_QUERY_STOPWORDS = frozenset(
+    {
+        "what", "which", "how", "the", "and", "for", "with", "this", "that",
+        "from", "are", "was", "were", "been", "have", "has", "had", "can",
+        "could", "should", "would", "will", "when", "who", "why", "does",
+        "did", "not", "but", "not",
+    }
+)
+
 
 def is_valid_drug_query(query: str) -> bool:
     trimmed = query.strip()
@@ -36,6 +47,35 @@ def is_valid_drug_query(query: str) -> bool:
     if re.fullmatch(r"[a-z]+-\d+", lower) or re.search(r"\d{3,}", trimmed):
         return len(trimmed) >= 5
     return True
+
+
+def _label_names_drug(drug: DrugLabel, query: str) -> bool:
+    """True when any of the query's meaningful tokens appears as a whole word
+    in the drug's brand_name, generic_name, or substance_name. Used to filter
+    the unfielded full-text fallback, which can otherwise match unrelated
+    labels whose body text happens to contain every word of a multi-word
+    query.
+
+    Stopwords and tokens shorter than 3 characters are ignored — a query like
+    "What is the dose of aspirin" must not have its lead tokens "what", "is",
+    "the" substring-match almost any name field ("the" matches THEOPHYLLINE).
+    If nothing signal-bearing remains, the filter is permissive (True).
+    """
+    tokens = [
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
+        if len(t) >= 3 and t.lower() not in _QUERY_STOPWORDS
+    ]
+    if not tokens:
+        return True
+    ofd = drug.openfda
+    name_fields = (
+        ofd.brand_name + ofd.generic_name + ofd.substance_name
+    )
+    haystack = " ".join(name_fields).lower()
+    return any(
+        re.search(rf"\b{re.escape(token)}\b", haystack) for token in tokens
+    )
 
 
 def _parse_drug_label(raw: dict[str, Any]) -> DrugLabel:
@@ -118,6 +158,10 @@ class FDAClient:
             f'openfda.generic_name:"{query}"',
             f'openfda.substance_name:"{query}"',
             f"openfda.brand_name:{query}",
+            # Unfielded full-text fallback: a multi-word query can never match
+            # a field-restricted quoted phrase, but api.fda.gov's plain search
+            # still finds the label (e.g. "ibuprofen dosing children").
+            query,
         ]
 
         all_results: list[DrugLabel] = []
@@ -129,13 +173,27 @@ class FDAClient:
                 resp = await self.http_client.get(
                     FDA_LABEL_URL,
                     params={"search": sq, "limit": str(limit)},
+                    ok_statuses={404},
                 )
                 if resp is None:
                     raise FetchError("fda label request failed")
+                if resp.status_code == 404:
+                    # api.fda.gov answers 404 for "no matches found" — a valid
+                    # empty answer for this variant, not a fetch failure.
+                    continue
                 data = resp.json()
                 results = data.get("results", [])
                 for raw in results:
                     drug = _parse_drug_label(raw)
+                    # The unfielded full-text variant can match any label
+                    # whose body happens to contain every word of a multi-
+                    # word query (e.g. SILICEA matching "ibuprofen pediatric
+                    # dosing children" on "pediatric" + "dosage" + "children"
+                    # in the label text). The lead token of the query is
+                    # the drug name the user is actually looking for; drop
+                    # any result that does not name it.
+                    if sq == query and not _label_names_drug(drug, query):
+                        continue
                     ndc = drug.openfda.product_ndc[0] if drug.openfda.product_ndc else None
                     if ndc:
                         if ndc in seen_ndcs:
@@ -151,11 +209,11 @@ class FDAClient:
                 errored = True
                 continue
 
-        # Caching an empty list produced by a failed fetch would serve that
-        # failure for the whole TTL, so skip the write when nothing was found
-        # and every query variant errored.
-        if errored and not all_results:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed fetch must never be served from cache for the whole TTL:
+        # skip the write when any variant errored, even when other variants
+        # returned a partial result set.
+        if errored:
+            return all_results, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
@@ -181,11 +239,17 @@ class FDAClient:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
                 params={"search": f'openfda.product_ndc:"{ndc}"', "limit": "1"},
+                ok_statuses={404},
             )
             if resp is None:
                 raise FetchError("fda ndc request failed")
-            data = resp.json()
-            results = data.get("results", [])
+            # A 404 here is "no such label" — genuine absence, not an error.
+            # Skip body parsing: a proxy/CDN error page is not JSON.
+            if resp.status_code == 404:
+                results = []
+            else:
+                data = resp.json()
+                results = data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")
@@ -199,11 +263,15 @@ class FDAClient:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
                 params={"search": f"openfda.product_ndc:{ndc}", "limit": "1"},
+                ok_statuses={404},
             )
             if resp is None:
                 raise FetchError("fda ndc fallback request failed")
-            data = resp.json()
-            results = data.get("results", [])
+            if resp.status_code == 404:
+                results = []
+            else:
+                data = resp.json()
+                results = data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")

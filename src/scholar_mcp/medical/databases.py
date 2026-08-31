@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import random
+import re
 from typing import Any
 from bs4 import BeautifulSoup
 
@@ -15,13 +15,11 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 logger = logging.getLogger(__name__)
 
-COCHRANE_BASE = "https://www.cochranelibrary.com"
-COCHRANE_URL = "https://www.cochranelibrary.com/search"
-
-COCHRANE_ITEM_SELECTORS = ".search-result-item, .result-item, .search-result"
-TITLE_SELECTORS = "h3 a, .title a, .result-title a, h3, .title"
-DESC_SELECTORS = ".abstract, .snippet, .summary, p"
-JOURNAL_SELECTORS = ".journal, .source, .publication"
+# Cochrane Library's HTML search sits behind a Cloudflare bot wall that blocks
+# the plain HTTP fetch and even headless browsers. Europe PMC mirrors Cochrane
+# systematic reviews via an open REST API, so we route the "Cochrane" search
+# through Europe PMC and label results as Cochrane records.
+EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
 TOP_JOURNALS = [
     "New England Journal of Medicine",
@@ -54,98 +52,82 @@ class MedicalDatabasesEngine:
         self.settings = settings
         self.jitter_range = jitter_range
 
+    @staticmethod
+    def _europe_pmc_to_articles(payload: dict[str, Any]) -> list[MedicalArticle]:
+        """Map Europe PMC search result records to MedicalArticle shape,
+        tagging them as Cochrane records so the agent sees them under the
+        right source_database label.
+        """
+        articles: list[MedicalArticle] = []
+        for rec in payload.get("resultList", {}).get("result", []) or []:
+            title = (rec.get("title") or "").strip()
+            if not title:
+                continue
+            authors = []
+            author_string = rec.get("authorString")
+            if author_string:
+                authors = [a.strip() for a in author_string.split(",") if a.strip()]
+            # Europe PMC's `id` is a source-local record id; it only doubles as
+            # a PMID for MED (PubMed) records. Anything else would fabricate a
+            # pmid and a bogus europepmc.org/article/MED/{id} URL.
+            pmid = rec.get("pmid") or (
+                rec.get("id") if rec.get("source") == "MED" else ""
+            ) or ""
+            url = ""
+            if rec.get("pmcid"):
+                url = f"https://europepmc.org/article/PMC/{rec['pmcid']}"
+            elif pmid:
+                url = f"https://europepmc.org/article/MED/{pmid}"
+            articles.append(
+                MedicalArticle(
+                    title=title,
+                    authors=authors,
+                    year=str(rec.get("pubYear") or ""),
+                    journal=rec.get("journalTitle") or "Cochrane Database Syst Rev",
+                    abstract=(rec.get("abstractText") or "")[:300],
+                    url=url,
+                    pmid=pmid,
+                    doi=rec.get("doi") or "",
+                    source_database="Cochrane",
+                )
+            )
+        return articles
+
     async def _search_cochrane(
         self,
         query: str,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        if self.jitter_range:
-            await asyncio.sleep(random.uniform(*self.jitter_range))
-
-        articles: list[MedicalArticle] = []
+        # Cochrane's HTML site is behind a Cloudflare bot wall; route the
+        # "Cochrane" search through Europe PMC's open REST API, which mirrors
+        # Cochrane systematic reviews. The pub_type filter keeps the result
+        # set close to what the user would have found on cochranelibrary.com.
+        # Neutralize query-language punctuation first: a stray quote or paren
+        # in an agent-supplied query is Europe PMC syntax, not part of the
+        # topic, and would turn the whole search into a 400.
+        clean_query = re.sub(r'["()]', " ", query)
+        clean_query = re.sub(r"\s+", " ", clean_query).strip()
+        europe_pmc_query = f"({clean_query}) AND (PUB_TYPE:\"systematic review\" OR PUB_TYPE:\"meta-analysis\")"
         try:
             resp = await self.http_client.get(
-                COCHRANE_URL,
-                params={"q": query},
-                headers={"User-Agent": BROWSER_UA},
+                EUROPE_PMC_URL,
+                params={
+                    "query": europe_pmc_query,
+                    "format": "json",
+                    # "lite" omits abstractText; only "core" returns it.
+                    "resultType": "core",
+                    "pageSize": "10",
+                },
             )
-            # AsyncHttpClient.get returns None once retries are exhausted or on
-            # a >=400 status; check it explicitly rather than letting the miss
-            # surface as an AttributeError below.
             if resp is None:
-                raise FetchError("cochrane request failed")
-            html_text = resp.text
-            soup = BeautifulSoup(html_text, "html.parser")
-            for item in soup.select(COCHRANE_ITEM_SELECTORS):
-                title_el = item.select_one(TITLE_SELECTORS)
-                title = title_el.get_text(strip=True) if title_el else ""
-                if not title or len(title) <= 10:
-                    continue
-
-                link = item.find("a")
-                href = link.get("href", "") if link else ""
-                url = href if href.startswith("http") else (COCHRANE_BASE.rstrip("/") + "/" + href.lstrip("/"))
-
-                desc_el = item.select_one(DESC_SELECTORS)
-                abstract = (desc_el.get_text(strip=True) if desc_el else "")[:300]
-
-                journal_el = item.select_one(JOURNAL_SELECTORS)
-                journal = journal_el.get_text(strip=True) if journal_el else "Cochrane Database"
-
-                articles.append(
-                    MedicalArticle(
-                        title=title,
-                        abstract=abstract,
-                        journal=journal,
-                        url=url,
-                        source_database="Cochrane",
-                    )
-                )
+                raise FetchError("europe pmc request failed")
+            payload = resp.json()
         except Exception:
-            logger.warning("Cochrane search failed for %r", query, exc_info=True)
+            logger.warning(
+                "Europe PMC (Cochrane) search failed for %r", query, exc_info=True
+            )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        # Fallback to Playwright if enabled and no items found
-        if not articles and self.settings.enable_playwright_fallback:
-            try:
-                from playwright.async_api import async_playwright
-
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
-                    page = await browser.new_page(user_agent=BROWSER_UA)
-                    full_url = f"{COCHRANE_URL}?q={query}"
-                    await page.goto(full_url, wait_until="domcontentloaded")
-                    content = await page.content()
-                    await browser.close()
-
-                pw_soup = BeautifulSoup(content, "html.parser")
-                for item in pw_soup.select(COCHRANE_ITEM_SELECTORS):
-                    title_el = item.select_one(TITLE_SELECTORS)
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    if not title or len(title) <= 10:
-                        continue
-
-                    link = item.find("a")
-                    href = link.get("href", "") if link else ""
-                    url = href if href.startswith("http") else (COCHRANE_BASE.rstrip("/") + "/" + href.lstrip("/"))
-
-                    desc_el = item.select_one(DESC_SELECTORS)
-                    abstract = (desc_el.get_text(strip=True) if desc_el else "")[:300]
-
-                    journal_el = item.select_one(JOURNAL_SELECTORS)
-                    journal = journal_el.get_text(strip=True) if journal_el else "Cochrane Database"
-
-                    articles.append(
-                        MedicalArticle(
-                            title=title,
-                            abstract=abstract,
-                            journal=journal,
-                            url=url,
-                            source_database="Cochrane",
-                        )
-                    )
-            except Exception:
-                pass
-
+        articles = self._europe_pmc_to_articles(payload)
         return articles, CacheMetadata(cached=False, cache_age=0)
 
     async def search_medical_databases(
