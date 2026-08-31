@@ -295,6 +295,47 @@ async def test_search_cochrane_filters_by_publication_type_when_results_present(
 
 
 @respx.mock
+async def test_search_cochrane_neutralizes_query_punctuation(tmp_path: Path):
+    """Europe PMC treats quotes and parens as query syntax; an agent-supplied
+    natural-language query containing them must be neutralized before it is
+    spliced into the PUB_TYPE-filtered query, or the whole search 400s."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    engine = MedicalDatabasesEngine(
+        pubmed=AsyncMock(),
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+
+    respx.get(EUROPE_PMC_URL).respond(
+        json={"hitCount": 0, "resultList": {"result": []}}
+    )
+
+    try:
+        articles, meta = await engine._search_cochrane(
+            'what is "ibuprofen" (for children)'
+        )
+        assert articles == []
+        assert meta.error is False
+
+        request = respx.get(EUROPE_PMC_URL).calls.last.request
+        query = str(request.url.params.get("query", ""))
+        # The only remaining quotes/parens are the engine's own PUB_TYPE filter.
+        assert query == (
+            '(what is ibuprofen for children) AND '
+            '(PUB_TYPE:"systematic review" OR PUB_TYPE:"meta-analysis")'
+        )
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_medical_databases_survives_source_failure(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
     respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))

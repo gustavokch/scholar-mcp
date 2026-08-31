@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Any
 from bs4 import BeautifulSoup
 
@@ -95,7 +96,12 @@ class MedicalDatabasesEngine:
         # "Cochrane" search through Europe PMC's open REST API, which mirrors
         # Cochrane systematic reviews. The pub_type filter keeps the result
         # set close to what the user would have found on cochranelibrary.com.
-        europe_pmc_query = f"({query}) AND (PUB_TYPE:\"systematic review\" OR PUB_TYPE:\"meta-analysis\")"
+        # Neutralize query-language punctuation first: a stray quote or paren
+        # in an agent-supplied query is Europe PMC syntax, not part of the
+        # topic, and would turn the whole search into a 400.
+        clean_query = re.sub(r'["()]', " ", query)
+        clean_query = re.sub(r"\s+", " ", clean_query).strip()
+        europe_pmc_query = f"({clean_query}) AND (PUB_TYPE:\"systematic review\" OR PUB_TYPE:\"meta-analysis\")"
         try:
             resp = await self.http_client.get(
                 EUROPE_PMC_URL,
