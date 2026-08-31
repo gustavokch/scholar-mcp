@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
@@ -165,7 +166,7 @@ class PediatricsEngine:
 
         return self._parse_guideline_items(html_text, item_selectors, base_url, source), False
 
-    async def _playwright_scrape(
+    async def _camoufox_scrape(
         self,
         url: str,
         query: str,
@@ -173,15 +174,20 @@ class PediatricsEngine:
         base_url: str,
         source: str,
     ) -> list[PediatricGuideline]:
-        """Last-resort rendered-HTML scrape for one guideline source."""
-        from playwright.async_api import async_playwright
+        """Last-resort rendered-HTML scrape for one guideline source.
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page(user_agent=BROWSER_UA)
-            await page.goto(f"{url}?q={query}", wait_until="domcontentloaded")
+        Camoufox (anti-detection Firefox) because the AAP hosts sit behind
+        Cloudflare and 403 plain HTTP clients. It manages its own coherent
+        fingerprint, so no custom user agent is sent."""
+        from camoufox.async_api import AsyncCamoufox
+
+        async with AsyncCamoufox(headless=True) as browser:
+            page = await browser.new_page()
+            await page.goto(
+                f"{url}?{urlencode({'q': query})}",
+                wait_until="domcontentloaded",
+            )
             content = await page.content()
-            await browser.close()
         return self._parse_guideline_items(content, item_selectors, base_url, source)
 
     async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:
@@ -321,27 +327,27 @@ class PediatricsEngine:
                     exc_info=True,
                 )
 
-        if not deduped and self.settings.enable_playwright_fallback:
-            pw_items: list[PediatricGuideline] = []
+        if not deduped and self.settings.enable_browser_fallback:
+            browser_items: list[PediatricGuideline] = []
             for url, selectors, base, source in (
                 (BF_URL, BF_ITEM_SELECTORS, BF_BASE, "bright-futures"),
                 (AAP_URL, AAP_ITEM_SELECTORS, AAP_BASE, "aap-policy"),
             ):
                 try:
-                    pw_items.extend(
-                        await self._playwright_scrape(url, query, selectors, base, source)
+                    browser_items.extend(
+                        await self._camoufox_scrape(url, query, selectors, base, source)
                     )
                 except Exception:
                     logger.warning(
-                        "Playwright fallback failed for %s", url, exc_info=True
+                        "Browser fallback failed for %s", url, exc_info=True
                     )
-            if pw_items:
+            if browser_items:
                 deduped = []
-                pw_seen: set[str] = set()
-                for g in self._filter_matches(pw_items, query):
+                browser_seen: set[str] = set()
+                for g in self._filter_matches(browser_items, query):
                     norm = re.sub(r"[^\w\s]", "", g.title.lower())
-                    if norm not in pw_seen:
-                        pw_seen.add(norm)
+                    if norm not in browser_seen:
+                        browser_seen.add(norm)
                         deduped.append(g)
                 errored = False
 

@@ -22,6 +22,73 @@ async def _engine(tmp_path: Path):
     return engine, cache, http_client
 
 
+def _install_fake_camoufox(monkeypatch, rendered_html=""):
+    """Fake camoufox.async_api; returns (attempts, captured_urls)."""
+    import sys
+    import types
+
+    attempts: list[bool] = []
+    captured_urls: list[str] = []
+
+    class _FakePage:
+        async def goto(self, url, *a, **k):
+            captured_urls.append(url)
+            return None
+
+        async def content(self):
+            return rendered_html
+
+    class _FakeBrowser:
+        async def new_page(self, *a, **k):
+            return _FakePage()
+
+    class _FakeCamoufoxContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _FakeBrowser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _fake_async_camoufox(**launch_options):
+        return _FakeCamoufoxContext()
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = _fake_async_camoufox
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    return attempts, captured_urls
+
+
+def _install_fake_playwright(monkeypatch):
+    """Fake playwright.async_api that records async_playwright() attempts."""
+    import sys
+    import types
+
+    attempts: list[bool] = []
+
+    class _FakeContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return None
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _fake_async_playwright():
+        return _FakeContext()
+
+    api_mod = types.ModuleType("playwright.async_api")
+    api_mod.async_playwright = _fake_async_playwright
+    pw_mod = types.ModuleType("playwright")
+    pw_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "playwright", pw_mod)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", api_mod)
+    return attempts
+
+
 @respx.mock
 async def test_search_bright_futures_html(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
@@ -209,7 +276,7 @@ async def test_search_aap_guidelines_falls_back_to_pubmed_on_scrape_failure(tmp_
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
     engine, cache, http_client = await _engine(tmp_path)
-    engine.settings.enable_playwright_fallback = False
+    engine.settings.enable_browser_fallback = False
     respx.get(BF_URL).respond(status_code=403)
     respx.get(AAP_URL).respond(status_code=403)
 
@@ -255,7 +322,7 @@ async def test_search_aap_guidelines_ignores_scrape_items_unrelated_to_query(tmp
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
     engine, cache, http_client = await _engine(tmp_path)
-    engine.settings.enable_playwright_fallback = False
+    engine.settings.enable_browser_fallback = False
     respx.get(BF_URL).respond(
         html="""
     <html><body>
@@ -301,8 +368,9 @@ async def test_search_aap_guidelines_ignores_scrape_items_unrelated_to_query(tmp
 
 
 @respx.mock
-async def test_search_aap_guidelines_playwright_is_last_resort(tmp_path: Path, monkeypatch):
-    """Playwright must run only after the PubMed fallback also found nothing."""
+async def test_search_aap_guidelines_browser_is_last_resort(tmp_path: Path, monkeypatch):
+    """The camoufox browser fallback must run only after the PubMed fallback
+    also found nothing."""
     import sys
     import types
     from unittest.mock import AsyncMock
@@ -321,7 +389,7 @@ async def test_search_aap_guidelines_playwright_is_last_resort(tmp_path: Path, m
     )
     engine.pubmed = mock_pubmed
 
-    pw_html = """
+    rendered_html = """
     <html><body>
       <div class="search-result">
         <h3 class="title"><a href="/pediatrics/article/9">
@@ -331,51 +399,53 @@ async def test_search_aap_guidelines_playwright_is_last_resort(tmp_path: Path, m
     </body></html>
     """
 
-    attempts = []
+    attempts, _urls = _install_fake_camoufox(monkeypatch, rendered_html)
+    # Block the legacy playwright path so the pre-camoufox source cannot open
+    # a real browser during this test.
+    _install_fake_playwright(monkeypatch)
 
-    class _FakePage:
-        async def goto(self, *a, **k):
-            return None
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert attempts, "browser fallback never attempted"
+        assert guidelines
+        assert guidelines[0].title.startswith("Ibuprofen Safety")
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
-        async def content(self):
-            return pw_html
 
-    class _FakeBrowser:
-        async def new_page(self, user_agent=None):
-            return _FakePage()
 
-        async def close(self):
-            return None
+@respx.mock
+async def test_last_resort_browser_scrape_uses_camoufox_and_encodes_query(
+    tmp_path: Path, monkeypatch
+):
+    """The last-resort browser scrape must drive camoufox (not playwright)
+    and URL-encode the query it appends as ?q= so '&' or '#' in an
+    agent-supplied query cannot misroute the request."""
+    from unittest.mock import AsyncMock
 
-    class _FakeChromium:
-        async def launch(self, headless=True):
-            return _FakeBrowser()
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
-    class _FakePW:
-        chromium = _FakeChromium()
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(BF_URL).respond(status_code=403)
+    respx.get(AAP_URL).respond(status_code=403)
 
-    class _FakePWContext:
-        async def __aenter__(self):
-            return _FakePW()
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
 
-        async def __aexit__(self, *exc):
-            return False
+    camoufox_attempts, captured = _install_fake_camoufox(monkeypatch)
+    pw_attempts = _install_fake_playwright(monkeypatch)
 
-    def _fake_async_playwright():
-        attempts.append(True)
-        return _FakePWContext()
-
-    api_mod = types.ModuleType("playwright.async_api")
-    api_mod.async_playwright = _fake_async_playwright
-    pw_mod = types.ModuleType("playwright")
-    pw_mod.async_api = api_mod
-    monkeypatch.setitem(sys.modules, "playwright", pw_mod)
-    monkeypatch.setitem(sys.modules, "playwright.async_api", api_mod)
-
-    guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
-    assert attempts, "playwright never attempted"
-    assert guidelines
-    assert guidelines[0].title.startswith("Ibuprofen Safety")
-    assert meta.error is False
-    await cache.close()
-    await http_client.aclose()
+    try:
+        await engine.search_aap_guidelines("ibuprofen & children")
+        assert captured, "browser fallback never attempted"
+        assert "ibuprofen+%26+children" in captured[0]
+        assert not pw_attempts, "playwright path still reachable"
+    finally:
+        await cache.close()
+        await http_client.aclose()

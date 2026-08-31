@@ -223,7 +223,7 @@ All options are configured via environment variables:
 | `CACHE_TTL_CHILD_HEALTH` | `604800` | WHO child health indicators cache TTL in seconds (7d). |
 | `CACHE_TTL_PEDIATRIC_DRUGS` | `86400` | Pediatric drug search cache TTL in seconds (24h). |
 | `CACHE_TTL_CLINICAL_TRIALS` | `86400` | ClinicalTrials.gov cache TTL in seconds (24h). |
-| `ENABLE_PLAYWRIGHT_FALLBACK` | `true` | Enable Playwright headless browser fallback for scraping. |
+| `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
 
 ---
