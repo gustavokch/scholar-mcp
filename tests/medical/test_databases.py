@@ -161,17 +161,12 @@ async def test_search_medical_databases_ranks_before_truncation(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_cochrane_calls_europe_pmc_when_http_to_cochrane_fails(
-    tmp_path: Path, monkeypatch
-):
+async def test_search_cochrane_routes_through_europe_pmc(tmp_path: Path):
     """The Cochrane Library HTML site is behind a Cloudflare bot wall that
     blocks the plain HTTP fetch. Rather than fight the wall, _search_cochrane
     routes through Europe PMC's open API (which mirrors Cochrane systematic
     reviews) and reports those results as Cochrane records.
     """
-    import sys
-    import types
-
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
@@ -184,11 +179,6 @@ async def test_search_cochrane_calls_europe_pmc_when_http_to_cochrane_fails(
         settings=settings,
         jitter_range=None,
     )
-
-    # The Cochane HTML site would 403, but we no longer hit it. We assert
-    # that here for defensive coverage in case a future refactor reaches
-    # back for the HTML.
-    respx.get("https://www.cochranelibrary.com/search").respond(status_code=403)
 
     europe_pmc_payload = {
         "hitCount": 2,
