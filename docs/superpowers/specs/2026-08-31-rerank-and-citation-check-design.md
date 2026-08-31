@@ -16,6 +16,9 @@ Date: 2026-08-31
    `get_full_text` to verify that a drafted answer's citations are
    actually supported by the papers they cite. No tool exists for
    this today.
+3. Ranking has no notion of study rigor (systematic review vs. case
+   report), journal standing, or author track record — only relevance
+   proxy, raw citation count, and recency.
 
 ## Scope
 
@@ -26,11 +29,19 @@ Date: 2026-08-31
   `medical/ranking.py`.
 - Add a new `check_citations` MCP tool for claim-to-source grounding
   checks, reusing the same lexical scoring primitive.
-- No new dependencies (no embeddings/ML libs) — lexical only, matching
-  the project's existing zero-ML-dependency footprint.
+- Add three new ranking signals to the main `search_papers` path:
+  evidence grade (study design), journal impact (SJR proxy), author
+  authority (last-author h-index).
+- No new ML dependencies (no embeddings/ML libs) — lexical only,
+  matching the project's existing zero-ML-dependency footprint. One
+  static data file (Scimago SJR) added for journal impact.
 - No free-text citation parsing (`[1]`, `(Author, 2020)`, etc.) —
   `check_citations` takes structured claim/identifier pairs supplied
   by the calling agent.
+- The three new ranking signals apply only to the main `search_papers`
+  path. `medical/ranking.py` (guidelines/pediatrics/databases tools)
+  stays lexical-only with no network enrichment — future extension,
+  not built now.
 
 ## Design
 
@@ -145,6 +156,96 @@ async def check_citations(claims: list[dict[str, str]], deep: bool = False) -> l
     """
 ```
 
+### 4. Evidence grade (real PubMed data, no new dependency)
+
+PubMed's ESummary JSON already returns `pubtype` (list of strings) per
+article — fetched in `providers/pubmed.py::search` today and
+discarded. EFetch XML also carries `<PublicationTypeList>`. Use it
+instead of any heuristic.
+
+- Add `PaperMetadata.study_type: str | None` (raw top pubtype string)
+  and `PaperMetadata.evidence_grade: str | None` (normalized tier).
+- Oxford CEBM-style ladder, mapped from `pubtype` values:
+  - `1a`: "Meta-Analysis", "Systematic Review"
+  - `1b`: "Randomized Controlled Trial"
+  - `2b`: "Observational Study", "Comparative Study", "Multicenter Study"
+  - `3b`: "Case-Control Studies"
+  - `4`: "Case Reports"
+  - `5`: "Review", "Editorial", "Comment", "Practice Guideline"
+  - `None`: no pubtype match, or non-PubMed source (CrossRef/S2/arXiv
+    lack this field) — neutral, no bonus or penalty
+- Grade -> numeric feature: `evidence_score = 1.0 / grade_rank` where
+  `grade_rank` is the ladder position (`1a`=1, `1b`=2, `2b`=3, `3b`=4,
+  `4`=5, `5`=6); `None` -> `0.0`. Z-scored like the other features.
+- New `RankingWeights.evidence_grade` term.
+
+### 5. Journal impact (static Scimago SJR dataset)
+
+No free official Journal Impact Factor (Clarivate) API exists. Use
+Scimago Journal Rank (open data) as a proxy, shipped as a static
+in-repo file rather than a live external call:
+
+- `src/scholar_mcp/data/scimago_sjr.json`, built once from Scimago's
+  public downloadable CSV (journal-level SJR indicator + ISSN). Keyed
+  by ISSN (primary) with normalized-journal-name as fallback key.
+  Accompanying `SOURCES.md` records the dataset version/year and its
+  usage terms; `scripts/update_scimago_data.py` regenerates the JSON
+  from a freshly downloaded CSV — no runtime network dependency.
+- Add `PaperMetadata.issn: str | None`. Populate from fields already
+  present but unused in provider responses: PubMed ESummary
+  `issn`/`essn`, CrossRef metadata `ISSN` list, OpenAlex
+  `host_venue.issn_l`.
+- Lookup: `issn` -> SJR value if present; else normalize `venue`
+  (lowercase, strip punctuation) and try a name match; else `None`
+  (neutral).
+- New feature: `raw_impact = log(1 + sjr_value)` if found else `0.0`,
+  z-scored like citations. New `RankingWeights.journal_impact` term.
+- Loaded once at process start as a module-level singleton dict — zero
+  added runtime latency or dependency.
+
+### 6. Author authority (last-author h-index via OpenAlex)
+
+Reuses the existing citation-enrichment batch call rather than a
+separate per-paper author-name search, which avoids name-disambiguation
+risk entirely:
+
+- `OpenAlexProvider.fetch_citation_counts_batch` already fetches each
+  work by DOI/PMID; each work's `authorships[].author.id` is an
+  unambiguous OpenAlex author ID, currently discarded. Extend that
+  method to also return, per paper, the **last** authorship's
+  `author.id`.
+- New `OpenAlexProvider.fetch_author_h_indices_batch(author_ids: list[str]) -> dict[str, int]`:
+  one batched call to `/authors?filter=openalex_id:ID1|ID2|...`,
+  reading `summary_stats.h_index`. Cached in the existing `TTLCache`
+  (`hidx:<openalex_author_id>`), same pattern as citation-count caching
+  in `RankingPipeline`.
+- Only populated when the paper has a DOI/PMID resolvable in OpenAlex
+  (same precondition citation enrichment already has); else `None`,
+  neutral.
+- New feature: `raw_authority = log(1 + h_index)` if found else `0.0`,
+  z-scored. New `RankingWeights.author_authority` term.
+- Runs inside `RankingPipeline.enrich_citations`'s existing OpenAlex
+  batch step — one extra field read, one extra batched HTTP call, no
+  new network round-trip pattern.
+
+### 7. Rebalanced weights
+
+`RankingWeights` gains 3 fields; defaults rebalanced so the total
+stays 1.0:
+
+| term | old default | new default |
+|---|---|---|
+| relevance | 0.40 | 0.30 |
+| citations | 0.30 | 0.20 |
+| recency | 0.30 | 0.15 |
+| evidence_grade | — | 0.20 |
+| journal_impact | — | 0.10 |
+| author_authority | — | 0.05 |
+
+All overridable via `Settings`/env vars, same convention as existing
+weights: `RANKING_WEIGHT_EVIDENCE_GRADE`, `RANKING_WEIGHT_JOURNAL_IMPACT`,
+`RANKING_WEIGHT_AUTHOR_AUTHORITY`.
+
 ## Error handling
 
 - Empty/whitespace `query` in `search()` -> lexical coverage is 0 for
@@ -155,6 +256,17 @@ async def check_citations(claims: list[dict[str, str]], deep: bool = False) -> l
   or fetch error -> `NOT_FOUND` verdict for that claim only.
 - `check_citations`: batch size > 25 -> single error response, same
   shape as `get_full_text_batch`'s existing over-limit response.
+- Evidence grade: unrecognized/missing `pubtype`, or non-PubMed
+  source -> `evidence_grade=None`, feature contributes `0.0` (neutral,
+  never penalized).
+- Journal impact: ISSN and name both miss the SJR table -> feature
+  `0.0` (neutral). Corrupt/missing `scimago_sjr.json` at startup ->
+  log a warning, treat the table as empty (ranking degrades to the
+  other 5 signals, never crashes).
+- Author authority: no DOI/PMID, no OpenAlex work match, or OpenAlex
+  batch call failure -> feature `0.0` (neutral), mirrors existing
+  citation-enrichment fallback (`enrich_citations`'s own `except`
+  blocks already swallow OpenAlex failures the same way).
 
 ## Testing
 
@@ -170,3 +282,14 @@ async def check_citations(claims: list[dict[str, str]], deep: bool = False) -> l
 - `resolver.py` / `server.py`: integration test confirming
   `search_papers` still returns correctly ranked results end-to-end
   with the query threaded through to `rank_papers`.
+- Evidence grade: unit tests mapping each `pubtype` string set to its
+  expected ladder tier, including the `None`/non-PubMed neutral case.
+- Journal impact: unit tests for ISSN-hit, name-fallback-hit, and
+  miss (neutral) lookups; a test asserting a missing/corrupt
+  `scimago_sjr.json` doesn't crash the ranking pipeline.
+- Author authority: unit test for the OpenAlex last-authorship-ID
+  extraction and the h-index batch fetch, plus a neutral-fallback
+  test when no DOI/PMID is present.
+- Full-pipeline regression test: a paper with SR/MA design, high SJR
+  journal, and high-h-index last author outranks an otherwise
+  equal-relevance/citation/recency paper lacking all three signals.
