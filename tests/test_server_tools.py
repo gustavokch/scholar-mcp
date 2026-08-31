@@ -160,3 +160,32 @@ async def test_get_related_papers_tool(resolver):
     assert res[0]["title"] == "Related Paper"
     assert res[0]["score"] == 90.0
 
+
+
+async def test_check_citations_tool_supported(resolver, monkeypatch):
+    from scholar_mcp.config import Settings
+
+    # The `resolver` fixture is an AsyncMock; check_citations reads
+    # resolver.settings.max_concurrency and the threshold floats, which blow up
+    # on auto-created AsyncMock children (TypeError in Semaphore/threshold
+    # comparison). Give it a real Settings.
+    resolver.settings = Settings()
+
+    async def fake_get_metadata(identifier):
+        return PaperMetadata(
+            title="Metformin Trial",
+            abstract="Metformin significantly reduced HbA1c in the treatment group.",
+        )
+
+    monkeypatch.setattr(srv.resolver, "get_metadata", fake_get_metadata)
+
+    results = await srv.check_citations(
+        claims=[{"text": "Metformin significantly reduced HbA1c.", "identifier": "10.1/x"}],
+    )
+    assert results[0]["verdict"] == "SUPPORTED"
+
+
+async def test_check_citations_tool_batch_cap():
+    claims = [{"text": "x", "identifier": "10.1/x"} for _ in range(26)]
+    results = await srv.check_citations(claims=claims)
+    assert results[0]["verdict"] == "error"
