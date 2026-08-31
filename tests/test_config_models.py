@@ -156,22 +156,34 @@ def test_settings_ranking_defaults(monkeypatch):
     monkeypatch.delenv("RANKING_WEIGHT_RELEVANCE", raising=False)
     monkeypatch.delenv("RANKING_WEIGHT_CITATIONS", raising=False)
     monkeypatch.delenv("RANKING_WEIGHT_RECENCY", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_EVIDENCE_GRADE", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_JOURNAL_IMPACT", raising=False)
+    monkeypatch.delenv("RANKING_WEIGHT_AUTHOR_AUTHORITY", raising=False)
+    monkeypatch.delenv("RANKING_POSITION_WEIGHT", raising=False)
     monkeypatch.delenv("RANKING_RECENCY_HALF_LIFE_YEARS", raising=False)
     monkeypatch.delenv("RANKING_CANDIDATE_MULTIPLIER", raising=False)
     monkeypatch.delenv("RANKING_MIN_CANDIDATES", raising=False)
     monkeypatch.delenv("RANKING_MAX_CANDIDATES", raising=False)
     monkeypatch.delenv("RANKING_ENRICHMENT_TIMEOUT", raising=False)
+    monkeypatch.delenv("CITATION_CHECK_SUPPORTED_THRESHOLD", raising=False)
+    monkeypatch.delenv("CITATION_CHECK_WEAK_THRESHOLD", raising=False)
 
     s = Settings.load()
     assert s.ranking_enabled is True
-    assert s.ranking_weight_relevance == 0.4
-    assert s.ranking_weight_citations == 0.3
-    assert s.ranking_weight_recency == 0.3
+    assert s.ranking_weight_relevance == 0.30
+    assert s.ranking_weight_citations == 0.20
+    assert s.ranking_weight_recency == 0.15
+    assert s.ranking_weight_evidence_grade == 0.20
+    assert s.ranking_weight_journal_impact == 0.10
+    assert s.ranking_weight_author_authority == 0.05
+    assert s.ranking_position_weight == 0.25
     assert s.ranking_recency_half_life_years == 7.0
     assert s.ranking_candidate_multiplier == 3
     assert s.ranking_min_candidates == 20
     assert s.ranking_max_candidates == 50
     assert s.ranking_enrichment_timeout == 1.5
+    assert s.citation_check_supported_threshold == 0.5
+    assert s.citation_check_weak_threshold == 0.15
 
 
 def test_settings_ranking_custom_env(monkeypatch):
@@ -179,6 +191,10 @@ def test_settings_ranking_custom_env(monkeypatch):
     monkeypatch.setenv("RANKING_WEIGHT_RELEVANCE", "0.5")
     monkeypatch.setenv("RANKING_WEIGHT_CITATIONS", "0.2")
     monkeypatch.setenv("RANKING_WEIGHT_RECENCY", "0.3")
+    monkeypatch.setenv("RANKING_WEIGHT_EVIDENCE_GRADE", "0.15")
+    monkeypatch.setenv("RANKING_WEIGHT_JOURNAL_IMPACT", "0.05")
+    monkeypatch.setenv("RANKING_WEIGHT_AUTHOR_AUTHORITY", "0.02")
+    monkeypatch.setenv("RANKING_POSITION_WEIGHT", "0.4")
     monkeypatch.setenv("RANKING_RECENCY_HALF_LIFE_YEARS", "5.0")
     monkeypatch.setenv("RANKING_CANDIDATE_MULTIPLIER", "4")
     monkeypatch.setenv("RANKING_MIN_CANDIDATES", "15")
@@ -190,6 +206,10 @@ def test_settings_ranking_custom_env(monkeypatch):
     assert s.ranking_weight_relevance == 0.5
     assert s.ranking_weight_citations == 0.2
     assert s.ranking_weight_recency == 0.3
+    assert s.ranking_weight_evidence_grade == 0.15
+    assert s.ranking_weight_journal_impact == 0.05
+    assert s.ranking_weight_author_authority == 0.02
+    assert s.ranking_position_weight == 0.4
     assert s.ranking_recency_half_life_years == 5.0
     assert s.ranking_candidate_multiplier == 4
     assert s.ranking_min_candidates == 15
