@@ -80,6 +80,13 @@ class PediatricsEngine:
         """True when the title shares at least one word with the query."""
         return bool(query_tokens & set(re.findall(r"\w+", title.lower())))
 
+    def _filter_matches(
+        self, results: list[PediatricGuideline], query: str
+    ) -> list[PediatricGuideline]:
+        """Drop SPA navigation junk whose title shares no word with the query."""
+        query_tokens = set(re.findall(r"\w+", query.lower()))
+        return [g for g in results if self._matches_query(g.title, query_tokens)]
+
     def _parse_guideline_items(
         self,
         html_text: str,
@@ -220,6 +227,7 @@ class PediatricsEngine:
             BF_BASE,
             "bright-futures",
         )
+        results = self._filter_matches(results, query)
 
         if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
@@ -247,6 +255,7 @@ class PediatricsEngine:
             AAP_BASE,
             "aap-policy",
         )
+        results = self._filter_matches(results, query)
 
         if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
@@ -296,8 +305,7 @@ class PediatricsEngine:
         # static navigation items regardless of the query. Drop items that
         # share no word with the query so they neither pollute results nor
         # block the PubMed fallback below.
-        query_tokens = set(re.findall(r"\w+", query.lower()))
-        deduped = [g for g in deduped if self._matches_query(g.title, query_tokens)]
+        deduped = self._filter_matches(deduped, query)
 
         # Fallback chain when both scrapes came up empty: PubMed
         # publication-type search filtered to AAP first (reliable, no
@@ -328,11 +336,9 @@ class PediatricsEngine:
                         "Playwright fallback failed for %s", url, exc_info=True
                     )
             if pw_items:
-                pw_seen: set[str] = set()
                 deduped = []
-                for g in pw_items:
-                    if not self._matches_query(g.title, query_tokens):
-                        continue
+                pw_seen: set[str] = set()
+                for g in self._filter_matches(pw_items, query):
                     norm = re.sub(r"[^\w\s]", "", g.title.lower())
                     if norm not in pw_seen:
                         pw_seen.add(norm)

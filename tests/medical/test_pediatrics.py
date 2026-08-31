@@ -171,6 +171,35 @@ async def test_search_aap_guidelines_marks_error_when_one_source_fails(tmp_path:
 
 
 @respx.mock
+async def test_direct_scrapes_drop_items_unrelated_to_query(tmp_path: Path):
+    """server.py routes to search_bright_futures / search_aap_policy directly;
+    those paths must apply the same query-overlap filter as the combined
+    search so SPA navigation junk cannot reach callers."""
+    engine, cache, http_client = await _engine(tmp_path)
+    junk_html = """
+    <html><body>
+      <div class="search-result">
+        <h3 class="title"><a href="/practice-management/bright-futures/quality">Quality Improvement</a></h3>
+        <p>Site navigation.</p>
+      </div>
+    </body></html>
+    """
+    respx.get(BF_URL).respond(html=junk_html)
+    respx.get(AAP_URL).respond(html=junk_html)
+
+    bf, bf_meta = await engine.search_bright_futures("nutrition")
+    assert bf == []
+    assert bf_meta.error is False
+
+    aap, aap_meta = await engine.search_aap_policy("nutrition")
+    assert aap == []
+    assert aap_meta.error is False
+
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_search_aap_guidelines_falls_back_to_pubmed_on_scrape_failure(tmp_path: Path):
     """Both AAP scrapes failing (e.g. Cloudflare 403) falls back to a PubMed
     publication-type search filtered to AAP instead of returning nothing."""
