@@ -449,3 +449,49 @@ async def test_last_resort_browser_scrape_uses_camoufox_and_encodes_query(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Path, monkeypatch):
+    """The camoufox browser must never launch when the PubMed fallback
+    already returned results."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(BF_URL).respond(status_code=403)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=(
+                    "American Academy of Pediatrics guideline: "
+                    "ibuprofen use in infants under 6 months"
+                ),
+                abstract=(
+                    "Recommendations and best practice for ibuprofen dosing "
+                    "and contraindications in children under 6 months."
+                ),
+                pmid="12345",
+                year="2024",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    camoufox_attempts, _urls = _install_fake_camoufox(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen children")
+        assert not camoufox_attempts, "browser launched despite PubMed results"
+        assert len(guidelines) == 1
+        assert guidelines[0].source == "pubmed-aap"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
