@@ -67,7 +67,12 @@ class MedicalDatabasesEngine:
             author_string = rec.get("authorString")
             if author_string:
                 authors = [a.strip() for a in author_string.split(",") if a.strip()]
-            pmid = rec.get("pmid") or rec.get("id") or ""
+            # Europe PMC's `id` is a source-local record id; it only doubles as
+            # a PMID for MED (PubMed) records. Anything else would fabricate a
+            # pmid and a bogus europepmc.org/article/MED/{id} URL.
+            pmid = rec.get("pmid") or (
+                rec.get("id") if rec.get("source") == "MED" else ""
+            ) or ""
             url = ""
             if rec.get("pmcid"):
                 url = f"https://europepmc.org/article/PMC/{rec['pmcid']}"

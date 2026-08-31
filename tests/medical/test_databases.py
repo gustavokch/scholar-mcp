@@ -336,6 +336,52 @@ async def test_search_cochrane_neutralizes_query_punctuation(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_cochrane_leaves_pmid_empty_for_non_med_record(tmp_path: Path):
+    """Europe PMC's `id` is a source-local record id, not a PMID. Only fall
+    back to it when the record's source is MED, or the article gets a bogus
+    pmid and a bogus europepmc.org/article/MED/{id} link."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    engine = MedicalDatabasesEngine(
+        pubmed=AsyncMock(),
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+
+    respx.get(EUROPE_PMC_URL).respond(
+        json={
+            "hitCount": 1,
+            "resultList": {
+                "result": [
+                    {
+                        "id": "777",
+                        "source": "CBA",
+                        "title": "Systematic review of pediatric NSAID data",
+                        "pubYear": "2024",
+                        "pubType": "systematic review",
+                    }
+                ]
+            },
+        }
+    )
+
+    try:
+        articles, meta = await engine._search_cochrane("ibuprofen children")
+        assert len(articles) == 1
+        assert articles[0].pmid == ""
+        assert articles[0].url == ""
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_medical_databases_survives_source_failure(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
     respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))
