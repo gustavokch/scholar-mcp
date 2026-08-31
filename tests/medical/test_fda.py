@@ -263,6 +263,39 @@ async def test_search_drugs_caches_genuine_404_absence(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_drugs_unfielded_results_must_match_drug_token(tmp_path: Path):
+    """The unfielded full-text fallback can match a label that happens to
+    contain every word of a multi-word query (e.g. SILICEA matching
+    'ibuprofen pediatric dosing children' on 'pediatric' + 'dosage' + 'children'
+    in the label body). Filter the fallback to require the lead drug token to
+    actually appear in the label, so unrelated labels cannot leak into the
+    pediatric_drugs result set.
+    """
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        # Unfielded returns SILICEA — must be filtered out because the lead
+        # token 'ibuprofen' is nowhere in this label.
+        return httpx.Response(
+            200,
+            json=_label_payload("SILICEA", "SILICEA", ndc="12345-001"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    drugs, meta = await client.search_drugs(
+        "ibuprofen pediatric dosing children", limit=5
+    )
+    assert drugs == []
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_search_drugs_falls_back_to_unfielded_query(tmp_path: Path):
     """A multi-word query can never match a field-restricted quoted phrase;
     the unfielded full-text variant must still find the label."""

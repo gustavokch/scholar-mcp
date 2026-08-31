@@ -38,6 +38,25 @@ def is_valid_drug_query(query: str) -> bool:
     return True
 
 
+def _label_names_drug(drug: DrugLabel, query: str) -> bool:
+    """True when any of the query's leading tokens appears in the drug's
+    brand_name, generic_name, or substance_name. Used to filter the unfielded
+    full-text fallback, which can otherwise match unrelated labels whose
+    body text happens to contain every word of a multi-word query.
+    """
+    lead_tokens = [
+        t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
+    ][:3]
+    if not lead_tokens:
+        return True
+    ofd = drug.openfda
+    name_fields = (
+        ofd.brand_name + ofd.generic_name + ofd.substance_name
+    )
+    haystack = " ".join(name_fields).lower()
+    return any(token in haystack for token in lead_tokens)
+
+
 def _parse_drug_label(raw: dict[str, Any]) -> DrugLabel:
     openfda_raw = raw.get("openfda", {})
     openfda = OpenFDAData.from_dict(openfda_raw)
@@ -145,6 +164,15 @@ class FDAClient:
                 results = data.get("results", [])
                 for raw in results:
                     drug = _parse_drug_label(raw)
+                    # The unfielded full-text variant can match any label
+                    # whose body happens to contain every word of a multi-
+                    # word query (e.g. SILICEA matching "ibuprofen pediatric
+                    # dosing children" on "pediatric" + "dosage" + "children"
+                    # in the label text). The lead token of the query is
+                    # the drug name the user is actually looking for; drop
+                    # any result that does not name it.
+                    if sq == query and not _label_names_drug(drug, query):
+                        continue
                     ndc = drug.openfda.product_ndc[0] if drug.openfda.product_ndc else None
                     if ndc:
                         if ndc in seen_ndcs:
