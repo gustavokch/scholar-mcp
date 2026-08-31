@@ -9,7 +9,7 @@ from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
-COCHRANE_URL = "https://www.cochranelibrary.com/search"
+EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
 
 async def _engine(tmp_path: Path):
@@ -58,16 +58,23 @@ async def _engine(tmp_path: Path):
 async def test_search_medical_databases_combines_and_deduplicates(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
     # Cochrane returns the same paper under a case-variant title + same year: dedup keeps the PubMed record (has DOI).
-    respx.get(COCHRANE_URL).respond(
-        html="""
-    <html><body>
-      <div class="search-result-item">
-        <h3><a href="/cd/1">DIABETES management</a></h3>
-        <div class="abstract">Short.</div>
-        <div class="journal">Cochrane Database</div>
-      </div>
-    </body></html>
-    """
+    respx.get(EUROPE_PMC_URL).respond(
+        json={
+            "hitCount": 1,
+            "resultList": {
+                "result": [
+                    {
+                        "title": "DIABETES management",
+                        "authorString": "Cochrane Collaboration",
+                        "journalTitle": "Cochrane Database Syst Rev",
+                        "pubYear": "2021",
+                        "pmid": "99999",
+                        "doi": "10.1000/1",
+                        "pubType": "systematic review",
+                    }
+                ]
+            },
+        }
     )
 
     articles, meta = await engine.search_medical_databases("diabetes")
@@ -141,7 +148,9 @@ async def test_search_medical_databases_ranks_before_truncation(tmp_path: Path):
         jitter_range=None,
     )
     try:
-        respx.get(COCHRANE_URL).respond(html="<html><body></body></html>")
+        respx.get(EUROPE_PMC_URL).respond(
+            json={"hitCount": 0, "resultList": {"result": []}}
+        )
         articles, _ = await engine.search_medical_databases("diabetes")
         assert len(articles) == 20
         # The highly relevant item must survive the truncation; it would not if unique[:20] ran first.
@@ -152,9 +161,143 @@ async def test_search_medical_databases_ranks_before_truncation(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_cochrane_calls_europe_pmc_when_http_to_cochrane_fails(
+    tmp_path: Path, monkeypatch
+):
+    """The Cochrane Library HTML site is behind a Cloudflare bot wall that
+    blocks the plain HTTP fetch. Rather than fight the wall, _search_cochrane
+    routes through Europe PMC's open API (which mirrors Cochrane systematic
+    reviews) and reports those results as Cochrane records.
+    """
+    import sys
+    import types
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    engine = MedicalDatabasesEngine(
+        pubmed=AsyncMock(),
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+
+    # The Cochane HTML site would 403, but we no longer hit it. We assert
+    # that here for defensive coverage in case a future refactor reaches
+    # back for the HTML.
+    respx.get("https://www.cochranelibrary.com/search").respond(status_code=403)
+
+    europe_pmc_payload = {
+        "hitCount": 2,
+        "resultList": {
+            "result": [
+                {
+                    "title": "Ibuprofen for acute postoperative pain in children",
+                    "authorString": "Smith J, Doe A",
+                    "journalTitle": "Cochrane Database Syst Rev",
+                    "pubYear": "2024",
+                    "pmid": "12345",
+                    "pmcid": "PMC12345",
+                    "doi": "10.1000/cochrane.12345",
+                    "pubType": "systematic review",
+                    "abstractText": "Systematic review of pediatric NSAID data.",
+                },
+                {
+                    "title": "NSAIDs for pediatric fever: a systematic review",
+                    "authorString": "Lee K",
+                    "journalTitle": "Cochrane Database Syst Rev",
+                    "pubYear": "2023",
+                    "pmid": "67890",
+                    "pubType": "systematic review",
+                },
+            ]
+        },
+    }
+
+    respx.get(EUROPE_PMC_URL).respond(json=europe_pmc_payload)
+
+    articles, meta = await engine._search_cochrane("ibuprofen children")
+    assert len(articles) == 2
+    assert articles[0].title == "Ibuprofen for acute postoperative pain in children"
+    assert articles[0].source_database == "Cochrane"
+    assert articles[0].journal == "Cochrane Database Syst Rev"
+    assert articles[0].year == "2024"
+    assert "Smith J" in articles[0].authors
+    assert articles[1].year == "2023"
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_cochrane_marks_error_when_europe_pmc_also_fails(tmp_path: Path):
+    """Both the local cache check and the Europe PMC fetch fail -> meta.error=True
+    so the parent engine propagates the failure rather than caching an empty
+    absence that hides a real outage.
+    """
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    engine = MedicalDatabasesEngine(
+        pubmed=AsyncMock(),
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+
+    respx.get(EUROPE_PMC_URL).respond(status_code=503)
+
+    articles, meta = await engine._search_cochrane("ibuprofen children")
+    assert articles == []
+    assert meta.error is True
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_cochrane_filters_by_publication_type_when_results_present(
+    tmp_path: Path,
+):
+    """When Europe PMC returns more than the soft cap, the engine must request
+    the systematic-review publication type filter so the parent engine does
+    not drown the gather in non-Cochrane material.
+    """
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    engine = MedicalDatabasesEngine(
+        pubmed=AsyncMock(),
+        clinical_trials=AsyncMock(),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+
+    respx.get(EUROPE_PMC_URL).respond(
+        json={"hitCount": 0, "resultList": {"result": []}}
+    )
+
+    await engine._search_cochrane("ibuprofen children")
+    request = respx.get(EUROPE_PMC_URL).calls.last.request
+    query = str(request.url.params.get("query", ""))
+    assert "ibuprofen children" in query
+    assert "systematic" in query.lower() or "review" in query.lower()
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
 async def test_search_medical_databases_survives_source_failure(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
-    respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))
+    respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))
 
     articles, meta = await engine.search_medical_databases("diabetes")
     assert len(articles) == 2  # PubMed + ClinicalTrials still returned
@@ -170,7 +313,7 @@ async def test_search_medical_databases_marks_error_when_all_sources_fail(tmp_pa
     mock_ct = AsyncMock()
     mock_ct.search_clinical_trials.return_value = ([], CacheMetadata(cached=False, cache_age=0, error=True))
     engine.clinical_trials = mock_ct
-    respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))
+    respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))
 
     articles, meta = await engine.search_medical_databases("diabetes")
     assert articles == []
@@ -178,9 +321,9 @@ async def test_search_medical_databases_marks_error_when_all_sources_fail(tmp_pa
 
     # The failure must not be cached: a second call re-issues the request.
     # Exact counts are retry-dependent, so only require fresh traffic.
-    after_first = respx.get(COCHRANE_URL).call_count
+    after_first = respx.get(EUROPE_PMC_URL).call_count
     await engine.search_medical_databases("diabetes")
-    assert respx.get(COCHRANE_URL).call_count > after_first
+    assert respx.get(EUROPE_PMC_URL).call_count > after_first
     await cache.close()
     await http_client.aclose()
 
@@ -190,7 +333,7 @@ async def test_search_medical_databases_marks_partial_source_failure(tmp_path: P
     """Cochrane down while PubMed/ClinicalTrials succeed: results still return,
     but the caller must learn the set is incomplete."""
     engine, cache, http_client, _ = await _engine(tmp_path)
-    respx.get(COCHRANE_URL).mock(side_effect=Exception("cochrane down"))
+    respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))
 
     articles, meta = await engine.search_medical_databases("diabetes")
     assert len(articles) == 2
