@@ -351,6 +351,37 @@ async def test_search_drugs_falls_back_to_unfielded_query(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_drugs_does_not_cache_partial_result_on_variant_error(tmp_path: Path):
+    """When some query variants fail but others return results, the partial
+    set must be returned (with error=True) but NOT cached — a partial set
+    pinned for the whole TTL would hide the missing variants."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            # 400 -> non-retryable failure for the fielded variants
+            return httpx.Response(400, json={"error": {"code": "BAD_REQUEST"}})
+        return httpx.Response(200, json=_label_payload("Advil", "Ibuprofen"))
+
+    route = respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs("ibuprofen dosing children", limit=5)
+        assert len(drugs) == 1
+        assert meta.error is True
+
+        after_first = route.call_count
+        drugs2, meta2 = await client.search_drugs("ibuprofen dosing children", limit=5)
+        assert len(drugs2) == 1
+        assert meta2.cached is False, "partial result set must not be cached"
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
     """A 404 with a non-JSON body (proxy/CDN error page) is still
     'no such label' — the body must not be parsed, and the result must not

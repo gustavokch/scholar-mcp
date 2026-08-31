@@ -209,11 +209,11 @@ class FDAClient:
                 errored = True
                 continue
 
-        # Caching an empty list produced by a failed fetch would serve that
-        # failure for the whole TTL, so skip the write when nothing was found
-        # and every query variant errored.
-        if errored and not all_results:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed fetch must never be served from cache for the whole TTL:
+        # skip the write when any variant errored, even when other variants
+        # returned a partial result set.
+        if errored:
+            return all_results, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
