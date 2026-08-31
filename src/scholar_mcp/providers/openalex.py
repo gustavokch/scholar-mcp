@@ -149,49 +149,49 @@ class OpenAlexProvider:
         except Exception:
             return []
 
-    async def _fetch_citation_counts_single_filter(
-        self,
-        filter_str: str,
-    ) -> dict[str, int]:
+    async def _fetch_works_raw(self, filter_str: str) -> list[dict[str, Any]]:
         params = self._params({"filter": filter_str, "per-page": 50})
         try:
             resp = await self.http_client.get(f"{OPENALEX_BASE}/works", params=params)
             if resp is None or resp.status_code != 200:
-                return {}
-
+                return []
             data = resp.json()
             results = data.get("results", [])
-            counts: dict[str, int] = {}
-
-            for work in results:
-                if not isinstance(work, dict):
-                    continue
-                c = work.get("cited_by_count")
-                if c is None or not isinstance(c, int):
-                    continue
-
-                # Map work DOI
-                w_doi = _strip_doi_url(work.get("doi"))
-                if w_doi:
-                    counts[w_doi.lower()] = c
-
-                # Map work PMID and other IDs
-                ids_dict = work.get("ids", {})
-                if isinstance(ids_dict, dict):
-                    raw_pmid = ids_dict.get("pmid")
-                    if raw_pmid:
-                        pmid_val = str(raw_pmid).split("/")[-1].strip()
-                        if pmid_val:
-                            counts[pmid_val] = c
-                    raw_doi = ids_dict.get("doi")
-                    if raw_doi:
-                        d_val = _strip_doi_url(str(raw_doi))
-                        if d_val:
-                            counts[d_val.lower()] = c
-
-            return counts
+            return [w for w in results if isinstance(w, dict)]
         except Exception:
-            return {}
+            return []
+
+    async def _fetch_citation_counts_single_filter(
+        self,
+        filter_str: str,
+    ) -> dict[str, int]:
+        works = await self._fetch_works_raw(filter_str)
+        counts: dict[str, int] = {}
+        for work in works:
+            c = work.get("cited_by_count")
+            if c is None or not isinstance(c, int):
+                continue
+
+            # Map work DOI
+            w_doi = _strip_doi_url(work.get("doi"))
+            if w_doi:
+                counts[w_doi.lower()] = c
+
+            # Map work PMID and other IDs
+            ids_dict = work.get("ids", {})
+            if isinstance(ids_dict, dict):
+                raw_pmid = ids_dict.get("pmid")
+                if raw_pmid:
+                    pmid_val = str(raw_pmid).split("/")[-1].strip()
+                    if pmid_val:
+                        counts[pmid_val] = c
+                raw_doi = ids_dict.get("doi")
+                if raw_doi:
+                    d_val = _strip_doi_url(str(raw_doi))
+                    if d_val:
+                        counts[d_val.lower()] = c
+
+        return counts
 
     async def fetch_citation_counts_batch(
         self,
@@ -223,4 +223,110 @@ class OpenAlexProvider:
             if isinstance(res, dict):
                 combined.update(res)
         return combined
+
+    async def _fetch_work_details_single_filter(
+        self,
+        filter_str: str,
+    ) -> dict[str, dict[str, Any]]:
+        works = await self._fetch_works_raw(filter_str)
+        details: dict[str, dict[str, Any]] = {}
+        for work in works:
+            c = work.get("cited_by_count")
+            if c is None or not isinstance(c, int):
+                continue
+
+            last_author_id = None
+            authorships = work.get("authorships")
+            if isinstance(authorships, list) and authorships:
+                last = authorships[-1]
+                if isinstance(last, dict):
+                    author_obj = last.get("author")
+                    if isinstance(author_obj, dict):
+                        raw_id = author_obj.get("id")
+                        if raw_id:
+                            last_author_id = str(raw_id).rsplit("/", 1)[-1]
+
+            entry = {"citation_count": c, "last_author_id": last_author_id}
+
+            # Map work DOI
+            w_doi = _strip_doi_url(work.get("doi"))
+            if w_doi:
+                details[w_doi.lower()] = entry
+
+            # Map work PMID and other IDs
+            ids_dict = work.get("ids", {})
+            if isinstance(ids_dict, dict):
+                raw_pmid = ids_dict.get("pmid")
+                if raw_pmid:
+                    pmid_val = str(raw_pmid).split("/")[-1].strip()
+                    if pmid_val:
+                        details[pmid_val] = entry
+                raw_doi = ids_dict.get("doi")
+                if raw_doi:
+                    d_val = _strip_doi_url(str(raw_doi))
+                    if d_val:
+                        details[d_val.lower()] = entry
+
+        return details
+
+    async def fetch_work_details_batch(
+        self,
+        dois: list[str] | None = None,
+        pmids: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch citation count and last-author OpenAlex ID for multiple DOIs/PMIDs."""
+        clean_dois = [
+            _strip_doi_url(d) or d.strip()
+            for d in (dois or [])
+            if d and (_strip_doi_url(d) or d.strip())
+        ]
+        clean_pmids = [p.strip() for p in (pmids or []) if p and p.strip()]
+
+        if not clean_dois and not clean_pmids:
+            return {}
+
+        tasks = []
+        if clean_dois:
+            tasks.append(self._fetch_work_details_single_filter(f"doi:{'|'.join(clean_dois[:50])}"))
+        if clean_pmids:
+            tasks.append(self._fetch_work_details_single_filter(f"pmid:{'|'.join(clean_pmids[:50])}"))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        combined: dict[str, dict[str, Any]] = {}
+        for res in results:
+            if isinstance(res, dict):
+                combined.update(res)
+        return combined
+
+    async def fetch_author_h_indices_batch(self, author_ids: list[str]) -> dict[str, int]:
+        """Fetch h-index for multiple OpenAlex author IDs via a batched query."""
+        clean_ids = [a.strip() for a in (author_ids or []) if a and a.strip()]
+        if not clean_ids:
+            return {}
+
+        params = self._params({
+            "filter": f"openalex_id:{'|'.join(clean_ids[:50])}",
+            "per-page": 50,
+        })
+        try:
+            resp = await self.http_client.get(f"{OPENALEX_BASE}/authors", params=params)
+            if resp is None or resp.status_code != 200:
+                return {}
+
+            data = resp.json()
+            results = data.get("results", [])
+            h_indices: dict[str, int] = {}
+            for author in results:
+                if not isinstance(author, dict):
+                    continue
+                raw_id = author.get("id")
+                stats = author.get("summary_stats")
+                if raw_id and isinstance(stats, dict):
+                    h_index = stats.get("h_index")
+                    if isinstance(h_index, int):
+                        bare_id = str(raw_id).rsplit("/", 1)[-1]
+                        h_indices[bare_id] = h_index
+            return h_indices
+        except Exception:
+            return {}
 

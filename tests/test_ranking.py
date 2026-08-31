@@ -291,3 +291,9 @@ async def test_ranking_pipeline_normalizes_doi_url():
     await client.aclose()
 
 
+
+
+def test_calculate_authority_feature():
+    assert ScoringEngine.calculate_authority_feature(None) == 0.0
+    assert ScoringEngine.calculate_authority_feature(0) == 0.0
+    assert math.isclose(ScoringEngine.calculate_authority_feature(9), math.log(10.0))

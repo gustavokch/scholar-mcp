@@ -246,6 +246,12 @@ class ScoringEngine:
         return math.log(1.0 + sjr)
 
     @staticmethod
+    def calculate_authority_feature(h_index: int | None) -> float:
+        if h_index is None or h_index <= 0:
+            return 0.0
+        return math.log(1.0 + h_index)
+
+    @staticmethod
     def parse_year(year_str: str | None) -> int | None:
         if not year_str:
             return None
@@ -427,33 +433,37 @@ class RankingPipeline:
         ]
         missing_pmids = [papers[i].pmid for i in missing_indices if papers[i].pmid]
 
-        # 1. OpenAlex Batch lookup
-        oa_counts: dict[str, int] = {}
+        # 1. OpenAlex Batch lookup (citation count + last-author ID)
+        oa_details: dict[str, dict[str, Any]] = {}
         if self.settings.enable_openalex:
             try:
-                oa_counts = await self.openalex.fetch_citation_counts_batch(
+                oa_details = await self.openalex.fetch_work_details_batch(
                     dois=missing_dois,
                     pmids=missing_pmids,
                 )
             except Exception:
-                oa_counts = {}
+                oa_details = {}
 
+        last_author_ids: dict[int, str] = {}
         still_missing: list[int] = []
         for i in missing_indices:
             p = papers[i]
             clean_doi = (_strip_doi_url(p.doi) or p.doi.strip()).lower() if p.doi else None
-            count = None
-            if clean_doi and clean_doi in oa_counts:
-                count = oa_counts[clean_doi]
-            elif p.pmid and p.pmid.strip() in oa_counts:
-                count = oa_counts[p.pmid.strip()]
+            entry = None
+            if clean_doi and clean_doi in oa_details:
+                entry = oa_details[clean_doi]
+            elif p.pmid and p.pmid.strip() in oa_details:
+                entry = oa_details[p.pmid.strip()]
 
-            if count is not None:
+            if entry is not None:
+                count = entry["citation_count"]
                 p.citation_count = count
                 if p.pmid:
                     await self.cache.set(self._cache_key(f"pmid:{p.pmid.strip()}"), count)
                 if clean_doi:
                     await self.cache.set(self._cache_key(f"doi:{clean_doi}"), count)
+                if entry.get("last_author_id"):
+                    last_author_ids[i] = entry["last_author_id"]
             else:
                 still_missing.append(i)
 
@@ -490,6 +500,19 @@ class RankingPipeline:
                 for i in still_missing:
                     if papers[i].citation_count is None:
                         papers[i].citation_count = 0
+
+        # 3. Author authority: batch-fetch last-author h-index for papers
+        # resolved via OpenAlex (same precondition as citation enrichment).
+        if self.settings.enable_openalex and last_author_ids:
+            unique_author_ids = list({aid for aid in last_author_ids.values()})
+            try:
+                h_index_map = await self.openalex.fetch_author_h_indices_batch(unique_author_ids)
+            except Exception:
+                h_index_map = {}
+            for idx, author_id in last_author_ids.items():
+                h_index = h_index_map.get(author_id)
+                if h_index is not None:
+                    papers[idx].last_author_h_index = h_index
 
         # Guarantee non-None citation count
         for p in papers:

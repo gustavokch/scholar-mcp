@@ -449,3 +449,82 @@ async def test_openalex_fetch_citation_counts_batch_independent_filters(client):
 
 
 
+
+
+@respx.mock
+async def test_openalex_fetch_work_details_batch_extracts_last_author(client):
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1038/s41586-020-2649-2",
+                        "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/32814902"},
+                        "cited_by_count": 1250,
+                        "authorships": [
+                            {"author": {"id": "https://openalex.org/A1111"}},
+                            {"author": {"id": "https://openalex.org/A2222"}},
+                        ],
+                    }
+                ]
+            },
+        )
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    details = await provider.fetch_work_details_batch(
+        dois=["10.1038/s41586-020-2649-2"], pmids=["32814902"]
+    )
+
+    assert details["10.1038/s41586-020-2649-2"]["citation_count"] == 1250
+    assert details["10.1038/s41586-020-2649-2"]["last_author_id"] == "A2222"
+    assert details["32814902"]["last_author_id"] == "A2222"
+
+
+@respx.mock
+async def test_openalex_fetch_work_details_batch_no_authorships(client):
+    respx.get(url__startswith=f"{OPENALEX_BASE}/works?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "doi": "https://doi.org/10.1038/only-doi",
+                        "cited_by_count": 88,
+                    }
+                ]
+            },
+        )
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    details = await provider.fetch_work_details_batch(dois=["10.1038/only-doi"])
+
+    assert details["10.1038/only-doi"]["citation_count"] == 88
+    assert details["10.1038/only-doi"]["last_author_id"] is None
+
+
+@respx.mock
+async def test_openalex_fetch_author_h_indices_batch(client):
+    respx.get(url__startswith=f"{OPENALEX_BASE}/authors?").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": "https://openalex.org/A1111", "summary_stats": {"h_index": 42}},
+                    {"id": "https://openalex.org/A2222", "summary_stats": {"h_index": 7}},
+                ]
+            },
+        )
+    )
+
+    provider = OpenAlexProvider(client, email="test@example.com")
+    h_indices = await provider.fetch_author_h_indices_batch(["A1111", "A2222"])
+
+    assert h_indices == {"A1111": 42, "A2222": 7}
+
+
+async def test_openalex_fetch_author_h_indices_batch_empty_input(client):
+    provider = OpenAlexProvider(client, email="test@example.com")
+    assert await provider.fetch_author_h_indices_batch([]) == {}
