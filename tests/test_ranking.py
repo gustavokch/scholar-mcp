@@ -229,7 +229,7 @@ async def test_ranking_pipeline_enrich_and_rank():
         )
     )
 
-    ranked = await pipeline.rank_papers(candidates, top_n=2)
+    ranked = await pipeline.rank_papers(candidates, query="", top_n=2)
 
     assert len(ranked) == 2
     assert ranked[0].score is not None

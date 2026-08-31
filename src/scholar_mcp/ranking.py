@@ -571,6 +571,7 @@ class RankingPipeline:
     async def rank_papers(
         self,
         papers: list[PaperMetadata],
+        query: str,
         weights: RankingWeights | None = None,
         top_n: int = 10,
     ) -> list[PaperMetadata]:
@@ -581,7 +582,11 @@ class RankingPipeline:
             relevance=self.settings.ranking_weight_relevance,
             citations=self.settings.ranking_weight_citations,
             recency=self.settings.ranking_weight_recency,
+            evidence_grade=self.settings.ranking_weight_evidence_grade,
+            journal_impact=self.settings.ranking_weight_journal_impact,
+            author_authority=self.settings.ranking_weight_author_authority,
             recency_half_life_years=self.settings.ranking_recency_half_life_years,
+            position_weight=self.settings.ranking_position_weight,
         )
 
         try:
@@ -596,6 +601,6 @@ class RankingPipeline:
                     p.citation_count = 0
             enriched = papers
 
-        scored = ScoringEngine.score_candidates(enriched, weights=w)
+        scored = ScoringEngine.score_candidates(enriched, weights=w, query=query)
         return scored[:top_n]
 
