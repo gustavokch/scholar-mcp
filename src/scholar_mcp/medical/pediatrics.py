@@ -75,6 +75,58 @@ class PediatricsEngine:
         self.pubmed = pubmed or MedicalPubMedClient(http_client, cache, settings)
         self.jitter_range = jitter_range
 
+    @staticmethod
+    def _matches_query(title: str, query_tokens: set[str]) -> bool:
+        """True when the title shares at least one word with the query."""
+        return bool(query_tokens & set(re.findall(r"\w+", title.lower())))
+
+    def _parse_guideline_items(
+        self,
+        html_text: str,
+        item_selectors: str,
+        base_url: str,
+        source: str,
+    ) -> list[PediatricGuideline]:
+        soup = BeautifulSoup(html_text, "html.parser")
+        guidelines: list[PediatricGuideline] = []
+
+        for item in soup.select(item_selectors):
+            title_el = item.select_one(TITLE_SELECTORS)
+            title = title_el.get_text(strip=True) if title_el else ""
+            if not title or len(title) <= 10:
+                continue
+
+            link = item.find("a")
+            href = link.get("href", "") if link else ""
+            if href:
+                item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
+            else:
+                item_url = base_url
+
+            desc_el = item.select_one(DESC_SELECTORS)
+            description = (desc_el.get_text(strip=True) if desc_el else "")[:300]
+
+            age_group = _extract_age_group(title) or _extract_age_group(description)
+
+            m_year = YEAR_RE.search(title) or (YEAR_RE.search(description) if description else None)
+            year = m_year.group(0) if m_year else ""
+
+            category = "Preventive Care" if source == "bright-futures" else "Policy Statement"
+
+            guidelines.append(
+                PediatricGuideline(
+                    title=title,
+                    organization="American Academy of Pediatrics",
+                    url=item_url,
+                    source=source,
+                    year=year,
+                    description=description,
+                    age_group=age_group,
+                    category=category,
+                )
+            )
+        return guidelines
+
     async def _scrape_html(
         self,
         url: str,
@@ -104,107 +156,53 @@ class PediatricsEngine:
             logger.warning("Pediatric guideline scrape failed for %s", url, exc_info=True)
             return [], True
 
-        soup = BeautifulSoup(html_text, "html.parser")
-        guidelines: list[PediatricGuideline] = []
+        return self._parse_guideline_items(html_text, item_selectors, base_url, source), False
 
-        for item in soup.select(item_selectors):
-            title_el = item.select_one(TITLE_SELECTORS)
-            title = title_el.get_text(strip=True) if title_el else ""
-            if not title or len(title) <= 10:
-                continue
+    async def _playwright_scrape(
+        self,
+        url: str,
+        query: str,
+        item_selectors: str,
+        base_url: str,
+        source: str,
+    ) -> list[PediatricGuideline]:
+        """Last-resort rendered-HTML scrape for one guideline source."""
+        from playwright.async_api import async_playwright
 
-            link = item.find("a")
-            href = link.get("href", "") if link else ""
-            if href:
-                item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
-            else:
-                item_url = base_url
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent=BROWSER_UA)
+            await page.goto(f"{url}?q={query}", wait_until="domcontentloaded")
+            content = await page.content()
+            await browser.close()
+        return self._parse_guideline_items(content, item_selectors, base_url, source)
 
-            desc_el = item.select_one(DESC_SELECTORS)
-            description = (desc_el.get_text(strip=True) if desc_el else "")[:300]
+    async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:
+        """AAP-filtered guideline search over PubMed publication types.
 
-            age_group = _extract_age_group(title) or _extract_age_group(description)
+        Fallback for the AAP-hosted scrapes, which sit behind Cloudflare and
+        fail with 403 for plain HTTP clients."""
+        from scholar_mcp.medical.guidelines import GuidelinesEngine
 
-            m_year = YEAR_RE.search(title) or (YEAR_RE.search(description) if description else None)
-            year = m_year.group(0) if m_year else ""
-
-            if source == "bright-futures":
-                org = "American Academy of Pediatrics"
-                category = "Preventive Care"
-            else:
-                org = "American Academy of Pediatrics"
-                category = "Policy Statement"
-
-            guidelines.append(
+        engine = GuidelinesEngine(self.pubmed, self.cache, self.settings)
+        found, _meta = await engine.search_clinical_guidelines(
+            query, organization="AAP"
+        )
+        out: list[PediatricGuideline] = []
+        for g in found:
+            out.append(
                 PediatricGuideline(
-                    title=title,
-                    organization=org,
-                    url=item_url,
-                    source=source,
-                    year=year,
-                    description=description,
-                    age_group=age_group,
-                    category=category,
+                    title=g.title,
+                    organization=g.organization or "American Academy of Pediatrics",
+                    url=g.url,
+                    source="pubmed-aap",
+                    year=str(g.year or ""),
+                    description=g.description,
+                    age_group=_extract_age_group(f"{g.title} {g.description}"),
+                    category="Policy Statement",
                 )
             )
-
-        # Fallback to Playwright if enabled and no items found
-        if not guidelines and self.settings.enable_playwright_fallback:
-            try:
-                from playwright.async_api import async_playwright
-
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
-                    page = await browser.new_page(user_agent=BROWSER_UA)
-                    query_str = params.get("q", "")
-                    full_url = f"{url}?q={query_str}"
-                    await page.goto(full_url, wait_until="domcontentloaded")
-                    content = await page.content()
-                    await browser.close()
-
-                # Re-parse playwright rendered content
-                pw_soup = BeautifulSoup(content, "html.parser")
-                for item in pw_soup.select(item_selectors):
-                    title_el = item.select_one(TITLE_SELECTORS)
-                    title = title_el.get_text(strip=True) if title_el else ""
-                    if not title or len(title) <= 10:
-                        continue
-
-                    link = item.find("a")
-                    href = link.get("href", "") if link else ""
-                    if href:
-                        item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
-                    else:
-                        item_url = base_url
-
-                    desc_el = item.select_one(DESC_SELECTORS)
-                    description = (desc_el.get_text(strip=True) if desc_el else "")[:300]
-
-                    age_group = _extract_age_group(title) or _extract_age_group(description)
-
-                    m_year = YEAR_RE.search(title) or (YEAR_RE.search(description) if description else None)
-                    year = m_year.group(0) if m_year else ""
-
-                    category = "Preventive Care" if source == "bright-futures" else "Policy Statement"
-
-                    guidelines.append(
-                        PediatricGuideline(
-                            title=title,
-                            organization="American Academy of Pediatrics",
-                            url=item_url,
-                            source=source,
-                            year=year,
-                            description=description,
-                            age_group=age_group,
-                            category=category,
-                        )
-                    )
-            except Exception:
-                logger.warning(
-                    "Playwright fallback failed for %s", url, exc_info=True
-                )
-
-        return guidelines, False
+        return out
 
     async def search_bright_futures(
         self,
@@ -293,6 +291,53 @@ class PediatricsEngine:
             if norm not in seen:
                 seen.add(norm)
                 deduped.append(g)
+
+        # The AAP-hosted search pages are SPAs: with or without JS they render
+        # static navigation items regardless of the query. Drop items that
+        # share no word with the query so they neither pollute results nor
+        # block the PubMed fallback below.
+        query_tokens = set(re.findall(r"\w+", query.lower()))
+        deduped = [g for g in deduped if self._matches_query(g.title, query_tokens)]
+
+        # Fallback chain when both scrapes came up empty: PubMed
+        # publication-type search filtered to AAP first (reliable, no
+        # anti-bot wall), Playwright last resort.
+        if not deduped:
+            try:
+                deduped = await self._pubmed_guidelines(query)
+                if deduped:
+                    errored = False
+            except Exception:
+                logger.warning(
+                    "PubMed pediatric guideline fallback failed for %r", query,
+                    exc_info=True,
+                )
+
+        if not deduped and self.settings.enable_playwright_fallback:
+            pw_items: list[PediatricGuideline] = []
+            for url, selectors, base, source in (
+                (BF_URL, BF_ITEM_SELECTORS, BF_BASE, "bright-futures"),
+                (AAP_URL, AAP_ITEM_SELECTORS, AAP_BASE, "aap-policy"),
+            ):
+                try:
+                    pw_items.extend(
+                        await self._playwright_scrape(url, query, selectors, base, source)
+                    )
+                except Exception:
+                    logger.warning(
+                        "Playwright fallback failed for %s", url, exc_info=True
+                    )
+            if pw_items:
+                pw_seen: set[str] = set()
+                deduped = []
+                for g in pw_items:
+                    if not self._matches_query(g.title, query_tokens):
+                        continue
+                    norm = re.sub(r"[^\w\s]", "", g.title.lower())
+                    if norm not in pw_seen:
+                        pw_seen.add(norm)
+                        deduped.append(g)
+                errored = False
 
         if errored and not deduped:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)

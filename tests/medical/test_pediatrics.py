@@ -168,3 +168,185 @@ async def test_search_aap_guidelines_marks_error_when_one_source_fails(tmp_path:
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_aap_guidelines_falls_back_to_pubmed_on_scrape_failure(tmp_path: Path):
+    """Both AAP scrapes failing (e.g. Cloudflare 403) falls back to a PubMed
+    publication-type search filtered to AAP instead of returning nothing."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_playwright_fallback = False
+    respx.get(BF_URL).respond(status_code=403)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=(
+                    "American Academy of Pediatrics guideline: "
+                    "ibuprofen use in infants under 6 months"
+                ),
+                abstract=(
+                    "Recommendations and best practice for ibuprofen dosing "
+                    "and contraindications in children under 6 months."
+                ),
+                pmid="12345",
+                year="2024",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    guidelines, meta = await engine.search_aap_guidelines("ibuprofen children")
+    assert len(guidelines) == 1
+    assert guidelines[0].source == "pubmed-aap"
+    assert guidelines[0].organization == "American Academy of Pediatrics"
+    assert meta.error is False
+    term = mock_pubmed.search_articles.await_args.args[0]
+    assert "ibuprofen" in term
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_aap_guidelines_ignores_scrape_items_unrelated_to_query(tmp_path: Path):
+    """BF/AAP search pages are SPAs that render static nav items regardless of
+    the query. Items whose title shares no word with the query are junk and
+    must not block the PubMed fallback."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_playwright_fallback = False
+    respx.get(BF_URL).respond(
+        html="""
+    <html><body>
+      <div class="search-result">
+        <h3 class="title"><a href="/practice-management/bright-futures/quality">Quality Improvement</a></h3>
+        <p>Site navigation.</p>
+      </div>
+      <div class="search-result">
+        <h3 class="title"><a href="/practice-management/bright-futures/stories">Implementation Stories</a></h3>
+        <p>Site news.</p>
+      </div>
+    </body></html>
+    """
+    )
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=(
+                    "American Academy of Pediatrics guideline: "
+                    "ibuprofen use in infants under 6 months"
+                ),
+                abstract=(
+                    "Recommendations and best practice for ibuprofen dosing "
+                    "and contraindications in children under 6 months."
+                ),
+                pmid="12345",
+                year="2024",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    guidelines, meta = await engine.search_aap_guidelines("ibuprofen children")
+    assert len(guidelines) == 1
+    assert guidelines[0].source == "pubmed-aap"
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_search_aap_guidelines_playwright_is_last_resort(tmp_path: Path, monkeypatch):
+    """Playwright must run only after the PubMed fallback also found nothing."""
+    import sys
+    import types
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(BF_URL).respond(status_code=403)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    pw_html = """
+    <html><body>
+      <div class="search-result">
+        <h3 class="title"><a href="/pediatrics/article/9">
+          Ibuprofen Safety in Infants 2024</a></h3>
+        <p class="description">Policy summary for infant dosing.</p>
+      </div>
+    </body></html>
+    """
+
+    attempts = []
+
+    class _FakePage:
+        async def goto(self, *a, **k):
+            return None
+
+        async def content(self):
+            return pw_html
+
+    class _FakeBrowser:
+        async def new_page(self, user_agent=None):
+            return _FakePage()
+
+        async def close(self):
+            return None
+
+    class _FakeChromium:
+        async def launch(self, headless=True):
+            return _FakeBrowser()
+
+    class _FakePW:
+        chromium = _FakeChromium()
+
+    class _FakePWContext:
+        async def __aenter__(self):
+            return _FakePW()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _fake_async_playwright():
+        attempts.append(True)
+        return _FakePWContext()
+
+    api_mod = types.ModuleType("playwright.async_api")
+    api_mod.async_playwright = _fake_async_playwright
+    pw_mod = types.ModuleType("playwright")
+    pw_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "playwright", pw_mod)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", api_mod)
+
+    guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+    assert attempts, "playwright never attempted"
+    assert guidelines
+    assert guidelines[0].title.startswith("Ibuprofen Safety")
+    assert meta.error is False
+    await cache.close()
+    await http_client.aclose()
