@@ -12,6 +12,8 @@ src/scholar_mcp/
 ├── identifiers.py        # Identifier cleaner, cross-service resolution (PMID <-> PMCID <-> DOI), title thresholding
 ├── resolver.py           # Multi-tier waterfall coordinator, batch concurrency, download sandbox
 ├── server.py             # FastMCP server tool and prompt definitions
+├── citation_check.py     # Claim-to-source grounding checker (check_citations MCP tool)
+├── ranking.py            # ScoringEngine + RankingPipeline: query-aware re-ranking, Z-scoring, evidence/impact/authority signals
 ├── parsers/
 │   ├── __init__.py
 │   ├── jats.py           # JATS XML to clean Markdown parser and section extractor
@@ -42,8 +44,9 @@ src/scholar_mcp/
    - Tier 4: Sci-Hub (Mirror-rotated PDF -> Text)
    - Tier 5: Abstract Fallback (PubMed / CrossRef metadata)
 3. **Caching Policy** — Identifier maps and paper metadata are cached in `TTLCache`. Full-text bodies and raw PDF bytes are **never cached** to keep memory consumption bounded.
-4. **Resilience and Error Boundaries** — Providers never raise on network failure or unexpected payloads; they report a miss/skip and allow the waterfall to degrade smoothly.
+4. **Resilience and Error Boundaries** — Providers never raise on network failure or unexpected payloads; they report a miss/skip and allow the waterfall to degrade smoothly. The same boundary applies to the ranking enrichment stage (time-bounded by `RANKING_ENRICHMENT_TIMEOUT`) and to `check_citations` (per-claim failure isolation).
 5. **Download Sandbox** — `download_paper` enforces that paths resolve within `SCHOLAR_DOWNLOAD_DIR` and rejects path traversal.
+6. **Query-aware re-ranking** — `search_papers` re-ranks the candidate pool with six Z-score-standardized signals (relevance, citations, recency, evidence grade, journal impact, author authority). The relevance signal blends lexical coverage of the query against title/abstract with a `1/sqrt(rank+1)` source-position prior. `ScoringEngine` exposes `tokenize`, `text_coverage`, and `best_matching_sentence` as shared primitives reused by `medical/ranking.py` and `citation_check.py`. Journal-impact data is loaded from `src/scholar_mcp/data/scimago_sjr.json` (ships empty; see `src/scholar_mcp/data/SOURCES.md`).
 
 ## Local Development & Testing
 
