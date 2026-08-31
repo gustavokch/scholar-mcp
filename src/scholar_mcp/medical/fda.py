@@ -25,6 +25,17 @@ COMMON_DRUG_WORDS = {
 
 PEDIATRIC_TERMS = ("pediatric", "child", "infant", "neonatal", "pediatric dosing")
 
+# Words that carry no drug-name signal; a query starting "What is the..."
+# must not have its stopword lead tokens match unrelated name fields.
+_QUERY_STOPWORDS = frozenset(
+    {
+        "what", "which", "how", "the", "and", "for", "with", "this", "that",
+        "from", "are", "was", "were", "been", "have", "has", "had", "can",
+        "could", "should", "would", "will", "when", "who", "why", "does",
+        "did", "not", "but", "not",
+    }
+)
+
 
 def is_valid_drug_query(query: str) -> bool:
     trimmed = query.strip()
@@ -39,22 +50,32 @@ def is_valid_drug_query(query: str) -> bool:
 
 
 def _label_names_drug(drug: DrugLabel, query: str) -> bool:
-    """True when any of the query's leading tokens appears in the drug's
-    brand_name, generic_name, or substance_name. Used to filter the unfielded
-    full-text fallback, which can otherwise match unrelated labels whose
-    body text happens to contain every word of a multi-word query.
+    """True when any of the query's meaningful tokens appears as a whole word
+    in the drug's brand_name, generic_name, or substance_name. Used to filter
+    the unfielded full-text fallback, which can otherwise match unrelated
+    labels whose body text happens to contain every word of a multi-word
+    query.
+
+    Stopwords and tokens shorter than 3 characters are ignored — a query like
+    "What is the dose of aspirin" must not have its lead tokens "what", "is",
+    "the" substring-match almost any name field ("the" matches THEOPHYLLINE).
+    If nothing signal-bearing remains, the filter is permissive (True).
     """
-    lead_tokens = [
-        t.lower() for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
-    ][:3]
-    if not lead_tokens:
+    tokens = [
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
+        if len(t) >= 3 and t.lower() not in _QUERY_STOPWORDS
+    ]
+    if not tokens:
         return True
     ofd = drug.openfda
     name_fields = (
         ofd.brand_name + ofd.generic_name + ofd.substance_name
     )
     haystack = " ".join(name_fields).lower()
-    return any(token in haystack for token in lead_tokens)
+    return any(
+        re.search(rf"\b{re.escape(token)}\b", haystack) for token in tokens
+    )
 
 
 def _parse_drug_label(raw: dict[str, Any]) -> DrugLabel:

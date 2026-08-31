@@ -296,6 +296,40 @@ async def test_search_drugs_unfielded_results_must_match_drug_token(tmp_path: Pa
 
 
 @respx.mock
+async def test_search_drugs_unfielded_filter_ignores_stopword_lead_tokens(tmp_path: Path):
+    """A natural-language query whose first tokens are stopwords ('what',
+    'is', 'the') must not defeat the unfielded-fallback filter by
+    substring-matching unrelated name fields ('the' matches THEOPHYLLINE).
+    Stopwords and short tokens are ignored, and remaining tokens must match
+    on word boundaries."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "openfda." in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        # Unfielded returns THEOPHYLLINE — today the substring 'the' inside
+        # 'theophylline' matches the stopword lead token 'the', letting the
+        # junk label through.
+        return httpx.Response(
+            200,
+            json=_label_payload("THEOPHYLLINE", "THEOPHYLLINE", ndc="12345-001"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "what is the dose of aspirin", limit=5
+        )
+        assert drugs == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_drugs_falls_back_to_unfielded_query(tmp_path: Path):
     """A multi-word query can never match a field-restricted quoted phrase;
     the unfielded full-text variant must still find the label."""
