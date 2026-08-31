@@ -158,7 +158,7 @@ def test_score_candidates_ordering():
     weights = RankingWeights(
         relevance=0.2, citations=0.4, recency=0.4, recency_half_life_years=7.0
     )
-    ranked = ScoringEngine.score_candidates(papers, weights=weights, current_year=2026)
+    ranked = ScoringEngine.score_candidates(papers, weights=weights, query="", current_year=2026)
 
     assert len(ranked) == 3
     # Verify all papers have score and ranking_metrics
@@ -297,3 +297,37 @@ def test_calculate_authority_feature():
     assert ScoringEngine.calculate_authority_feature(None) == 0.0
     assert ScoringEngine.calculate_authority_feature(0) == 0.0
     assert math.isclose(ScoringEngine.calculate_authority_feature(9), math.log(10.0))
+
+
+def test_score_candidates_query_relevance_outranks_source_position():
+    papers = [
+        # High source rank (idx 0) but irrelevant to the query
+        PaperMetadata(title="Unrelated topic entirely", year="2024", citation_count=10, pmid="1"),
+        # Low source rank (idx 4) but a strong lexical match
+        PaperMetadata(title="Metformin efficacy in type 2 diabetes", year="2024", citation_count=10, pmid="2"),
+        PaperMetadata(title="Filler paper A", year="2024", citation_count=10, pmid="3"),
+        PaperMetadata(title="Filler paper B", year="2024", citation_count=10, pmid="4"),
+        PaperMetadata(title="Filler paper C", year="2024", citation_count=10, pmid="5"),
+    ]
+    weights = RankingWeights(
+        relevance=0.7, citations=0.1, recency=0.1,
+        evidence_grade=0.05, journal_impact=0.025, author_authority=0.025,
+    )
+
+    ranked = ScoringEngine.score_candidates(papers, weights=weights, query="metformin diabetes", current_year=2026)
+
+    assert ranked[0].pmid == "2"
+
+
+def test_score_candidates_new_signals_default_neutral():
+    papers = [
+        PaperMetadata(title="Paper A", year="2024", citation_count=5, pmid="1"),
+        PaperMetadata(title="Paper B", year="2024", citation_count=5, pmid="2"),
+    ]
+    weights = RankingWeights()
+    ranked = ScoringEngine.score_candidates(papers, weights=weights, query="", current_year=2026)
+
+    for p in ranked:
+        assert p.ranking_metrics["z_evidence"] == 0.0
+        assert p.ranking_metrics["z_impact"] == 0.0
+        assert p.ranking_metrics["z_authority"] == 0.0

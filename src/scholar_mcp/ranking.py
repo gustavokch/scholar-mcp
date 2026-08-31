@@ -141,10 +141,14 @@ def parse_scimago_csv(rows: list[dict[str, str]]) -> dict[str, dict[str, float]]
 
 @dataclass
 class RankingWeights:
-    relevance: float = 0.4
-    citations: float = 0.3
-    recency: float = 0.3
+    relevance: float = 0.30
+    citations: float = 0.20
+    recency: float = 0.15
+    evidence_grade: float = 0.20
+    journal_impact: float = 0.10
+    author_authority: float = 0.05
     recency_half_life_years: float = 7.0
+    position_weight: float = 0.25
 
 
 @dataclass
@@ -155,9 +159,15 @@ class ScoringMetrics:
     raw_relevance: float
     raw_citation: float
     raw_recency: float
+    raw_evidence: float
+    raw_impact: float
+    raw_authority: float
     z_relevance: float
     z_citation: float
     z_recency: float
+    z_evidence: float
+    z_impact: float
+    z_authority: float
     final_score: float
 
     def to_dict(self) -> dict[str, Any]:
@@ -226,6 +236,18 @@ class ScoringEngine:
         return 1.0 / math.sqrt(rank_idx + 1)
 
     @staticmethod
+    def calculate_query_relevance(
+        rank_idx: int,
+        query_terms: list[str],
+        title: str | None,
+        abstract: str | None,
+        position_weight: float,
+    ) -> float:
+        lexical = ScoringEngine.text_coverage(query_terms, title, abstract)
+        position = ScoringEngine.calculate_relevance(rank_idx)
+        return (1.0 - position_weight) * lexical + position_weight * position
+
+    @staticmethod
     def calculate_citation_feature(citations: int | None) -> float:
         count = max(0, citations if citations is not None else 0)
         return math.log(1.0 + count)
@@ -287,37 +309,53 @@ class ScoringEngine:
         cls,
         papers: list[PaperMetadata],
         weights: RankingWeights,
+        query: str,
         current_year: int | None = None,
     ) -> list[PaperMetadata]:
         if not papers:
             return []
 
         now_year = current_year if current_year is not None else datetime.datetime.now().year
+        query_terms = cls.tokenize(query)
 
         raw_rel_list: list[float] = []
         raw_cit_list: list[float] = []
         raw_rec_list: list[float] = []
+        raw_evidence_list: list[float] = []
+        raw_impact_list: list[float] = []
+        raw_authority_list: list[float] = []
         parsed_years: list[int | None] = []
         cit_counts: list[int] = []
 
         for idx, p in enumerate(papers):
-            raw_rel = cls.calculate_relevance(idx)
+            raw_rel = cls.calculate_query_relevance(
+                idx, query_terms, p.title, p.abstract, weights.position_weight
+            )
             raw_cit = cls.calculate_citation_feature(p.citation_count)
             raw_rec, p_year = cls.calculate_recency_feature(
                 p.year,
                 current_year=now_year,
                 half_life_years=weights.recency_half_life_years,
             )
+            raw_evidence = cls.calculate_evidence_feature(p.evidence_grade)
+            raw_impact = cls.calculate_impact_feature(lookup_journal_impact(p.issn, p.venue))
+            raw_authority = cls.calculate_authority_feature(p.last_author_h_index)
 
             raw_rel_list.append(raw_rel)
             raw_cit_list.append(raw_cit)
             raw_rec_list.append(raw_rec)
+            raw_evidence_list.append(raw_evidence)
+            raw_impact_list.append(raw_impact)
+            raw_authority_list.append(raw_authority)
             parsed_years.append(p_year)
             cit_counts.append(p.citation_count if p.citation_count is not None else 0)
 
         z_rel_list = cls.calculate_z_scores(raw_rel_list)
         z_cit_list = cls.calculate_z_scores(raw_cit_list)
         z_rec_list = cls.calculate_z_scores(raw_rec_list)
+        z_evidence_list = cls.calculate_z_scores(raw_evidence_list)
+        z_impact_list = cls.calculate_z_scores(raw_impact_list)
+        z_authority_list = cls.calculate_z_scores(raw_authority_list)
 
         scored_papers: list[PaperMetadata] = []
         for idx, p in enumerate(papers):
@@ -325,6 +363,9 @@ class ScoringEngine:
                 weights.relevance * z_rel_list[idx]
                 + weights.citations * z_cit_list[idx]
                 + weights.recency * z_rec_list[idx]
+                + weights.evidence_grade * z_evidence_list[idx]
+                + weights.journal_impact * z_impact_list[idx]
+                + weights.author_authority * z_authority_list[idx]
             )
 
             metrics = ScoringMetrics(
@@ -334,9 +375,15 @@ class ScoringEngine:
                 raw_relevance=raw_rel_list[idx],
                 raw_citation=raw_cit_list[idx],
                 raw_recency=raw_rec_list[idx],
+                raw_evidence=raw_evidence_list[idx],
+                raw_impact=raw_impact_list[idx],
+                raw_authority=raw_authority_list[idx],
                 z_relevance=z_rel_list[idx],
                 z_citation=z_cit_list[idx],
                 z_recency=z_rec_list[idx],
+                z_evidence=z_evidence_list[idx],
+                z_impact=z_impact_list[idx],
+                z_authority=z_authority_list[idx],
                 final_score=final_score,
             )
 
