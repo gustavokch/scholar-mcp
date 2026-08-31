@@ -14,6 +14,15 @@ from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
 
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+_TITLE_WEIGHT = 2.0
+_ABSTRACT_WEIGHT = 1.0
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is",
+    "of", "on", "or", "the", "to", "with",
+}
+
+
 
 @dataclass
 class RankingWeights:
@@ -57,6 +66,45 @@ class ScoringEngine:
             return [0.0] * k
 
         return [(x - mean) / std for x in values]
+
+    @staticmethod
+    def tokenize(text: str | None) -> list[str]:
+        if not text:
+            return []
+        return [
+            t for t in _WORD_SPLIT_RE.split(text.lower())
+            if len(t) >= 2 and t not in _STOPWORDS
+        ]
+
+    @staticmethod
+    def text_coverage(query_terms: list[str], title: str | None, abstract: str | None) -> float:
+        if not query_terms:
+            return 0.0
+        term_count = len(query_terms)
+        title_terms = set(ScoringEngine.tokenize(title))
+        abstract_terms = set(ScoringEngine.tokenize(abstract))
+        title_coverage = sum(1 for t in query_terms if t in title_terms) / term_count
+        abstract_coverage = sum(1 for t in query_terms if t in abstract_terms) / term_count
+        abstract_ratio = _ABSTRACT_WEIGHT / _TITLE_WEIGHT
+        return min(1.0, title_coverage + abstract_ratio * abstract_coverage)
+
+    @staticmethod
+    def best_matching_sentence(query_terms: list[str], text: str) -> tuple[str, float]:
+        if not text or not query_terms:
+            return "", 0.0
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if not sentences:
+            return "", 0.0
+        term_count = len(query_terms)
+        best_sentence = ""
+        best_score = 0.0
+        for sentence in sentences:
+            sentence_terms = set(ScoringEngine.tokenize(sentence))
+            score = sum(1 for t in query_terms if t in sentence_terms) / term_count
+            if score > best_score:
+                best_score = score
+                best_sentence = sentence
+        return best_sentence, best_score
 
     @staticmethod
     def calculate_relevance(rank_idx: int) -> float:

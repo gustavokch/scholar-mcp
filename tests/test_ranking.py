@@ -12,6 +12,49 @@ from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
 
+def test_tokenize_lowercases_and_drops_stopwords_and_short_tokens():
+    tokens = ScoringEngine.tokenize("The Effects of Metformin on A1c")
+    assert tokens == ["effects", "metformin", "a1c"]
+
+
+def test_tokenize_handles_none_and_empty():
+    assert ScoringEngine.tokenize(None) == []
+    assert ScoringEngine.tokenize("") == []
+
+
+def test_text_coverage_title_weighted_double_abstract():
+    terms = ScoringEngine.tokenize("metformin diabetes")
+    # Both terms in title -> full coverage
+    assert math.isclose(
+        ScoringEngine.text_coverage(terms, "Metformin for Diabetes", ""), 1.0
+    )
+    # Both terms in abstract only -> abstract counts half, so max 0.5
+    assert math.isclose(
+        ScoringEngine.text_coverage(terms, "", "Metformin and diabetes outcomes"), 0.5
+    )
+    # No terms anywhere -> 0
+    assert ScoringEngine.text_coverage(terms, "Unrelated title", "Unrelated abstract") == 0.0
+    # No query terms -> 0
+    assert ScoringEngine.text_coverage([], "Metformin", "Diabetes") == 0.0
+
+
+def test_best_matching_sentence_picks_highest_overlap():
+    terms = ScoringEngine.tokenize("metformin renal outcomes")
+    text = (
+        "This study examines insulin resistance in cells. "
+        "Metformin showed no significant renal outcomes in this cohort. "
+        "Patients were followed for five years."
+    )
+    sentence, score = ScoringEngine.best_matching_sentence(terms, text)
+    assert "Metformin showed no significant renal outcomes" in sentence
+    assert score > 0.5
+
+
+def test_best_matching_sentence_empty_inputs():
+    assert ScoringEngine.best_matching_sentence([], "Some text.") == ("", 0.0)
+    assert ScoringEngine.best_matching_sentence(["metformin"], "") == ("", 0.0)
+
+
 def test_calculate_z_scores_basic():
     values = [10.0, 20.0, 30.0]
     z_scores = ScoringEngine.calculate_z_scores(values)
