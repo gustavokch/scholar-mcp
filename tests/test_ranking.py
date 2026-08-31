@@ -331,3 +331,41 @@ def test_score_candidates_new_signals_default_neutral():
         assert p.ranking_metrics["z_evidence"] == 0.0
         assert p.ranking_metrics["z_impact"] == 0.0
         assert p.ranking_metrics["z_authority"] == 0.0
+
+
+def test_score_candidates_full_pipeline_favors_high_quality_paper():
+    strong = PaperMetadata(
+        title="Systematic Review of Metformin for Type 2 Diabetes",
+        abstract="A systematic review and meta-analysis of metformin trials in type 2 diabetes.",
+        year="2024",
+        citation_count=50,
+        pmid="1",
+        issn="0028-4793",
+        evidence_grade="1a",
+        last_author_h_index=60,
+    )
+    weak = PaperMetadata(
+        title="Systematic Review of Metformin for Type 2 Diabetes",
+        abstract="A systematic review and meta-analysis of metformin trials in type 2 diabetes.",
+        year="2024",
+        citation_count=50,
+        pmid="2",
+        issn=None,
+        evidence_grade=None,
+        last_author_h_index=None,
+    )
+
+    import scholar_mcp.ranking as ranking_module
+    ranking_module._load_scimago_table.cache_clear()
+
+    # position_weight=0 isolates the quality signals this test checks: the two
+    # papers have identical text, so any position prior would hand the whole
+    # relevance z-spread to the weak paper (idx 0), outweighing evidence +
+    # authority (0.25) with the relevance weight alone (0.30).
+    weights = RankingWeights(position_weight=0.0)
+    ranked = ScoringEngine.score_candidates(
+        [weak, strong], weights=weights, query="metformin type 2 diabetes", current_year=2026
+    )
+
+    assert ranked[0].pmid == "1"
+    assert ranked[0].score > ranked[1].score
