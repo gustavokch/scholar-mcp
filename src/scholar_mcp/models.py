@@ -43,6 +43,10 @@ class PaperMetadata:
     citation_count: int | None = None
     oa_url: str | None = None
     institutions: list[str] = field(default_factory=list)
+    issn: str | None = None
+    study_type: str | None = None
+    evidence_grade: str | None = None
+    last_author_h_index: int | None = None
     score: float | None = None
     ranking_metrics: dict[str, Any] | None = None
 
