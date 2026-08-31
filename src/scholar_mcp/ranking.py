@@ -22,6 +22,52 @@ _STOPWORDS = {
     "of", "on", "or", "the", "to", "with",
 }
 
+PUBTYPE_TO_GRADE: dict[str, str] = {
+    "meta-analysis": "1a",
+    "systematic review": "1a",
+    "randomized controlled trial": "1b",
+    "observational study": "2b",
+    "comparative study": "2b",
+    "multicenter study": "2b",
+    "case-control studies": "3b",
+    "case reports": "4",
+    "review": "5",
+    "editorial": "5",
+    "comment": "5",
+    "practice guideline": "5",
+}
+
+EVIDENCE_GRADE_RANK: dict[str, int] = {
+    "1a": 1,
+    "1b": 2,
+    "2b": 3,
+    "3b": 4,
+    "4": 5,
+    "5": 6,
+}
+
+
+def classify_evidence_grade(pubtypes: list[str] | None) -> str | None:
+    """Map raw PubMed PublicationType strings to an Oxford CEBM-style grade.
+
+    Picks the single best (lowest-rank) grade when a paper carries multiple
+    publication types (e.g. both "Multicenter Study" and "Randomized
+    Controlled Trial" -> the RCT grade wins).
+    """
+    if not pubtypes:
+        return None
+    best_grade: str | None = None
+    best_rank: int | None = None
+    for pt in pubtypes:
+        grade = PUBTYPE_TO_GRADE.get(pt.strip().lower())
+        if grade is None:
+            continue
+        rank = EVIDENCE_GRADE_RANK[grade]
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            best_grade = grade
+    return best_grade
+
 
 
 @dataclass
@@ -114,6 +160,15 @@ class ScoringEngine:
     def calculate_citation_feature(citations: int | None) -> float:
         count = max(0, citations if citations is not None else 0)
         return math.log(1.0 + count)
+
+    @staticmethod
+    def calculate_evidence_feature(evidence_grade: str | None) -> float:
+        if evidence_grade is None:
+            return 0.0
+        rank = EVIDENCE_GRADE_RANK.get(evidence_grade)
+        if rank is None:
+            return 0.0
+        return 1.0 / rank
 
     @staticmethod
     def parse_year(year_str: str | None) -> int | None:

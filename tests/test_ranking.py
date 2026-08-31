@@ -7,7 +7,13 @@ from scholar_mcp.models import PaperMetadata
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider
 from scholar_mcp.providers.openalex import OPENALEX_BASE, OpenAlexProvider
-from scholar_mcp.ranking import RankingPipeline, RankingWeights, ScoringEngine, ScoringMetrics
+from scholar_mcp.ranking import (
+    RankingPipeline,
+    RankingWeights,
+    ScoringEngine,
+    ScoringMetrics,
+    classify_evidence_grade,
+)
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -53,6 +59,35 @@ def test_best_matching_sentence_picks_highest_overlap():
 def test_best_matching_sentence_empty_inputs():
     assert ScoringEngine.best_matching_sentence([], "Some text.") == ("", 0.0)
     assert ScoringEngine.best_matching_sentence(["metformin"], "") == ("", 0.0)
+
+
+def test_classify_evidence_grade_meta_analysis_and_systematic_review():
+    assert classify_evidence_grade(["Meta-Analysis"]) == "1a"
+    assert classify_evidence_grade(["Journal Article", "Systematic Review"]) == "1a"
+
+
+def test_classify_evidence_grade_picks_best_of_multiple():
+    # RCT (1b) outranks Multicenter Study (2b) when both are present
+    assert classify_evidence_grade(["Multicenter Study", "Randomized Controlled Trial"]) == "1b"
+
+
+def test_classify_evidence_grade_lower_tiers():
+    assert classify_evidence_grade(["Case-Control Studies"]) == "3b"
+    assert classify_evidence_grade(["Case Reports"]) == "4"
+    assert classify_evidence_grade(["Review"]) == "5"
+
+
+def test_classify_evidence_grade_none_when_unrecognized_or_empty():
+    assert classify_evidence_grade(["Journal Article"]) is None
+    assert classify_evidence_grade([]) is None
+    assert classify_evidence_grade(None) is None
+
+
+def test_calculate_evidence_feature():
+    assert ScoringEngine.calculate_evidence_feature("1a") == 1.0
+    assert math.isclose(ScoringEngine.calculate_evidence_feature("1b"), 1.0 / 2)
+    assert math.isclose(ScoringEngine.calculate_evidence_feature("2b"), 1.0 / 3)
+    assert ScoringEngine.calculate_evidence_feature(None) == 0.0
 
 
 def test_calculate_z_scores_basic():
