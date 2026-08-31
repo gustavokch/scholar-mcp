@@ -1,8 +1,11 @@
 import asyncio
 from dataclasses import asdict, dataclass
 import datetime
+from functools import lru_cache
+import json
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 from scholar_mcp.config import Settings
@@ -67,6 +70,72 @@ def classify_evidence_grade(pubtypes: list[str] | None) -> str | None:
             best_rank = rank
             best_grade = grade
     return best_grade
+
+
+_SCIMAGO_DATA_PATH = Path(__file__).parent / "data" / "scimago_sjr.json"
+
+
+def _normalize_issn(issn: str) -> str:
+    return re.sub(r"[^0-9Xx]", "", issn).upper()
+
+
+def _normalize_journal_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_scimago_table() -> dict[str, dict[str, float]]:
+    try:
+        with open(_SCIMAGO_DATA_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "issn": {k: float(v) for k, v in data.get("issn", {}).items()},
+            "name": {k: float(v) for k, v in data.get("name", {}).items()},
+        }
+    except Exception:
+        return {"issn": {}, "name": {}}
+
+
+def lookup_journal_impact(issn: str | None, venue: str | None) -> float | None:
+    table = _load_scimago_table()
+    if issn:
+        value = table["issn"].get(_normalize_issn(issn))
+        if value is not None:
+            return value
+    if venue:
+        value = table["name"].get(_normalize_journal_name(venue))
+        if value is not None:
+            return value
+    return None
+
+
+def parse_scimago_csv(rows: list[dict[str, str]]) -> dict[str, dict[str, float]]:
+    """Parse Scimago Journal Rank CSV export rows (dict-per-row, semicolon-delimited
+    source) into the {"issn": {...}, "name": {...}} table format used by
+    scimago_sjr.json. Shared with scripts/update_scimago_data.py."""
+    issn_table: dict[str, float] = {}
+    name_table: dict[str, float] = {}
+
+    for row in rows:
+        title = (row.get("Title") or "").strip()
+        sjr_raw = (row.get("SJR") or "").strip()
+        issn_raw = (row.get("Issn") or "").strip()
+        if not title or not sjr_raw:
+            continue
+
+        try:
+            sjr_value = float(sjr_raw.replace(",", "."))
+        except ValueError:
+            continue
+
+        name_table[_normalize_journal_name(title)] = sjr_value
+
+        for issn in issn_raw.split(","):
+            issn = issn.strip()
+            if issn:
+                issn_table[_normalize_issn(issn)] = sjr_value
+
+    return {"issn": issn_table, "name": name_table}
 
 
 
@@ -169,6 +238,12 @@ class ScoringEngine:
         if rank is None:
             return 0.0
         return 1.0 / rank
+
+    @staticmethod
+    def calculate_impact_feature(sjr: float | None) -> float:
+        if sjr is None or sjr <= 0:
+            return 0.0
+        return math.log(1.0 + sjr)
 
     @staticmethod
     def parse_year(year_str: str | None) -> int | None:
