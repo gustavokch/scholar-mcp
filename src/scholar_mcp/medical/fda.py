@@ -195,8 +195,12 @@ class FDAClient:
             if resp is None:
                 raise FetchError("fda ndc request failed")
             # A 404 here is "no such label" — genuine absence, not an error.
-            data = resp.json()
-            results = [] if resp.status_code == 404 else data.get("results", [])
+            # Skip body parsing: a proxy/CDN error page is not JSON.
+            if resp.status_code == 404:
+                results = []
+            else:
+                data = resp.json()
+                results = data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")
@@ -214,8 +218,11 @@ class FDAClient:
             )
             if resp is None:
                 raise FetchError("fda ndc fallback request failed")
-            data = resp.json()
-            results = [] if resp.status_code == 404 else data.get("results", [])
+            if resp.status_code == 404:
+                results = []
+            else:
+                data = resp.json()
+                results = data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")

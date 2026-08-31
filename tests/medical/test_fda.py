@@ -281,3 +281,20 @@ async def test_search_drugs_falls_back_to_unfielded_query(tmp_path: Path):
     assert meta.error is False
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
+    """A 404 with a non-JSON body (proxy/CDN error page) is still
+    'no such label' — the body must not be parsed, and the result must not
+    surface as a fetch error."""
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, text="<html>Gateway timeout</html>")
+
+    drug, meta = await client.get_drug_by_ndc("99999-999")
+    assert drug is None
+    assert meta.error is False
+    assert route.call_count == 2  # quoted + unquoted variants both tried
+
+    await cache.close()
+    await http_client.aclose()
