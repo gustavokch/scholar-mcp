@@ -123,8 +123,24 @@ async def test_check_citations_isolated_failure(settings):
         ],
     )
     assert len(results) == 2
-    assert results[0]["verdict"] == "NOT_FOUND"
+    assert results[0]["verdict"] == "ERROR"
+    assert "boom" in results[0]["error"]
     assert results[1]["verdict"] == "SUPPORTED"
+
+
+async def test_check_citations_no_abstract_returns_no_text(settings):
+    resolver = _FakeResolver(
+        settings,
+        metadata_by_id={
+            "10.1/noabs": PaperMetadata(title="Paper Without Abstract", abstract="")
+        },
+    )
+    results = await check_citations(
+        resolver,
+        [{"text": "Metformin reduced HbA1c.", "identifier": "10.1/noabs"}],
+    )
+    assert results[0]["verdict"] == "NO_TEXT"
+    assert results[0]["resolved_title"] == "Paper Without Abstract"
 
 
 async def test_check_citations_batch_cap(settings):
@@ -132,5 +148,5 @@ async def test_check_citations_batch_cap(settings):
     claims = [{"text": "x", "identifier": "10.1/x"} for _ in range(MAX_CLAIMS + 1)]
     results = await check_citations(resolver, claims)
     assert len(results) == 1
-    assert results[0]["verdict"] == "error"
+    assert results[0]["verdict"] == "ERROR"
     assert str(MAX_CLAIMS) in results[0]["error"]

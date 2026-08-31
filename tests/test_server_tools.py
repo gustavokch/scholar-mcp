@@ -188,4 +188,4 @@ async def test_check_citations_tool_supported(resolver, monkeypatch):
 async def test_check_citations_tool_batch_cap():
     claims = [{"text": "x", "identifier": "10.1/x"} for _ in range(26)]
     results = await srv.check_citations(claims=claims)
-    assert results[0]["verdict"] == "error"
+    assert results[0]["verdict"] == "ERROR"

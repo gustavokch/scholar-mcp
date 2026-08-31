@@ -11,7 +11,7 @@ MAX_CLAIMS = 25
 def _error_result(identifier: str, message: str) -> dict[str, Any]:
     return {
         "identifier": identifier,
-        "verdict": "NOT_FOUND",
+        "verdict": "ERROR",
         "coverage_score": 0.0,
         "best_evidence_sentence": "",
         "resolved_title": "",
@@ -23,17 +23,25 @@ async def _resolve_claim_source(
     resolver: WaterfallResolver,
     identifier: str,
     deep: bool,
-) -> tuple[str, str, bool]:
-    """Returns (title, content, found)."""
+) -> tuple[str, str, str]:
+    """Returns (title, content, mode).
+
+    mode is "ok" when there is text to verify against, "not_found" when the
+    identifier resolved to nothing, and "no_text" when the paper exists but
+    carries no abstract (non-deep mode only).
+    """
     if deep:
         resp = await resolver.resolve_full_text(identifier)
-        found = bool(resp.content) and resp.status != "not_found"
-        return resp.title, resp.content, found
+        if bool(resp.content) and resp.status != "not_found":
+            return resp.title, resp.content, "ok"
+        return resp.title, resp.content, "not_found"
 
     meta = await resolver.get_metadata(identifier)
     if meta is None:
-        return "", "", False
-    return meta.title, meta.abstract, bool(meta.abstract)
+        return "", "", "not_found"
+    if not meta.abstract:
+        return meta.title, meta.abstract, "no_text"
+    return meta.title, meta.abstract, "ok"
 
 
 async def check_claim(
@@ -44,14 +52,14 @@ async def check_claim(
     settings: Settings,
 ) -> dict[str, Any]:
     try:
-        title, content, found = await _resolve_claim_source(resolver, identifier, deep)
+        title, content, mode = await _resolve_claim_source(resolver, identifier, deep)
     except Exception as ex:
         return _error_result(identifier, str(ex))
 
-    if not found:
+    if mode != "ok":
         return {
             "identifier": identifier,
-            "verdict": "NOT_FOUND",
+            "verdict": "NOT_FOUND" if mode == "not_found" else "NO_TEXT",
             "coverage_score": 0.0,
             "best_evidence_sentence": "",
             "resolved_title": title,
@@ -86,7 +94,7 @@ async def check_citations(
         return [
             {
                 "identifier": "",
-                "verdict": "error",
+                "verdict": "ERROR",
                 "coverage_score": 0.0,
                 "best_evidence_sentence": "",
                 "resolved_title": "",

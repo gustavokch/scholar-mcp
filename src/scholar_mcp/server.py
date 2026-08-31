@@ -2,8 +2,8 @@ from typing import Any
 
 from fastmcp import FastMCP
 
-from scholar_mcp.config import Settings
 from scholar_mcp import citation_check
+from scholar_mcp.config import Settings
 from scholar_mcp.models import (
     DownloadResult,
     FullTextResponse,
@@ -334,7 +334,7 @@ async def check_citations(
         return [
             {
                 "identifier": "",
-                "verdict": "error",
+                "verdict": "ERROR",
                 "coverage_score": 0.0,
                 "best_evidence_sentence": "",
                 "resolved_title": "",
