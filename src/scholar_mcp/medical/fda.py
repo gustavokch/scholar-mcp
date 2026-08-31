@@ -118,6 +118,10 @@ class FDAClient:
             f'openfda.generic_name:"{query}"',
             f'openfda.substance_name:"{query}"',
             f"openfda.brand_name:{query}",
+            # Unfielded full-text fallback: a multi-word query can never match
+            # a field-restricted quoted phrase, but api.fda.gov's plain search
+            # still finds the label (e.g. "ibuprofen dosing children").
+            query,
         ]
 
         all_results: list[DrugLabel] = []
@@ -129,9 +133,14 @@ class FDAClient:
                 resp = await self.http_client.get(
                     FDA_LABEL_URL,
                     params={"search": sq, "limit": str(limit)},
+                    ok_statuses={404},
                 )
                 if resp is None:
                     raise FetchError("fda label request failed")
+                if resp.status_code == 404:
+                    # api.fda.gov answers 404 for "no matches found" — a valid
+                    # empty answer for this variant, not a fetch failure.
+                    continue
                 data = resp.json()
                 results = data.get("results", [])
                 for raw in results:
@@ -181,11 +190,13 @@ class FDAClient:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
                 params={"search": f'openfda.product_ndc:"{ndc}"', "limit": "1"},
+                ok_statuses={404},
             )
             if resp is None:
                 raise FetchError("fda ndc request failed")
+            # A 404 here is "no such label" — genuine absence, not an error.
             data = resp.json()
-            results = data.get("results", [])
+            results = [] if resp.status_code == 404 else data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")
@@ -199,11 +210,12 @@ class FDAClient:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
                 params={"search": f"openfda.product_ndc:{ndc}", "limit": "1"},
+                ok_statuses={404},
             )
             if resp is None:
                 raise FetchError("fda ndc fallback request failed")
             data = resp.json()
-            results = data.get("results", [])
+            results = [] if resp.status_code == 404 else data.get("results", [])
             if results:
                 drug = _parse_drug_label(results[0])
                 await self.cache.set(cache_key, drug.to_dict(), source="fda")

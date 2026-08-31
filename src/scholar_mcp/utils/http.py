@@ -96,7 +96,15 @@ class AsyncHttpClient:
         url: str,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
+        ok_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
+        """GET with rate-limiting and retries.
+
+        Non-retryable failures report as ``None``. Statuses listed in
+        ``ok_statuses`` are returned as-is instead, for callers that must
+        distinguish them (e.g. api.fda.gov uses 404 for "no matches found",
+        a valid answer rather than a fetch failure).
+        """
         target_url = self._inject_credentials(url)
         parsed = urllib.parse.urlparse(target_url)
         limiter = self._limiter_for(parsed.netloc)
@@ -111,6 +119,8 @@ class AsyncHttpClient:
                     )
                     await asyncio.sleep(wait_time)
                     continue
+                if ok_statuses and resp.status_code in ok_statuses:
+                    return resp
                 if resp.status_code >= 400:
                     return None
                 return resp
