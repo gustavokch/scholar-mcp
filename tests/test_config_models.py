@@ -216,3 +216,15 @@ def test_settings_ranking_custom_env(monkeypatch):
     assert s.ranking_max_candidates == 40
     assert s.ranking_enrichment_timeout == 2.5
 
+
+
+def test_settings_who_iris_ttl_default(monkeypatch):
+    monkeypatch.delenv("CACHE_TTL_WHO_IRIS", raising=False)
+    settings = Settings.load()
+    assert settings.cache_ttl_who_iris == 2592000
+
+
+def test_settings_who_iris_ttl_env_override(monkeypatch):
+    monkeypatch.setenv("CACHE_TTL_WHO_IRIS", "86400")
+    settings = Settings.load()
+    assert settings.cache_ttl_who_iris == 86400

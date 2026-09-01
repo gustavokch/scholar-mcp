@@ -205,3 +205,32 @@ class MedicalArticle:
             return cls(title="")
         fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**fields)
+
+
+@dataclass
+class WHOGuideline:
+    title: str
+    handle: str
+    url: str
+    organization: str = "World Health Organization"
+    source: str = "who-iris"
+    year: str = ""
+    description: str = ""
+    authors: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
+    mesh_subjects: list[str] = field(default_factory=list)
+    subjects: list[str] = field(default_factory=list)
+    spatial_coverage: list[str] = field(default_factory=list)
+    isbn: str = ""
+    publisher: str = ""
+    item_type: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "WHOGuideline":
+        if not data or not isinstance(data, dict):
+            return cls(title="", handle="", url="")
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**fields)

@@ -233,6 +233,7 @@ pip install 'scholar-mcp[medical]'
 | `search_pediatric_guidelines` | Bright Futures / AAP Policy | Search pediatric clinical practice guidelines across AAP sources. |
 | `search_aap_guidelines` | Bright Futures & AAP | Concurrent search across AAP Bright Futures and Policy Statements with deduplication. |
 | `search_pediatric_literature` | PubMed | Targeted search across 7 premier pediatric medical journals. |
+| `search_who_iris_guidelines` | WHO IRIS | Search the WHO Institutional Repository for Information Sharing (DSpace JSON API) in title-prefix or full-text mode. |
 | `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
@@ -275,6 +276,7 @@ All options are configured via environment variables:
 | `CACHE_TTL_CHILD_HEALTH` | `604800` | WHO child health indicators cache TTL in seconds (7d). |
 | `CACHE_TTL_PEDIATRIC_DRUGS` | `86400` | Pediatric drug search cache TTL in seconds (24h). |
 | `CACHE_TTL_CLINICAL_TRIALS` | `86400` | ClinicalTrials.gov cache TTL in seconds (24h). |
+| `CACHE_TTL_WHO_IRIS` | `2592000` | WHO IRIS guideline search cache TTL in seconds (30d). |
 | `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
 | `RANKING_ENABLED` | `true` | Master switch for `search_papers` re-ranking. |

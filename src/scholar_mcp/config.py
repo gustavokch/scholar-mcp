@@ -64,6 +64,7 @@ class Settings:
     cache_ttl_child_health: int = 604800
     cache_ttl_pediatric_drugs: int = 86400
     cache_ttl_clinical_trials: int = 86400
+    cache_ttl_who_iris: int = 2592000
     enable_browser_fallback: bool = True
     enable_medical_tools: bool = True
 
@@ -161,6 +162,7 @@ class Settings:
             cache_ttl_child_health=int(os.getenv("CACHE_TTL_CHILD_HEALTH", "604800")),
             cache_ttl_pediatric_drugs=int(os.getenv("CACHE_TTL_PEDIATRIC_DRUGS", "86400")),
             cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
+            cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

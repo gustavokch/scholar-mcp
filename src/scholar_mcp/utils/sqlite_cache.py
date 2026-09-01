@@ -61,6 +61,7 @@ class SQLiteCacheManager:
             "child_health": self.settings.cache_ttl_child_health,
             "pediatric_drugs": self.settings.cache_ttl_pediatric_drugs,
             "clinical_trials": self.settings.cache_ttl_clinical_trials,
+            "who_iris": self.settings.cache_ttl_who_iris,
         }
         return by_source.get(source, self.settings.cache_ttl_seconds)
 

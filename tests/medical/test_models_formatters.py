@@ -7,6 +7,7 @@ from scholar_mcp.medical.formatters import (
     format_medical_articles,
     format_pediatric_guidelines,
     format_rxnorm_drugs,
+    format_who_iris_guidelines,
 )
 from scholar_mcp.medical.models import (
     ClinicalGuideline,
@@ -16,6 +17,7 @@ from scholar_mcp.medical.models import (
     OpenFDAData,
     PediatricGuideline,
     RxNormDrug,
+    WHOGuideline,
     WHOIndicatorRecord,
 )
 from scholar_mcp.utils.sqlite_cache import CacheMetadata
@@ -224,3 +226,40 @@ def test_format_medical_articles_renders_nct_id():
     )
     out = format_medical_articles([article], "asthma", FRESH_META)
     assert "- **NCT ID:** NCT01234567" in out["markdown"]
+
+
+def test_who_guideline_round_trip():
+    g = WHOGuideline(
+        title="Guideline: neonatal vitamin A supplementation",
+        handle="10665/44626",
+        url="https://iris.who.int/handle/10665/44626",
+        year="1998",
+        authors=["World Health Organization"],
+        languages=["en"],
+        mesh_subjects=["Vitamin A"],
+        isbn="9789241547965",
+    )
+    data = g.to_dict()
+    restored = WHOGuideline.from_dict(data)
+    assert restored == g
+    assert WHOGuideline.from_dict(None).title == ""
+    assert WHOGuideline.from_dict({}).handle == ""
+
+
+def test_format_who_iris_guidelines():
+    guidelines = [
+        WHOGuideline(
+            title="Guideline: neonatal vitamin A supplementation",
+            handle="10665/44626",
+            url="https://iris.who.int/handle/10665/44626",
+            year="1998",
+            authors=["World Health Organization"],
+            languages=["en"],
+            mesh_subjects=["Vitamin A", "Infant, Newborn"],
+        )
+    ]
+    out = format_who_iris_guidelines(guidelines, "guideline", CacheMetadata(cached=False, cache_age=0))
+    assert "neonatal vitamin A" in out["markdown"]
+    assert "World Health Organization" in out["markdown"]
+    assert "10665/44626" in out["markdown"] or "iris.who.int/handle/10665/44626" in out["markdown"]
+    assert len(out["data"]) == 1
