@@ -283,7 +283,13 @@ class WHOIRISEngine:
             if bits_resp is None:
                 return "", True
             bitstreams = (bits_resp.json().get("_embedded") or {}).get("bitstreams") or []
-            pdfs = [b for b in bitstreams if (b.get("mimeType") or "").startswith("application/pdf")]
+            # Live IRIS payloads leave bitstream mimeType null; the .pdf name
+            # suffix is then the only marker, so accept either.
+            pdfs = [
+                b for b in bitstreams
+                if (b.get("mimeType") or "").startswith("application/pdf")
+                or (b.get("name") or "").lower().endswith(".pdf")
+            ]
             if not pdfs:
                 return "", False
 

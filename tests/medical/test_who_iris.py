@@ -373,6 +373,34 @@ def _bitstream(uuid: str = "bit-1", mime: str = "application/pdf", size: int = 9
 
 
 @respx.mock
+async def test_get_full_text_selects_pdf_by_name_when_mime_type_null(tmp_path: Path, monkeypatch):
+    """Live IRIS payloads carry mimeType: null; the .pdf name suffix identifies PDFs."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import scholar_mcp.medical.who_iris as who_iris_mod
+        monkeypatch.setattr(who_iris_mod, "pdf_bytes_to_text", lambda b: "extracted guideline text")
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([_bundle()]))
+        content_route = respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-null-mime/content").respond(
+            content=b"%PDF-fake", headers={"Content-Type": "application/pdf"})
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-null-mime", mime=None, size=4_949_229, name="9789242514735-fre.pdf"),
+                _bitstream(uuid="bit-html", mime="text/html", size=9_000, name="index.html"),
+            ]))
+
+        payload, meta = await engine.get_full_text("10665/311551")
+        assert payload["content_type"] == "pdf"
+        assert payload["content"] == "extracted guideline text"
+        assert meta.error is False
+        assert content_route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_full_text_accepts_full_url_and_hdl_prefix(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
@@ -463,7 +491,7 @@ async def test_get_full_text_extracts_pdf_text(tmp_path: Path, monkeypatch):
             json=_bitstreams_page([
                 _bitstream(uuid="bit-small", size=100),
                 _bitstream(uuid="bit-big", size=5000),
-                _bitstream(uuid="bit-html", mime="text/html", size=9000),
+                _bitstream(uuid="bit-html", mime="text/html", size=9000, name="index.html"),
             ]))
         content_route = respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-big/content").respond(
             content=b"%PDF-fake", headers={"Content-Type": "application/pdf"})
