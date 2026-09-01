@@ -611,3 +611,16 @@ async def test_get_full_text_strips_query_and_fragment(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_get_full_text_requires_handle(tmp_path: Path):
+    """Whitespace-only handle errors out without any network call."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        payload, meta = await engine.get_full_text("   ")
+        assert payload["status"] == "error"
+        assert payload["error"] == "handle is required"
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
