@@ -258,3 +258,12 @@ async def test_search_guidelines_fulltext_mode_marks_error_and_skips_cache(tmp_p
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_search_who_iris_guidelines_tool_is_registered():
+    import asyncio
+
+    import scholar_mcp.server as server_module
+
+    tool = asyncio.run(server_module.mcp.get_tool("search_who_iris_guidelines"))
+    assert tool is not None

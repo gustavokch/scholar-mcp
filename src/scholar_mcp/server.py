@@ -24,9 +24,11 @@ from scholar_mcp.medical.formatters import (
     format_medical_articles,
     format_pediatric_guidelines,
     format_rxnorm_drugs,
+    format_who_iris_guidelines,
 )
 from scholar_mcp.medical.guidelines import GuidelinesEngine
 from scholar_mcp.medical.pediatrics import PediatricsEngine
+from scholar_mcp.medical.who_iris import WHOIRISEngine
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.medical.rxnorm import RxNormClient
 from scholar_mcp.medical.who import WHOClient
@@ -42,6 +44,7 @@ pubmed_client = MedicalPubMedClient(http_client=http_client, cache=medical_cache
 fda_client = FDAClient(http_client=http_client, cache=medical_cache, settings=settings)
 rxnorm_client = RxNormClient(http_client=http_client, cache=medical_cache, settings=settings)
 who_client = WHOClient(http_client=http_client, cache=medical_cache, settings=settings)
+who_iris_engine = WHOIRISEngine(http_client=http_client, cache=medical_cache, settings=settings)
 clinical_trials_client = ClinicalTrialsClient(http_client=http_client, cache=medical_cache, settings=settings)
 guidelines_engine = GuidelinesEngine(pubmed=pubmed_client, cache=medical_cache, settings=settings)
 pediatrics_engine = PediatricsEngine(
@@ -520,6 +523,27 @@ if settings.enable_medical_tools:
             return format_medical_articles(articles, query, meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
+
+    @mcp.tool()
+    async def search_who_iris_guidelines(
+        query: str,
+        limit: int = 10,
+        mode: str = "prefix",
+    ) -> dict[str, Any]:
+        """Search WHO IRIS (the WHO's institutional publications repository) for guidelines.
+
+        Args:
+            query: Title prefix to browse (mode='prefix', e.g. 'guideline', 'malaria') or a
+                free-text search term (mode='fulltext').
+            limit: Maximum number of results to return (max 200).
+            mode: 'prefix' (title-starts-with browse, default) or 'fulltext' (discovery search).
+        """
+        clamped = min(max(1, limit), 200)
+        try:
+            guidelines, meta = await who_iris_engine.search_guidelines(query, limit=clamped, mode=mode)
+            return format_who_iris_guidelines(guidelines, query, meta)
+        except Exception as ex:
+            return {"status": "error", "error": str(ex), "source": "who-iris"}
 
     @mcp.tool()
     async def search_medical_databases(query: str) -> dict[str, Any]:
