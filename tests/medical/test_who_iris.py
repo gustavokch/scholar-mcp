@@ -1,7 +1,9 @@
+import io
 from pathlib import Path
 
 import httpx
 import respx
+from pypdf import PdfWriter
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.who_iris import (
@@ -432,6 +434,109 @@ async def test_get_full_text_caches_success(tmp_path: Path):
         assert meta1.cached is False and meta2.cached is True
         assert second["content"] == first["content"]
         assert len(find_route.calls) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def make_blank_pdf(pages: int = 1) -> bytes:
+    """Copy of tests.test_pdf_parser.make_blank_pdf: no cross-test import pattern exists."""
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+@respx.mock
+async def test_get_full_text_extracts_pdf_text(tmp_path: Path, monkeypatch):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import scholar_mcp.medical.who_iris as who_iris_mod
+        monkeypatch.setattr(who_iris_mod, "pdf_bytes_to_text", lambda b: "extracted guideline text")
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item(abstract="unused abstract"))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle(), _bundle(uuid="bundle-uuid-2", name="THUMBNAIL")]))
+        bits_route = respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-small", size=100),
+                _bitstream(uuid="bit-big", size=5000),
+                _bitstream(uuid="bit-html", mime="text/html", size=9000),
+            ]))
+        content_route = respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-big/content").respond(
+            content=b"%PDF-fake", headers={"Content-Type": "application/pdf"})
+
+        payload, meta = await engine.get_full_text("10665/311551")
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "pdf"
+        assert payload["content"] == "extracted guideline text"
+        assert payload["truncated"] is False
+        assert meta.error is False
+        assert content_route.call_count == 1  # largest PDF chosen, not the html bitstream
+        assert bits_route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_empty_extraction_falls_back_to_abstract(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item(abstract="abstract fallback text"))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([_bundle()]))
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream()]))
+        # Real parser: blank PDF extracts to "" -> abstract fallback
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-1/content").respond(
+            content=make_blank_pdf(), headers={"Content-Type": "application/pdf"})
+
+        payload, meta = await engine.get_full_text("10665/311551")
+        assert payload["content_type"] == "abstract"
+        assert payload["content"] == "abstract fallback text"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_bundle_fetch_failure_degrades_to_abstract_without_cache(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item(abstract="degraded"))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(status_code=500)
+
+        payload, meta = await engine.get_full_text("10665/311551")
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "abstract"
+        assert meta.error is True  # no cache write for degraded results
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_truncates_served_content_not_cached(tmp_path: Path, monkeypatch):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import scholar_mcp.medical.who_iris as who_iris_mod
+        monkeypatch.setattr(who_iris_mod, "pdf_bytes_to_text", lambda b: "x" * 100)
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([_bundle()]))
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream()]))
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-1/content").respond(content=b"%PDF-fake")
+
+        first, _ = await engine.get_full_text("10665/311551", max_chars=20)
+        assert first["truncated"] is True
+        assert len(first["content"]) < 100
+        # served again from cache with a different limit: cache holds the full text
+        second, meta2 = await engine.get_full_text("10665/311551", max_chars=100_000)
+        assert meta2.cached is True
+        assert len(second["content"]) == 100
     finally:
         await cache.close()
         await http_client.aclose()

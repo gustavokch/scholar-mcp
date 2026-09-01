@@ -3,6 +3,7 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import WHOGuideline
+from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 from scholar_mcp.utils.text import truncate_content
@@ -240,11 +241,9 @@ class WHOIRISEngine:
             or _first_meta(metadata, "dc.description")
         )
 
-        # PDF bitstream extraction is added in the next task; for now always
-        # fall through to the abstract so the core path is testable.
-        pdf_text = await self._extract_pdf_text(item.get("uuid") or "")
-
-        errored = False  # wired to chain failures in the next task
+        # A failed bitstream fetch degrades the result to the abstract but
+        # still marks it errored so it is never cached for the whole TTL.
+        pdf_text, errored = await self._extract_pdf_text(item.get("uuid") or "")
         if pdf_text:
             result = {"content_type": "pdf", "content": pdf_text}
         elif abstract:
@@ -261,9 +260,43 @@ class WHOIRISEngine:
             await self.cache.set(cache_key, payload, source="who_iris")
         return self._serve_full_text(payload, max_chars), CacheMetadata(cached=False, cache_age=0, error=errored)
 
-    async def _extract_pdf_text(self, item_uuid: str) -> str:
-        """Stub until the PDF bitstream chain lands in the next task."""
-        return ""
+    async def _extract_pdf_text(self, item_uuid: str) -> tuple[str, bool]:
+        """Extract the primary PDF's text. Returns (text, errored)."""
+        if not item_uuid:
+            return "", False
+        try:
+            bundles_resp = await self.http_client.get(
+                f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles",
+                headers={"Accept": "application/json"},
+            )
+            if bundles_resp is None:
+                return "", True
+            bundles = (bundles_resp.json().get("_embedded") or {}).get("bundles") or []
+            original = next((b for b in bundles if b.get("name") == "ORIGINAL"), None)
+            if original is None:
+                return "", False
+
+            bits_resp = await self.http_client.get(
+                f"{IRIS_BUNDLE_BITSTREAMS_URL}/{original.get('uuid')}/bitstreams",
+                headers={"Accept": "application/json"},
+            )
+            if bits_resp is None:
+                return "", True
+            bitstreams = (bits_resp.json().get("_embedded") or {}).get("bitstreams") or []
+            pdfs = [b for b in bitstreams if (b.get("mimeType") or "").startswith("application/pdf")]
+            if not pdfs:
+                return "", False
+
+            best = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
+            pdf_bytes = await self.http_client.get_bytes(
+                f"{IRIS_BITSTREAM_CONTENT_URL}/{best.get('uuid')}/content"
+            )
+            if pdf_bytes is None:
+                return "", True
+            return pdf_bytes_to_text(pdf_bytes), False
+        except Exception:
+            logger.warning("WHO IRIS full-text fetch failed for item %s", item_uuid, exc_info=True)
+            return "", True
 
     @staticmethod
     def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
