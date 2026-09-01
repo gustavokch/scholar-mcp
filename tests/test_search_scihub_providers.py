@@ -398,3 +398,28 @@ async def test_pubmed_fetch_abstract_skips_empty_own_doi_id(client):
     assert meta is not None
     assert meta.doi == "10.3390/ph17121592"
 
+
+@respx.mock
+async def test_pubmed_fetch_abstract_parses_own_pmcid(client):
+    """The record's own PMC id sits in the same ArticleIdList as its DOI and is
+    worth returning; a cited reference's PMC id is not the record's."""
+    _mock_efetch(
+        _efetch_xml(
+            article_ids=(
+                '<ArticleId IdType="pubmed">39770434</ArticleId>'
+                '<ArticleId IdType="doi">10.3390/ph17121592</ArticleId>'
+                '<ArticleId IdType="pmc">PMC11676342</ArticleId>'
+            ),
+            reference_ids=(
+                '<ArticleId IdType="doi">10.1007/s00404-015-3648-7</ArticleId>'
+                '<ArticleId IdType="pmc">PMC4321000</ArticleId>'
+            ),
+        )
+    )
+
+    provider = PubMedProvider(client, Settings())
+    meta = await provider.fetch_abstract(IdentifierMap(pmid="39770434"))
+
+    assert meta is not None
+    assert meta.pmcid == "PMC11676342"
+

@@ -270,7 +270,7 @@ class PubMedProvider:
                 venue=venue,
                 doi=doi,
                 pmid=pmid,
-                pmcid=ids.pmcid,
+                pmcid=self._own_article_id(article, "pmc") or ids.pmcid,
                 abstract=abstract,
                 oa_status="unknown",
             )
