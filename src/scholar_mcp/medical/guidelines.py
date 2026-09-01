@@ -175,6 +175,7 @@ class GuidelinesEngine:
         # few results. Results accumulate across ladder steps.
         pt_query = " OR ".join(GUIDELINE_PUBLICATION_TYPES)
         articles_l1: list[MedicalArticle] = []
+        seen_pmids: set[str] = set()
         errored = False
         for q in _relaxed_queries(query):
             articles_step, meta_step = await self.pubmed.search_articles(
@@ -185,14 +186,19 @@ class GuidelinesEngine:
                 # A fetch failure is not a zero-hit: relaxing further would
                 # mistake a transport error for an over-constrained query.
                 break
-            articles_l1.extend(articles_step)
+            for a in articles_step:
+                pmid = a.pmid or ""
+                if pmid and pmid in seen_pmids:
+                    continue
+                if pmid:
+                    seen_pmids.add(pmid)
+                articles_l1.append(a)
             if len(articles_l1) >= LAYER_THRESHOLD:
                 break
 
         candidates: list[tuple[MedicalArticle, bool, bool]] = [
             (a, True, False) for a in articles_l1
         ]
-        seen_pmids = {a.pmid for a in articles_l1 if a.pmid}
 
         # Layer 2: Semantic keyword fallback if Layer 1 returned few results
         if len(candidates) < LAYER_THRESHOLD:

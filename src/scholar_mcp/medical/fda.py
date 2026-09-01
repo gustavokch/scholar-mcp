@@ -65,13 +65,18 @@ def _query_tokens(query: str) -> list[str]:
     ]
 
 
+MAX_NAME_CANDIDATES = 3
+
+
 def _name_candidates(query: str) -> list[str]:
     """Tokens plausibly naming a drug (generic, brand, or substance).
     Query tokens minus common drug words like 'tablet' or 'dose' — those
-    describe the product, not the product's name. Capped at the first 3 to
-    bound the number of fielded requests issued per query."""
+    describe the product, not the product's name. Capped at the first
+    MAX_NAME_CANDIDATES to bound the number of fielded requests issued
+    per query (3 per candidate: full-quote + context-refined + name-only,
+    plus the unfielded fallback)."""
     candidates = [t for t in _query_tokens(query) if t not in COMMON_DRUG_WORDS]
-    return candidates[:3]
+    return candidates[:MAX_NAME_CANDIDATES]
 
 
 def _name_clause(candidate: str) -> str:
@@ -216,9 +221,14 @@ class FDAClient:
         #      guarded by _label_names_drug.
         candidates = _name_candidates(query)
         remaining = _query_tokens(query)
+        # Context terms drop COMMON_DRUG_WORDS — those describe the product
+        # (label, fda, mg, oral), not what the label is about, so they hit
+        # every label whose body has the relevant section and defeat the
+        # context filter.
+        context_pool = [t for t in remaining if t not in COMMON_DRUG_WORDS]
         search_queries: list[str] = [_name_clause(query)]
         for cand in candidates:
-            context_terms = [t for t in remaining if t != cand]
+            context_terms = [t for t in context_pool if t != cand]
             if context_terms:
                 search_queries.append(f"{_name_clause(cand)} AND {_context_clause(context_terms)}")
         for cand in candidates:
@@ -246,12 +256,14 @@ class FDAClient:
                 results = data.get("results", [])
                 for raw in results:
                     drug = _parse_drug_label(raw)
-                    # Every variant's results are name-filtered, not just the
-                    # unfielded one. Safe by construction for the fielded
-                    # variants: a quoted name match already names the drug in
-                    # the field it matched. It keeps junk out when a stub,
-                    # cache, or upstream change makes a "fielded" variant
-                    # return unrelated labels.
+                    # Every variant's results are name-filtered, including
+                    # the fielded ones. Variant 1 of the ladder is
+                    # _name_clause(query) — the full multi-word query as a
+                    # single quoted name phrase — which has no fielded-name
+                    # guarantee, and an Elasticsearch quirk or upstream
+                    # change can surface unrelated labels from any variant.
+                    # Filtering once, for all variants, is the only place
+                    # we can reject them.
                     if not _label_names_drug(drug, query):
                         continue
                     ndc = drug.openfda.product_ndc[0] if drug.openfda.product_ndc else None

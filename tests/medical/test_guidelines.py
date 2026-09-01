@@ -263,6 +263,104 @@ async def test_search_clinical_guidelines_does_not_relax_on_fetch_error(tmp_path
 
 
 @respx.mock
+async def test_search_clinical_guidelines_l1_ladder_bounded(tmp_path: Path):
+    """Layer 1 must issue at most MAX_RELAXATION_STEPS esearch calls even
+    when every step returns zero hits. A refactor that drops the floor or
+    raises the cap would silently burn more of the 3-req/s NCBI budget."""
+    from scholar_mcp.medical.guidelines import MAX_RELAXATION_STEPS
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        # Always return zero hits so the ladder runs to its natural end.
+        respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "alpha beta gamma delta epsilon"
+        )
+        # L1 may issue up to (1 + MAX_RELAXATION_STEPS) calls: the full
+        # query plus each relaxation. With a 5-token query and floor=2,
+        # that's [5-token, 4-token, 3-token, 2-token] = 1 + 3 = 4 = bound.
+        l1_calls = sum(
+            1
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+            and "[pt]" in c.request.url.params.get("term", "")
+        )
+        # Allow L2 calls (keyword fallback) too — but verify L1 ≤ bound.
+        assert l1_calls <= 1 + MAX_RELAXATION_STEPS, (
+            f"L1 issued {l1_calls} esearch calls; max allowed = {1 + MAX_RELAXATION_STEPS}"
+        )
+        # And confirm L1 actually walked the whole ladder (no premature stop
+        # except via the LAYER_THRESHOLD short-circuit, which we never reach
+        # because every step returns zero hits).
+        assert l1_calls == 1 + MAX_RELAXATION_STEPS
+        assert guidelines == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(tmp_path: Path):
+    """L1 accumulates articles across relaxation steps. If a relaxed step
+    returns a pmid that a stricter step already produced, the same article
+    must not appear twice in the final guidelines (each relaxation widens
+    the search, so step-N ⊇ step-(N+1) is common).
+
+    The query has 4 tokens, so the ladder is: [4-token, 3-token, 2-token]
+    (ladder floors at 2 tokens). The router returns pmid 555 for both the
+    4-token and 3-term variants — the article that satisfied the stricter
+    4-token query also satisfies the looser 3-token query."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        def _ncbi_router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            # Count the user's tokens: the part inside the leading "(...)"
+            # before the AND. n_tokens ∈ {4, 3, 2} for our 4-word query.
+            import re as _re
+            m = _re.match(r"\(([^)]+)\)", term)
+            n_tokens = len(m.group(1).split()) if m else 0
+            # 4-token variant returns the article; 3-token variant also
+            # returns the same article; 2-token variant returns nothing.
+            if n_tokens == 4:
+                return httpx.Response(200, json={"esearchresult": {"idlist": ["555"]}})
+            if n_tokens == 3:
+                return httpx.Response(200, json={"esearchresult": {"idlist": ["555"]}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+
+        respx.get(ESEARCH_URL).mock(side_effect=_ncbi_router)
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>555</PMID>"
+                "<Article><Journal><Title>Annals of Internal Medicine</Title></Journal>"
+                "<ArticleTitle>Clinical practice guideline for management of condition</ArticleTitle>"
+                "<Abstract><AbstractText>Evidence-based recommendation and consensus "
+                "for management.</AbstractText></Abstract>"
+                "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines("alpha beta gamma delta")
+        assert meta.error is False
+        pmids = [g.pmid for g in guidelines]
+        assert pmids.count("555") == 1, f"pmid 555 must not duplicate across ladder steps, got {pmids}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_clinical_guidelines_marks_error_on_pubmed_failure(tmp_path: Path):
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)

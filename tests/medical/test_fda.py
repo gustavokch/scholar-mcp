@@ -478,6 +478,48 @@ async def test_search_drugs_context_refinement_falls_back_on_404(tmp_path: Path)
 
 
 @respx.mock
+async def test_search_drugs_context_refinement_excludes_drug_words(tmp_path: Path):
+    """The context-refined variant (name AND context terms) must not fire
+    on tokens that describe the product, not the product's name (e.g.
+    'label', 'fda', 'mg', 'oral'). Those tokens hit every label whose
+    warnings section exists, defeating the context filter."""
+    client, cache, http_client = await _make_client(tmp_path)
+    seen_context_clauses: list[str] = []
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        # Capture every context-refined request — name AND context
+        if " AND " in search and any(field in search for field in ("warnings:", "precautions:", "contraindications:")):
+            seen_context_clauses.append(search)
+            print(f"CAPTURED: {search}")
+        # Plain name clauses and the unfielded fallback all return the label.
+        return httpx.Response(
+            200,
+            json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        await client.search_drugs(
+            "ibuprofen pregnancy third trimester FDA label", limit=5
+        )
+        assert seen_context_clauses, f"context-refined variant must be sent, got {seen_context_clauses!r}"
+        for clause in seen_context_clauses:
+            # The drug-words in the query ('label', 'fda', 'mg', 'oral') must
+            # not appear as context terms. The clause format is "field:term"
+            # so we look for those terms AFTER a colon, e.g. ":label OR".
+            for drug_word in ("label", "fda", "mg", "oral"):
+                assert (
+                    f":{drug_word} " not in clause
+                    and not clause.endswith(f":{drug_word}")
+                ), f"context refinement must not include COMMON_DRUG_WORDS ({drug_word!r}): {clause}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
     """A 404 with a non-JSON body (proxy/CDN error page) is still
     'no such label' — the body must not be parsed, and the result must not
