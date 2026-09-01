@@ -313,3 +313,19 @@ async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_rejects_unknown_mode(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([_iris_item()]))
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=10, mode="fulltxt")
+
+        assert guidelines == []
+        assert meta.error is True
+        assert route.call_count == 0  # rejected before any HTTP traffic
+    finally:
+        await cache.close()
+        await http_client.aclose()

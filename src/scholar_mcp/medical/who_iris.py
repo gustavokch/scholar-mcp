@@ -136,6 +136,10 @@ class WHOIRISEngine:
         # only guard, or a direct call with a huge limit pages through the
         # whole repository.
         limit = min(max(1, limit), MAX_RESULTS)
+        mode = mode.strip().lower()
+        if mode not in ("prefix", "fulltext"):
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         normalized = query.strip().lower()
         cache_key = f"who_iris:{mode}:{normalized}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
