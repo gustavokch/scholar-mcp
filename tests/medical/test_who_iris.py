@@ -134,6 +134,9 @@ async def test_search_guidelines_prefix_mode_paginates_across_pages(tmp_path: Pa
 
         assert len(guidelines) == 25
         assert route.call_count == 2
+        assert route.calls[0].request.url.params["page"] == "0"
+        assert route.calls[1].request.url.params["page"] == "1"
+        assert route.calls[0].request.url.params["size"] == "25"
         assert meta.error is False
     finally:
         await cache.close()
@@ -247,6 +250,9 @@ async def test_search_guidelines_fulltext_mode_paginates(tmp_path: Path):
 
         assert len(guidelines) == 23
         assert route.call_count == 2
+        assert route.calls[0].request.url.params["page"] == "0"
+        assert route.calls[1].request.url.params["page"] == "1"
+        assert route.calls[0].request.url.params["size"] == "23"
     finally:
         await cache.close()
         await http_client.aclose()
