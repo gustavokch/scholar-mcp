@@ -267,3 +267,31 @@ def test_search_who_iris_guidelines_tool_is_registered():
 
     tool = asyncio.run(server_module.mcp.get_tool("search_who_iris_guidelines"))
     assert tool is not None
+
+
+@respx.mock
+async def test_search_guidelines_partial_failure_is_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        page0_items = [_iris_item(handle=f"10665/{500 + i}") for i in range(20)]
+
+        def _page1_always_fails(request: httpx.Request) -> httpx.Response:
+            if request.url.params.get("page") == "0":
+                return httpx.Response(
+                    200,
+                    json=_browse_page(page0_items, page=0, total_pages=2, total_elements=25),
+                )
+            raise httpx.ConnectError("boom")
+
+        route = respx.get(IRIS_BROWSE_TITLE_URL).mock(side_effect=_page1_always_fails)
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=25, mode="prefix")
+        assert len(guidelines) == 20
+        assert meta.error is True
+
+        after_first = route.call_count
+        await engine.search_guidelines("guideline", limit=25, mode="prefix")
+        assert route.call_count > after_first  # partial result was not cached
+    finally:
+        await cache.close()
+        await http_client.aclose()

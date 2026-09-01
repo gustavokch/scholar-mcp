@@ -150,8 +150,11 @@ class WHOIRISEngine:
 
         records = [_build_record(item) for item in raw_items if item]
 
-        if errored and not records:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed page fetch must never be served from cache for the whole TTL:
+        # skip the write whenever any page errored, even when earlier pages
+        # returned a partial result set (same convention as fda.py).
+        if errored:
+            return records, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(cache_key, [r.to_dict() for r in records], source="who_iris")
         return records, CacheMetadata(cached=False, cache_age=0, error=errored)
