@@ -185,3 +185,76 @@ async def test_search_guidelines_empty_result_is_cached(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def _search_page(items, page=0, total_pages=1, total_elements=None):
+    return {
+        "_embedded": {
+            "searchResult": {
+                "_embedded": {
+                    "objects": [{"_embedded": {"indexableObject": item}} for item in items]
+                },
+                "page": {
+                    "number": page,
+                    "size": len(items),
+                    "totalPages": total_pages,
+                    "totalElements": total_elements if total_elements is not None else len(items),
+                },
+            }
+        }
+    }
+
+
+@respx.mock
+async def test_search_guidelines_fulltext_mode_parses_item(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_SEARCH_URL).respond(json=_search_page([_iris_item()]))
+
+        guidelines, meta = await engine.search_guidelines("vitamin A", limit=10, mode="fulltext")
+
+        assert len(guidelines) == 1
+        assert guidelines[0].title == "Guideline: neonatal vitamin A supplementation"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_fulltext_mode_paginates(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        page0_items = [_iris_item(handle=f"10665/{300 + i}") for i in range(20)]
+        page1_items = [_iris_item(handle=f"10665/{400 + i}") for i in range(3)]
+        route = respx.get(IRIS_SEARCH_URL)
+        route.side_effect = [
+            httpx.Response(200, json=_search_page(page0_items, page=0, total_pages=2, total_elements=23)),
+            httpx.Response(200, json=_search_page(page1_items, page=1, total_pages=2, total_elements=23)),
+        ]
+
+        guidelines, meta = await engine.search_guidelines("vitamin", limit=23, mode="fulltext")
+
+        assert len(guidelines) == 23
+        assert route.call_count == 2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_fulltext_mode_marks_error_and_skips_cache(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(IRIS_SEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_guidelines("vitamin", limit=10, mode="fulltext")
+        assert guidelines == []
+        assert meta.error is True
+
+        after_first = route.call_count
+        await engine.search_guidelines("vitamin", limit=10, mode="fulltext")
+        assert route.call_count > after_first
+    finally:
+        await cache.close()
+        await http_client.aclose()

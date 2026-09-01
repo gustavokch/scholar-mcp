@@ -43,6 +43,17 @@ def _extract_browse_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], di
     return items, page_info
 
 
+def _extract_search_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    search_result = (data.get("_embedded") or {}).get("searchResult") or {}
+    objects = (search_result.get("_embedded") or {}).get("objects") or []
+    items = [
+        (obj.get("_embedded") or {}).get("indexableObject") or {}
+        for obj in objects
+    ]
+    page_info = search_result.get("page") or {}
+    return items, page_info
+
+
 def _build_record(item: dict[str, Any]) -> WHOGuideline:
     metadata = item.get("metadata") or {}
     handle = item.get("handle") or ""
@@ -126,9 +137,16 @@ class WHOIRISEngine:
         if meta.cached and cached_data is not None:
             return [WHOGuideline.from_dict(d) for d in cached_data], meta
 
-        url = IRIS_BROWSE_TITLE_URL
-        params = {"startsWith": query.strip(), "filter": IRIS_ITEM_TYPE_FILTER}
-        raw_items, errored = await self._fetch_paginated(url, params, _extract_browse_page, limit)
+        if mode == "fulltext":
+            url = IRIS_SEARCH_URL
+            params = {"query": query.strip(), "f.itemtype": "Publications,equals"}
+            extract = _extract_search_page
+        else:
+            url = IRIS_BROWSE_TITLE_URL
+            params = {"startsWith": query.strip(), "filter": IRIS_ITEM_TYPE_FILTER}
+            extract = _extract_browse_page
+
+        raw_items, errored = await self._fetch_paginated(url, params, extract, limit)
 
         records = [_build_record(item) for item in raw_items if item]
 
