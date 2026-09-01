@@ -4,7 +4,14 @@ import httpx
 import respx
 
 from scholar_mcp.config import Settings
-from scholar_mcp.medical.fda import FDAClient, is_valid_drug_query
+from scholar_mcp.medical.fda import (
+    MAX_NAME_CANDIDATES,
+    FDAClient,
+    _label_names_drug,
+    _name_clause,
+    is_valid_drug_query,
+)
+from scholar_mcp.medical.models import DrugLabel, OpenFDAData
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
@@ -491,7 +498,6 @@ async def test_search_drugs_context_refinement_excludes_drug_words(tmp_path: Pat
         # Capture every context-refined request — name AND context
         if " AND " in search and any(field in search for field in ("warnings:", "precautions:", "contraindications:")):
             seen_context_clauses.append(search)
-            print(f"CAPTURED: {search}")
         # Plain name clauses and the unfielded fallback all return the label.
         return httpx.Response(
             200,
@@ -534,3 +540,83 @@ async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: 
 
     await cache.close()
     await http_client.aclose()
+
+
+def test_label_names_drug_ignores_product_descriptor_words():
+    """'oral', 'tablet', 'capsule' describe the product, not its name, and
+    appear verbatim in real openFDA brand names. They must not satisfy the
+    name guard, or the unfielded fallback re-admits unrelated labels."""
+    junk = DrugLabel(
+        openfda=OpenFDAData(
+            brand_name=["Childrens Allergy Oral Solution"],
+            generic_name=["DIPHENHYDRAMINE"],
+            substance_name=["DIPHENHYDRAMINE HYDROCHLORIDE"],
+        )
+    )
+    assert _label_names_drug(junk, "ibuprofen oral dosing pregnancy") is False
+
+    real = DrugLabel(
+        openfda=OpenFDAData(
+            brand_name=["MOTRIN IB"],
+            generic_name=["IBUPROFEN"],
+            substance_name=["IBUPROFEN"],
+        )
+    )
+    assert _label_names_drug(real, "ibuprofen oral dosing pregnancy") is True
+
+
+def test_label_names_drug_permissive_when_only_descriptor_words():
+    """If nothing name-bearing remains the guard stays permissive rather
+    than rejecting every label."""
+    drug = DrugLabel(openfda=OpenFDAData(brand_name=["ANYTHING"]))
+    assert _label_names_drug(drug, "oral tablet dosage") is True
+
+
+def test_name_clause_escapes_quotes():
+    """A quote inside the interpolated value would close the Lucene phrase
+    early and make the whole clause malformed."""
+    clause = _name_clause('ibuprofen "extra strength"')
+    assert clause.count('"') == 6
+    assert '\\"' not in clause
+
+
+@respx.mock
+async def test_search_drugs_quoted_query_does_not_error(tmp_path: Path):
+    """A query containing a double quote must not poison the whole call:
+    the malformed phrase used to 400 at api.fda.gov, which marked the search
+    errored and skipped the cache write even when other variants matched."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164")
+    )
+
+    try:
+        drugs, meta = await client.search_drugs('ibuprofen "extra strength"', limit=5)
+        assert meta.error is False
+        assert len(drugs) == 1
+        for call in respx.calls:
+            search = call.request.url.params.get("search", "")
+            assert search.count('"') % 2 == 0, f"unbalanced quotes: {search}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_request_budget_bounded(tmp_path: Path):
+    """Worst case — every variant returns nothing — must stay within
+    1 (full-query phrase) + 2 * MAX_NAME_CANDIDATES (context-refined and
+    name-only per candidate) + 1 (unfielded fallback) openFDA requests.
+    Symmetric with the L1 ladder budget pinned in test_guidelines.py."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(404, json={"error": {"code": "NOT_FOUND"}})
+
+    try:
+        drugs, _ = await client.search_drugs(
+            "ibuprofen naproxen aspirin pregnancy trimester", limit=10
+        )
+        assert drugs == []
+        assert len(respx.calls) <= 1 + 2 * MAX_NAME_CANDIDATES + 1
+    finally:
+        await cache.close()
+        await http_client.aclose()

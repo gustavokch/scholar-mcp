@@ -68,22 +68,37 @@ def _query_tokens(query: str) -> list[str]:
 MAX_NAME_CANDIDATES = 3
 
 
+def _name_tokens(query: str) -> list[str]:
+    """Query tokens that can plausibly name a drug: meaningful tokens minus
+    COMMON_DRUG_WORDS. Words like 'oral', 'tablet' or 'label' describe the
+    product, not the product's name, and they appear verbatim inside real
+    openFDA name fields ('Childrens Allergy Oral Solution'), so they must
+    not be treated as naming evidence."""
+    return [t for t in _query_tokens(query) if t not in COMMON_DRUG_WORDS]
+
+
 def _name_candidates(query: str) -> list[str]:
     """Tokens plausibly naming a drug (generic, brand, or substance).
-    Query tokens minus common drug words like 'tablet' or 'dose' — those
-    describe the product, not the product's name. Capped at the first
-    MAX_NAME_CANDIDATES to bound the number of fielded requests issued
-    per query (3 per candidate: full-quote + context-refined + name-only,
-    plus the unfielded fallback)."""
-    candidates = [t for t in _query_tokens(query) if t not in COMMON_DRUG_WORDS]
-    return candidates[:MAX_NAME_CANDIDATES]
+    Capped at the first MAX_NAME_CANDIDATES to bound the number of fielded
+    requests issued per query (3 per candidate: full-quote + context-refined
+    + name-only, plus the unfielded fallback)."""
+    return _name_tokens(query)[:MAX_NAME_CANDIDATES]
+
+
+def _sanitize_phrase(value: str) -> str:
+    """Strip the characters that would break out of an Elasticsearch quoted
+    phrase. An unescaped double quote closes the phrase early and makes the
+    whole clause malformed, which api.fda.gov answers with a 400 — that in
+    turn marks the entire search errored and suppresses the cache write even
+    when the other ladder variants matched."""
+    return " ".join(value.replace('"', " ").replace("\\", " ").split())
 
 
 def _name_clause(candidate: str) -> str:
     """One Elasticsearch clause covering all three openFDA name fields.
     Verified live: returns only labels whose generic/brand/substance name
     is the candidate (e.g. only IBUPROFEN labels for 'ibuprofen')."""
-    c = candidate.strip().lower()
+    c = _sanitize_phrase(candidate).lower()
     return (
         f'(openfda.generic_name:"{c}" OR openfda.brand_name:"{c}" '
         f'OR openfda.substance_name:"{c}")'
@@ -119,9 +134,12 @@ def _label_names_drug(drug: DrugLabel, query: str) -> bool:
     Stopwords and tokens shorter than 3 characters are ignored — a query like
     "What is the dose of aspirin" must not have its lead tokens "what", "is",
     "the" substring-match almost any name field ("the" matches THEOPHYLLINE).
+    Product-descriptor words are dropped as well: 'oral' whole-word matches
+    brand names such as "Childrens Allergy Oral Solution", so keeping it
+    would let unrelated labels satisfy the guard.
     If nothing signal-bearing remains, the filter is permissive (True).
     """
-    tokens = _query_tokens(query)
+    tokens = _name_tokens(query)
     if not tokens:
         return True
     ofd = drug.openfda
@@ -220,12 +238,11 @@ class FDAClient:
         #   4. the raw query, unfielded — last-resort full-text fallback,
         #      guarded by _label_names_drug.
         candidates = _name_candidates(query)
-        remaining = _query_tokens(query)
         # Context terms drop COMMON_DRUG_WORDS — those describe the product
         # (label, fda, mg, oral), not what the label is about, so they hit
         # every label whose body has the relevant section and defeat the
         # context filter.
-        context_pool = [t for t in remaining if t not in COMMON_DRUG_WORDS]
+        context_pool = _name_tokens(query)
         search_queries: list[str] = [_name_clause(query)]
         for cand in candidates:
             context_terms = [t for t in context_pool if t != cand]
@@ -233,7 +250,7 @@ class FDAClient:
                 search_queries.append(f"{_name_clause(cand)} AND {_context_clause(context_terms)}")
         for cand in candidates:
             search_queries.append(_name_clause(cand))
-        search_queries.append(query)
+        search_queries.append(_sanitize_phrase(query))
 
         all_results: list[DrugLabel] = []
         seen_ndcs: set[str] = set()
