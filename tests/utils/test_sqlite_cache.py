@@ -83,3 +83,18 @@ async def test_sqlite_cache_stats(tmp_path: Path):
     assert stats["sources"]["who"] == 1
 
     await cache.close()
+
+
+async def test_sqlite_cache_who_iris_ttl_resolution(tmp_path: Path):
+    cache = SQLiteCacheManager(db_path=tmp_path / "ttl_iris.db", settings=Settings.load())
+    await cache.init_db()
+    try:
+        await cache.set("c", 3, source="who_iris")
+        assert cache._db is not None
+        async with cache._db.execute(
+            "SELECT ttl_seconds FROM cache_entries WHERE key = 'c'"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row[0] == Settings.load().cache_ttl_who_iris
+    finally:
+        await cache.close()
