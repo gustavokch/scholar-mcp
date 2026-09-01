@@ -5,7 +5,11 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.who_iris import (
+    IRIS_BITSTREAM_CONTENT_URL,
+    IRIS_BUNDLE_BITSTREAMS_URL,
     IRIS_BROWSE_TITLE_URL,
+    IRIS_ITEM_BUNDLES_URL,
+    IRIS_PID_FIND_URL,
     IRIS_SEARCH_URL,
     WHOIRISEngine,
     _all_meta,
@@ -333,6 +337,101 @@ async def test_search_guidelines_rejects_unknown_mode(tmp_path: Path):
         assert guidelines == []
         assert meta.error is True
         assert route.call_count == 0  # rejected before any HTTP traffic
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def _pid_find_item(handle: str = "10665/311551", abstract: str = "Recommendations for malaria.") -> dict:
+    return {
+        "uuid": "item-uuid-1",
+        "handle": handle,
+        "name": "WHO malaria guideline",
+        "metadata": {
+            "dc.title": [{"value": "WHO malaria guideline"}],
+            "dc.description.abstract": [{"value": abstract}],
+        },
+    }
+
+
+def _bundles_page(bundles: list[dict]) -> dict:
+    return {"_embedded": {"bundles": bundles}, "page": {"totalPages": 1}}
+
+
+def _bundle(uuid: str = "bundle-uuid-1", name: str = "ORIGINAL") -> dict:
+    return {"uuid": uuid, "name": name, "metadata": []}
+
+
+def _bitstreams_page(bits: list[dict]) -> dict:
+    return {"_embedded": {"bitstreams": bits}, "page": {"totalPages": 1}}
+
+
+def _bitstream(uuid: str = "bit-1", mime: str = "application/pdf", size: int = 999, name: str = "guideline.pdf") -> dict:
+    return {"uuid": uuid, "name": name, "mimeType": mime, "sizeBytes": size}
+
+
+@respx.mock
+async def test_get_full_text_accepts_full_url_and_hdl_prefix(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([]))
+        # Distinct handles per iteration: all three normalize to a unique
+        # item, so no call is served from the previous iteration's cache.
+        for raw, normalized in (
+            ("https://iris.who.int/handle/10665/311551", "10665/311551"),
+            ("hdl:10665/311552", "10665/311552"),
+            ("10665/311553", "10665/311553"),
+        ):
+            route.calls.clear()
+            payload, meta = await engine.get_full_text(raw)
+            assert payload["status"] == "success"
+            assert payload["content_type"] == "abstract"  # no ORIGINAL bundle -> fallback
+            assert payload["content"] == "Recommendations for malaria."
+            assert payload["handle"] == normalized
+            assert route.calls[0].request.url.params["id"] == f"hdl:{normalized}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_item_not_found(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(status_code=404)
+        payload, meta = await engine.get_full_text("10665/000000")
+        assert payload["status"] == "not_found"
+        assert meta.cached is False and meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_network_failure_is_error_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).mock(side_effect=httpx.ConnectError("boom"))
+        payload, meta = await engine.get_full_text("10665/311551")
+        assert payload["status"] == "error"
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_caches_success(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        find_route = respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([]))
+        first, meta1 = await engine.get_full_text("10665/311551")
+        second, meta2 = await engine.get_full_text("10665/311551")
+        assert meta1.cached is False and meta2.cached is True
+        assert second["content"] == first["content"]
+        assert len(find_route.calls) == 1
     finally:
         await cache.close()
         await http_client.aclose()

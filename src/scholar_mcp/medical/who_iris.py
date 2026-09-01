@@ -5,14 +5,20 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import WHOGuideline
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+from scholar_mcp.utils.text import truncate_content
 
 IRIS_API_BASE = "https://iris.who.int/server/api"
 IRIS_BROWSE_TITLE_URL = f"{IRIS_API_BASE}/discover/browses/title/items"
 IRIS_SEARCH_URL = f"{IRIS_API_BASE}/discover/search/objects"
 IRIS_HANDLE_BASE = "https://iris.who.int/handle"
+IRIS_PID_FIND_URL = f"{IRIS_API_BASE}/pid/find"
+IRIS_ITEM_BUNDLES_URL = f"{IRIS_API_BASE}/core/items"
+IRIS_BUNDLE_BITSTREAMS_URL = f"{IRIS_API_BASE}/core/bundles"
+IRIS_BITSTREAM_CONTENT_URL = f"{IRIS_API_BASE}/core/bitstreams"
 IRIS_ITEM_TYPE_FILTER = "Publications,equals"
 MAX_PAGE_SIZE = 100
 MAX_RESULTS = 200
+MAX_FULL_TEXT_CHARS = 50_000
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,16 @@ def _build_record(item: dict[str, Any]) -> WHOGuideline:
         publisher=_first_meta(metadata, "dc.publisher"),
         item_type=_first_meta(metadata, "dc.type"),
     )
+
+
+def _normalize_handle(handle: str) -> str:
+    """Strip URL/"hdl:" decorations from an IRIS handle down to "12345/67890"."""
+    h = handle.strip()
+    if "/handle/" in h:
+        h = h.split("/handle/", 1)[1]
+    if h.lower().startswith("hdl:"):
+        h = h[4:]
+    return h.strip("/")
 
 
 class WHOIRISEngine:
@@ -170,3 +186,89 @@ class WHOIRISEngine:
 
         await self.cache.set(cache_key, [r.to_dict() for r in records], source="who_iris")
         return records, CacheMetadata(cached=False, cache_age=0, error=errored)
+
+    async def get_full_text(
+        self,
+        handle: str,
+        max_chars: int | None = None,
+    ) -> tuple[dict[str, Any], CacheMetadata]:
+        normalized = _normalize_handle(handle)
+        base = {
+            "source": "who-iris",
+            "handle": normalized,
+            "url": f"{IRIS_HANDLE_BASE}/{normalized}" if normalized else "",
+            "truncated": False,
+        }
+        if not normalized:
+            return (
+                {**base, "status": "error", "error": "handle is required",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+
+        cache_key = f"who_iris_fulltext:{normalized}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and cached_data is not None:
+            return self._serve_full_text(cached_data, max_chars), meta
+
+        # ok_statuses lets a 404 through so not-found is distinguishable from a
+        # network failure (get() otherwise collapses both to None).
+        resp = await self.http_client.get(
+            IRIS_PID_FIND_URL,
+            params={"id": f"hdl:{normalized}"},
+            headers={"Accept": "application/json"},
+            ok_statuses=frozenset({404}),
+        )
+        if resp is None:
+            return (
+                {**base, "status": "error", "error": "who iris request failed",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+        if resp.status_code == 404:
+            return (
+                {**base, "status": "not_found", "error": "no item for handle",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+
+        item = resp.json()
+        metadata = item.get("metadata") or {}
+        title = _first_meta(metadata, "dc.title") or item.get("name") or ""
+        abstract = (
+            _first_meta(metadata, "dc.description.abstract")
+            or _first_meta(metadata, "dc.description")
+        )
+
+        # PDF bitstream extraction is added in the next task; for now always
+        # fall through to the abstract so the core path is testable.
+        pdf_text = await self._extract_pdf_text(item.get("uuid") or "")
+
+        errored = False  # wired to chain failures in the next task
+        if pdf_text:
+            result = {"content_type": "pdf", "content": pdf_text}
+        elif abstract:
+            result = {"content_type": "abstract", "content": abstract}
+        else:
+            return (
+                {**base, "status": "not_found", "error": "no full text or abstract available",
+                 "title": title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=errored),
+            )
+
+        payload = {**base, "status": "success", "title": title, **result}
+        if not errored:
+            await self.cache.set(cache_key, payload, source="who_iris")
+        return self._serve_full_text(payload, max_chars), CacheMetadata(cached=False, cache_age=0, error=errored)
+
+    async def _extract_pdf_text(self, item_uuid: str) -> str:
+        """Stub until the PDF bitstream chain lands in the next task."""
+        return ""
+
+    @staticmethod
+    def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
+        served = dict(payload)
+        content, truncated = truncate_content(served.get("content") or "", max_chars or MAX_FULL_TEXT_CHARS)
+        served["content"] = content
+        served["truncated"] = truncated
+        return served
