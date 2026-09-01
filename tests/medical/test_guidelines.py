@@ -115,6 +115,252 @@ async def test_search_clinical_guidelines_organization_expansion(tmp_path: Path)
 
 
 @respx.mock
+async def test_search_clinical_guidelines_relaxes_over_constrained_query(tmp_path: Path):
+    """A 5-term natural-language query ANDed with the publication-type filter
+    over-constrains PubMed to zero hits (measured live: L1=0 for
+    'NSAIDs third trimester pregnancy contraindications' while its 4-token
+    prefix finds 1). The engine must retry Layer 1 with relaxed ladder
+    variants instead of returning []."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        def _ncbi_router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            if "contraindications" in term:
+                # Full query: over-constrained, zero hits.
+                return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+            if "[tiab]" in term:
+                # Layer 2 keyword fallback: nothing new.
+                return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["888"]}})
+
+        respx.get(ESEARCH_URL).mock(side_effect=_ncbi_router)
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>888</PMID>"
+                "<Article><Journal><Title>Annals of Internal Medicine</Title></Journal>"
+                "<ArticleTitle>Clinical practice guideline for NSAID use in pregnancy</ArticleTitle>"
+                "<Abstract><AbstractText>Evidence-based recommendation on NSAIDs in the "
+                "third trimester of pregnancy.</AbstractText></Abstract>"
+                "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "NSAIDs third trimester pregnancy contraindications"
+        )
+        assert meta.error is False
+        assert len(guidelines) >= 1
+        assert guidelines[0].pmid == "888"
+
+        esearch_terms = [
+            c.request.url.params.get("term", "")
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+        ]
+        assert any(
+            "NSAIDs third trimester pregnancy" in t and "contraindications" not in t
+            for t in esearch_terms
+        ), "a relaxed ladder variant must have been sent to esearch"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_keyword_layer_hit_passes_threshold(tmp_path: Path):
+    """A Layer-2 (keyword) hit used to be capped at 4.0 by pub_score=0.0 and
+    still could not reliably clear MIN_SCORE_THRESHOLD (2.5). With keyword-
+    layer partial credit it must survive the gate."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        def _ncbi_router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            if "[pt]" in term:
+                return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["777"]}})
+
+        respx.get(ESEARCH_URL).mock(side_effect=_ncbi_router)
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>777</PMID>"
+                "<Article><Journal><Title>Pediatrics</Title></Journal>"
+                "<ArticleTitle>American Academy of Pediatrics guideline: recommendation "
+                "for infant sleep safety</ArticleTitle>"
+                "<Abstract><AbstractText>Prospective cohort analysis of infant sleep "
+                "positions.</AbstractText></Abstract>"
+                "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "infant sleep safety recommendations"
+        )
+        assert meta.error is False
+        assert len(guidelines) >= 1
+        assert guidelines[0].pmid == "777"
+        assert guidelines[0].score >= 2.5
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_calculate_guideline_score_keyword_layer_partial_credit():
+    """A keyword-layer hit without a publication type earns partial credit
+    (1.0), not zero — without it the layer is unreachable through the 2.5
+    gate."""
+    article = MedicalArticle(
+        title="Guideline recommendation for pediatric asthma care",
+        authors=["Someone"],
+        journal="Pediatrics",
+        abstract="Consensus recommendation from a working group.",
+        pmid="42",
+    )
+    score = calculate_guideline_score(
+        article, has_publication_type=False, from_keyword_layer=True
+    )
+    assert score.publication_type == 1.0
+    assert score.total >= 2.5
+
+
+@respx.mock
+async def test_search_clinical_guidelines_does_not_relax_on_fetch_error(tmp_path: Path):
+    """A fetch failure must not be mistaken for a zero-hit: the ladder must
+    not send relaxed variants after an esearch error."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        respx.get(ESEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "NSAIDs third trimester pregnancy contraindications"
+        )
+        assert guidelines == []
+        assert meta.error is True
+
+        esearch_terms = [
+            c.request.url.params.get("term", "")
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+        ]
+        assert esearch_terms, "esearch must have been attempted"
+        assert all(
+            "contraindications" in t for t in esearch_terms
+        ), "no relaxed (shortened) query may be sent after a fetch error"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_l1_ladder_bounded(tmp_path: Path):
+    """Layer 1 must issue at most MAX_RELAXATION_STEPS esearch calls even
+    when every step returns zero hits. A refactor that drops the floor or
+    raises the cap would silently burn more of the 3-req/s NCBI budget."""
+    from scholar_mcp.medical.guidelines import MAX_RELAXATION_STEPS
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        # Always return zero hits so the ladder runs to its natural end.
+        respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "alpha beta gamma delta epsilon"
+        )
+        # L1 may issue up to (1 + MAX_RELAXATION_STEPS) calls: the full
+        # query plus each relaxation. With a 5-token query and floor=2,
+        # that's [5-token, 4-token, 3-token, 2-token] = 1 + 3 = 4 = bound.
+        l1_calls = sum(
+            1
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+            and "[pt]" in c.request.url.params.get("term", "")
+        )
+        # Allow L2 calls (keyword fallback) too — but verify L1 ≤ bound.
+        assert l1_calls <= 1 + MAX_RELAXATION_STEPS, (
+            f"L1 issued {l1_calls} esearch calls; max allowed = {1 + MAX_RELAXATION_STEPS}"
+        )
+        # And confirm L1 actually walked the whole ladder (no premature stop
+        # except via the LAYER_THRESHOLD short-circuit, which we never reach
+        # because every step returns zero hits).
+        assert l1_calls == 1 + MAX_RELAXATION_STEPS
+        assert guidelines == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(tmp_path: Path):
+    """L1 accumulates articles across relaxation steps. If a relaxed step
+    returns a pmid that a stricter step already produced, the same article
+    must not appear twice in the final guidelines (each relaxation widens
+    the search, so step-N ⊇ step-(N+1) is common).
+
+    The query has 4 tokens, so the ladder is: [4-token, 3-token, 2-token]
+    (ladder floors at 2 tokens). The router returns pmid 555 for both the
+    4-token and 3-term variants — the article that satisfied the stricter
+    4-token query also satisfies the looser 3-token query."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    try:
+        def _ncbi_router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            # Count the user's tokens: the part inside the leading "(...)"
+            # before the AND. n_tokens ∈ {4, 3, 2} for our 4-word query.
+            import re as _re
+            m = _re.match(r"\(([^)]+)\)", term)
+            n_tokens = len(m.group(1).split()) if m else 0
+            # 4-token variant returns the article; 3-token variant also
+            # returns the same article; 2-token variant returns nothing.
+            if n_tokens == 4:
+                return httpx.Response(200, json={"esearchresult": {"idlist": ["555"]}})
+            if n_tokens == 3:
+                return httpx.Response(200, json={"esearchresult": {"idlist": ["555"]}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+
+        respx.get(ESEARCH_URL).mock(side_effect=_ncbi_router)
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>555</PMID>"
+                "<Article><Journal><Title>Annals of Internal Medicine</Title></Journal>"
+                "<ArticleTitle>Clinical practice guideline for management of condition</ArticleTitle>"
+                "<Abstract><AbstractText>Evidence-based recommendation and consensus "
+                "for management.</AbstractText></Abstract>"
+                "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines("alpha beta gamma delta")
+        assert meta.error is False
+        pmids = [g.pmid for g in guidelines]
+        assert pmids.count("555") == 1, f"pmid 555 must not duplicate across ladder steps, got {pmids}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_clinical_guidelines_marks_error_on_pubmed_failure(tmp_path: Path):
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)

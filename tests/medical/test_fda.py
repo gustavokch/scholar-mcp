@@ -4,7 +4,14 @@ import httpx
 import respx
 
 from scholar_mcp.config import Settings
-from scholar_mcp.medical.fda import FDAClient, is_valid_drug_query
+from scholar_mcp.medical.fda import (
+    MAX_NAME_CANDIDATES,
+    FDAClient,
+    _label_names_drug,
+    _name_clause,
+    is_valid_drug_query,
+)
+from scholar_mcp.medical.models import DrugLabel, OpenFDAData
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
@@ -382,6 +389,143 @@ async def test_search_drugs_does_not_cache_partial_result_on_variant_error(tmp_p
 
 
 @respx.mock
+async def test_search_drugs_multiword_query_drops_unrelated_labels(tmp_path: Path):
+    """Reproduces the live defect: the sentence query 'ibuprofen pregnancy
+    third trimester FDA label' used to hit the unquoted/unfielded variants
+    and return SILICEA-class junk. Every route here serves a label that does
+    not name any query token, so the only correct answer is []."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("SILICEA", "SILICEA", ndc="12345-001")
+    )
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "ibuprofen pregnancy third trimester FDA label", limit=5
+        )
+        assert drugs == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_never_issues_unquoted_field_variant(tmp_path: Path):
+    """The unquoted variant `openfda.brand_name:{query}` lets Elasticsearch
+    bind the field to the first term only; the rest become unfielded OR
+    terms — provably identical to the unfielded fallback while bypassing the
+    drug-name guard. It must never be sent."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("SILICEA", "SILICEA", ndc="12345-001")
+    )
+
+    query = "ibuprofen pregnancy third trimester FDA label"
+    try:
+        await client.search_drugs(query, limit=5)
+
+        bad = f"openfda.brand_name:{query}"
+        for call in respx.calls:
+            assert call.request.url.params.get("search", "") != bad
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_resolves_drug_name_from_natural_language(tmp_path: Path):
+    """A sentence query must produce a quoted, fielded request for the drug
+    token (openfda.generic_name:"ibuprofen"), not just unfielded noise."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("ADVIL", generic="IBUPROFEN", ndc="0573-0164")
+    )
+
+    try:
+        await client.search_drugs("ibuprofen pregnancy third trimester FDA label", limit=5)
+
+        searches = [c.request.url.params.get("search", "") for c in respx.calls]
+        assert any('openfda.generic_name:"ibuprofen"' in s for s in searches)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_context_refinement_falls_back_on_404(tmp_path: Path):
+    """The context-refined variant (name AND context terms) may 404 when no
+    label of the drug mentions the context words; the plain name clause must
+    then still return the label."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "trimester" in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        if 'openfda.generic_name:"ibuprofen"' in search:
+            return httpx.Response(
+                200,
+                json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164"),
+            )
+        return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "ibuprofen third trimester pregnancy", limit=5
+        )
+        assert len(drugs) == 1
+        assert drugs[0].openfda.generic_name == ["IBUPROFEN"]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_context_refinement_excludes_drug_words(tmp_path: Path):
+    """The context-refined variant (name AND context terms) must not fire
+    on tokens that describe the product, not the product's name (e.g.
+    'label', 'fda', 'mg', 'oral'). Those tokens hit every label whose
+    warnings section exists, defeating the context filter."""
+    client, cache, http_client = await _make_client(tmp_path)
+    seen_context_clauses: list[str] = []
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        # Capture every context-refined request — name AND context
+        if " AND " in search and any(field in search for field in ("warnings:", "precautions:", "contraindications:")):
+            seen_context_clauses.append(search)
+        # Plain name clauses and the unfielded fallback all return the label.
+        return httpx.Response(
+            200,
+            json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164"),
+        )
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        await client.search_drugs(
+            "ibuprofen pregnancy third trimester FDA label", limit=5
+        )
+        assert seen_context_clauses, f"context-refined variant must be sent, got {seen_context_clauses!r}"
+        for clause in seen_context_clauses:
+            # The drug-words in the query ('label', 'fda', 'mg', 'oral') must
+            # not appear as context terms. The clause format is "field:term"
+            # so we look for those terms AFTER a colon, e.g. ":label OR".
+            for drug_word in ("label", "fda", "mg", "oral"):
+                assert (
+                    f":{drug_word} " not in clause
+                    and not clause.endswith(f":{drug_word}")
+                ), f"context refinement must not include COMMON_DRUG_WORDS ({drug_word!r}): {clause}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
     """A 404 with a non-JSON body (proxy/CDN error page) is still
     'no such label' — the body must not be parsed, and the result must not
@@ -396,3 +540,83 @@ async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: 
 
     await cache.close()
     await http_client.aclose()
+
+
+def test_label_names_drug_ignores_product_descriptor_words():
+    """'oral', 'tablet', 'capsule' describe the product, not its name, and
+    appear verbatim in real openFDA brand names. They must not satisfy the
+    name guard, or the unfielded fallback re-admits unrelated labels."""
+    junk = DrugLabel(
+        openfda=OpenFDAData(
+            brand_name=["Childrens Allergy Oral Solution"],
+            generic_name=["DIPHENHYDRAMINE"],
+            substance_name=["DIPHENHYDRAMINE HYDROCHLORIDE"],
+        )
+    )
+    assert _label_names_drug(junk, "ibuprofen oral dosing pregnancy") is False
+
+    real = DrugLabel(
+        openfda=OpenFDAData(
+            brand_name=["MOTRIN IB"],
+            generic_name=["IBUPROFEN"],
+            substance_name=["IBUPROFEN"],
+        )
+    )
+    assert _label_names_drug(real, "ibuprofen oral dosing pregnancy") is True
+
+
+def test_label_names_drug_permissive_when_only_descriptor_words():
+    """If nothing name-bearing remains the guard stays permissive rather
+    than rejecting every label."""
+    drug = DrugLabel(openfda=OpenFDAData(brand_name=["ANYTHING"]))
+    assert _label_names_drug(drug, "oral tablet dosage") is True
+
+
+def test_name_clause_escapes_quotes():
+    """A quote inside the interpolated value would close the Lucene phrase
+    early and make the whole clause malformed."""
+    clause = _name_clause('ibuprofen "extra strength"')
+    assert clause.count('"') == 6
+    assert '\\"' not in clause
+
+
+@respx.mock
+async def test_search_drugs_quoted_query_does_not_error(tmp_path: Path):
+    """A query containing a double quote must not poison the whole call:
+    the malformed phrase used to 400 at api.fda.gov, which marked the search
+    errored and skipped the cache write even when other variants matched."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164")
+    )
+
+    try:
+        drugs, meta = await client.search_drugs('ibuprofen "extra strength"', limit=5)
+        assert meta.error is False
+        assert len(drugs) == 1
+        for call in respx.calls:
+            search = call.request.url.params.get("search", "")
+            assert search.count('"') % 2 == 0, f"unbalanced quotes: {search}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_request_budget_bounded(tmp_path: Path):
+    """Worst case — every variant returns nothing — must stay within
+    1 (full-query phrase) + 2 * MAX_NAME_CANDIDATES (context-refined and
+    name-only per candidate) + 1 (unfielded fallback) openFDA requests.
+    Symmetric with the L1 ladder budget pinned in test_guidelines.py."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(404, json={"error": {"code": "NOT_FOUND"}})
+
+    try:
+        drugs, _ = await client.search_drugs(
+            "ibuprofen naproxen aspirin pregnancy trimester", limit=10
+        )
+        assert drugs == []
+        assert len(respx.calls) <= 1 + 2 * MAX_NAME_CANDIDATES + 1
+    finally:
+        await cache.close()
+        await http_client.aclose()

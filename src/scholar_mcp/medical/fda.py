@@ -21,6 +21,11 @@ COMMON_DRUG_WORDS = {
     "injection",
     "dose",
     "dosage",
+    "label",
+    "ndc",
+    "fda",
+    "oral",
+    "mg",
 }
 
 PEDIATRIC_TERMS = ("pediatric", "child", "infant", "neonatal", "pediatric dosing")
@@ -49,6 +54,76 @@ def is_valid_drug_query(query: str) -> bool:
     return True
 
 
+def _query_tokens(query: str) -> list[str]:
+    """Meaningful tokens of a natural-language query: alphanumeric words of
+    length >= 3 with query stopwords removed. Shared by the drug-name filter
+    and the name-candidate extraction so both see the same tokens."""
+    return [
+        t.lower()
+        for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
+        if len(t) >= 3 and t.lower() not in _QUERY_STOPWORDS
+    ]
+
+
+MAX_NAME_CANDIDATES = 3
+
+
+def _name_tokens(query: str) -> list[str]:
+    """Query tokens that can plausibly name a drug: meaningful tokens minus
+    COMMON_DRUG_WORDS. Words like 'oral', 'tablet' or 'label' describe the
+    product, not the product's name, and they appear verbatim inside real
+    openFDA name fields ('Childrens Allergy Oral Solution'), so they must
+    not be treated as naming evidence."""
+    return [t for t in _query_tokens(query) if t not in COMMON_DRUG_WORDS]
+
+
+def _name_candidates(query: str) -> list[str]:
+    """Tokens plausibly naming a drug (generic, brand, or substance).
+    Capped at the first MAX_NAME_CANDIDATES to bound the number of fielded
+    requests issued per query (3 per candidate: full-quote + context-refined
+    + name-only, plus the unfielded fallback)."""
+    return _name_tokens(query)[:MAX_NAME_CANDIDATES]
+
+
+def _sanitize_phrase(value: str) -> str:
+    """Strip the characters that would break out of an Elasticsearch quoted
+    phrase. An unescaped double quote closes the phrase early and makes the
+    whole clause malformed, which api.fda.gov answers with a 400 — that in
+    turn marks the entire search errored and suppresses the cache write even
+    when the other ladder variants matched."""
+    return " ".join(value.replace('"', " ").replace("\\", " ").split())
+
+
+def _name_clause(candidate: str) -> str:
+    """One Elasticsearch clause covering all three openFDA name fields.
+    Verified live: returns only labels whose generic/brand/substance name
+    is the candidate (e.g. only IBUPROFEN labels for 'ibuprofen')."""
+    c = _sanitize_phrase(candidate).lower()
+    return (
+        f'(openfda.generic_name:"{c}" OR openfda.brand_name:"{c}" '
+        f'OR openfda.substance_name:"{c}")'
+    )
+
+
+_CONTEXT_FIELDS = (
+    "use_in_specific_populations",
+    "warnings",
+    "warnings_and_cautions",
+    "contraindications",
+    "precautions",
+    "boxed_warning",
+)
+
+
+def _context_clause(terms: list[str]) -> str:
+    """OR over the safety sections for the query's context terms. Multiple
+    fields are required because a term can miss one section and hit another
+    (e.g. 'warnings:trimester' 404s while
+    'use_in_specific_populations:trimester' matches)."""
+    parts = [f"{field}:{term}" for term in terms for field in _CONTEXT_FIELDS]
+    return "(" + " OR ".join(parts) + ")"
+
+
 def _label_names_drug(drug: DrugLabel, query: str) -> bool:
     """True when any of the query's meaningful tokens appears as a whole word
     in the drug's brand_name, generic_name, or substance_name. Used to filter
@@ -59,13 +134,12 @@ def _label_names_drug(drug: DrugLabel, query: str) -> bool:
     Stopwords and tokens shorter than 3 characters are ignored — a query like
     "What is the dose of aspirin" must not have its lead tokens "what", "is",
     "the" substring-match almost any name field ("the" matches THEOPHYLLINE).
+    Product-descriptor words are dropped as well: 'oral' whole-word matches
+    brand names such as "Childrens Allergy Oral Solution", so keeping it
+    would let unrelated labels satisfy the guard.
     If nothing signal-bearing remains, the filter is permissive (True).
     """
-    tokens = [
-        t.lower()
-        for t in re.findall(r"[A-Za-z][A-Za-z0-9-]+", query)
-        if len(t) >= 3 and t.lower() not in _QUERY_STOPWORDS
-    ]
+    tokens = _name_tokens(query)
     if not tokens:
         return True
     ofd = drug.openfda
@@ -148,21 +222,35 @@ class FDAClient:
         if not is_valid_drug_query(query):
             return [], CacheMetadata(cached=False, cache_age=0)
 
-        cache_key = f"fda:search:{query}:{limit}"
+        cache_key = f"fda:search:v2:{query}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [DrugLabel.from_dict(d) for d in cached_data], meta
 
-        search_queries = [
-            f'openfda.brand_name:"{query}"',
-            f'openfda.generic_name:"{query}"',
-            f'openfda.substance_name:"{query}"',
-            f"openfda.brand_name:{query}",
-            # Unfielded full-text fallback: a multi-word query can never match
-            # a field-restricted quoted phrase, but api.fda.gov's plain search
-            # still finds the label (e.g. "ibuprofen dosing children").
-            query,
-        ]
+        # Variant ladder, strictly precision-ordered:
+        #   1. the whole query as a quoted name phrase — handles single-word
+        #      queries and real multi-word drug names ("ibuprofen and
+        #      famotidine");
+        #   2. per name candidate: the candidate's name clause ANDed with a
+        #      context clause over the remaining tokens — picks *which* label
+        #      of the drug;
+        #   3. per name candidate: the candidate's name clause alone;
+        #   4. the raw query, unfielded — last-resort full-text fallback,
+        #      guarded by _label_names_drug.
+        candidates = _name_candidates(query)
+        # Context terms drop COMMON_DRUG_WORDS — those describe the product
+        # (label, fda, mg, oral), not what the label is about, so they hit
+        # every label whose body has the relevant section and defeat the
+        # context filter.
+        context_pool = _name_tokens(query)
+        search_queries: list[str] = [_name_clause(query)]
+        for cand in candidates:
+            context_terms = [t for t in context_pool if t != cand]
+            if context_terms:
+                search_queries.append(f"{_name_clause(cand)} AND {_context_clause(context_terms)}")
+        for cand in candidates:
+            search_queries.append(_name_clause(cand))
+        search_queries.append(_sanitize_phrase(query))
 
         all_results: list[DrugLabel] = []
         seen_ndcs: set[str] = set()
@@ -185,14 +273,15 @@ class FDAClient:
                 results = data.get("results", [])
                 for raw in results:
                     drug = _parse_drug_label(raw)
-                    # The unfielded full-text variant can match any label
-                    # whose body happens to contain every word of a multi-
-                    # word query (e.g. SILICEA matching "ibuprofen pediatric
-                    # dosing children" on "pediatric" + "dosage" + "children"
-                    # in the label text). The lead token of the query is
-                    # the drug name the user is actually looking for; drop
-                    # any result that does not name it.
-                    if sq == query and not _label_names_drug(drug, query):
+                    # Every variant's results are name-filtered, including
+                    # the fielded ones. Variant 1 of the ladder is
+                    # _name_clause(query) — the full multi-word query as a
+                    # single quoted name phrase — which has no fielded-name
+                    # guarantee, and an Elasticsearch quirk or upstream
+                    # change can surface unrelated labels from any variant.
+                    # Filtering once, for all variants, is the only place
+                    # we can reject them.
+                    if not _label_names_drug(drug, query):
                         continue
                     ndc = drug.openfda.product_ndc[0] if drug.openfda.product_ndc else None
                     if ndc:
