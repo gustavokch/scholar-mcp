@@ -295,3 +295,21 @@ async def test_search_guidelines_partial_failure_is_not_cached(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        page_items = [_iris_item(handle=f"10665/{700 + i}") for i in range(100)]
+        route = respx.get(IRIS_BROWSE_TITLE_URL).respond(
+            json=_browse_page(page_items, total_pages=999, total_elements=99900)
+        )
+
+        guidelines, _meta = await engine.search_guidelines("guideline", limit=10_000, mode="prefix")
+
+        assert route.call_count == 2  # clamped to 200 items: pages 0 and 1 only
+        assert len(guidelines) == 200
+    finally:
+        await cache.close()
+        await http_client.aclose()

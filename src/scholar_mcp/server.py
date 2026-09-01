@@ -28,7 +28,7 @@ from scholar_mcp.medical.formatters import (
 )
 from scholar_mcp.medical.guidelines import GuidelinesEngine
 from scholar_mcp.medical.pediatrics import PediatricsEngine
-from scholar_mcp.medical.who_iris import WHOIRISEngine
+from scholar_mcp.medical.who_iris import MAX_RESULTS, WHOIRISEngine
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.medical.rxnorm import RxNormClient
 from scholar_mcp.medical.who import WHOClient
@@ -538,7 +538,7 @@ if settings.enable_medical_tools:
             limit: Maximum number of results to return (max 200).
             mode: 'prefix' (title-starts-with browse, default) or 'fulltext' (discovery search).
         """
-        clamped = min(max(1, limit), 200)
+        clamped = min(max(1, limit), MAX_RESULTS)
         try:
             guidelines, meta = await who_iris_engine.search_guidelines(query, limit=clamped, mode=mode)
             return format_who_iris_guidelines(guidelines, query, meta)

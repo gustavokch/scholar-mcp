@@ -12,6 +12,7 @@ IRIS_SEARCH_URL = f"{IRIS_API_BASE}/discover/search/objects"
 IRIS_HANDLE_BASE = "https://iris.who.int/handle"
 IRIS_ITEM_TYPE_FILTER = "f.itemtype=Publications,equals"
 MAX_PAGE_SIZE = 100
+MAX_RESULTS = 200
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,10 @@ class WHOIRISEngine:
         limit: int = 10,
         mode: str = "prefix",
     ) -> tuple[list[WHOGuideline], CacheMetadata]:
+        # Clamp inside the engine too: the tool boundary clamp must not be the
+        # only guard, or a direct call with a huge limit pages through the
+        # whole repository.
+        limit = min(max(1, limit), MAX_RESULTS)
         normalized = query.strip().lower()
         cache_key = f"who_iris:{mode}:{normalized}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
