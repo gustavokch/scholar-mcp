@@ -382,6 +382,102 @@ async def test_search_drugs_does_not_cache_partial_result_on_variant_error(tmp_p
 
 
 @respx.mock
+async def test_search_drugs_multiword_query_drops_unrelated_labels(tmp_path: Path):
+    """Reproduces the live defect: the sentence query 'ibuprofen pregnancy
+    third trimester FDA label' used to hit the unquoted/unfielded variants
+    and return SILICEA-class junk. Every route here serves a label that does
+    not name any query token, so the only correct answer is []."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("SILICEA", "SILICEA", ndc="12345-001")
+    )
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "ibuprofen pregnancy third trimester FDA label", limit=5
+        )
+        assert drugs == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_never_issues_unquoted_field_variant(tmp_path: Path):
+    """The unquoted variant `openfda.brand_name:{query}` lets Elasticsearch
+    bind the field to the first term only; the rest become unfielded OR
+    terms — provably identical to the unfielded fallback while bypassing the
+    drug-name guard. It must never be sent."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("SILICEA", "SILICEA", ndc="12345-001")
+    )
+
+    query = "ibuprofen pregnancy third trimester FDA label"
+    try:
+        await client.search_drugs(query, limit=5)
+
+        bad = f"openfda.brand_name:{query}"
+        for call in respx.calls:
+            assert call.request.url.params.get("search", "") != bad
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_resolves_drug_name_from_natural_language(tmp_path: Path):
+    """A sentence query must produce a quoted, fielded request for the drug
+    token (openfda.generic_name:"ibuprofen"), not just unfielded noise."""
+    client, cache, http_client = await _make_client(tmp_path)
+    respx.get(FDA_URL).respond(
+        json=_label_payload("ADVIL", generic="IBUPROFEN", ndc="0573-0164")
+    )
+
+    try:
+        await client.search_drugs("ibuprofen pregnancy third trimester FDA label", limit=5)
+
+        searches = [c.request.url.params.get("search", "") for c in respx.calls]
+        assert any('openfda.generic_name:"ibuprofen"' in s for s in searches)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drugs_context_refinement_falls_back_on_404(tmp_path: Path):
+    """The context-refined variant (name AND context terms) may 404 when no
+    label of the drug mentions the context words; the plain name clause must
+    then still return the label."""
+    client, cache, http_client = await _make_client(tmp_path)
+
+    def _fda_router(request: httpx.Request) -> httpx.Response:
+        search = request.url.params.get("search", "")
+        if "trimester" in search:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+        if 'openfda.generic_name:"ibuprofen"' in search:
+            return httpx.Response(
+                200,
+                json=_label_payload("MOTRIN IB", generic="IBUPROFEN", ndc="0573-0164"),
+            )
+        return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+
+    respx.get(FDA_URL).mock(side_effect=_fda_router)
+
+    try:
+        drugs, meta = await client.search_drugs(
+            "ibuprofen third trimester pregnancy", limit=5
+        )
+        assert len(drugs) == 1
+        assert drugs[0].openfda.generic_name == ["IBUPROFEN"]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: Path):
     """A 404 with a non-JSON body (proxy/CDN error page) is still
     'no such label' — the body must not be parsed, and the result must not

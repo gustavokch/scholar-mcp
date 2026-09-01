@@ -54,6 +54,28 @@ ORG_ABBREVIATIONS = {
 
 MIN_SCORE_THRESHOLD = 2.5
 LAYER_THRESHOLD = 5
+MAX_RELAXATION_STEPS = 3
+
+
+def _relaxed_queries(query: str) -> list[str]:
+    """Ladder of successively relaxed variants of a natural-language query:
+    the full query, then the trailing token dropped each step, floored at
+    2 tokens and at most MAX_RELAXATION_STEPS relaxation steps (NCBI allows
+    3 req/s unauthenticated, so the extra requests must stay bounded).
+
+    PubMed ANDs every term, so a long query is over-constrained — measured
+    on live esearch, 'NSAIDs third trimester pregnancy contraindications'
+    plus the publication-type filter returns 0 hits while its 4-token prefix
+    returns 1 and its 2-token prefix returns 15.
+    """
+    words = query.split()
+    ladder = [query] if words else []
+    for _ in range(MAX_RELAXATION_STEPS):
+        if len(words) <= 2:
+            break
+        words = words[:-1]
+        ladder.append(" ".join(words))
+    return ladder
 
 
 def extract_organization(article: MedicalArticle) -> str:
@@ -81,8 +103,9 @@ def extract_organization(article: MedicalArticle) -> str:
 def calculate_guideline_score(
     article: MedicalArticle,
     has_publication_type: bool,
+    from_keyword_layer: bool = False,
 ) -> GuidelineScore:
-    pub_score = 2.0 if has_publication_type else 0.0
+    pub_score = 2.0 if has_publication_type else (1.0 if from_keyword_layer else 0.0)
 
     title_lower = article.title.lower() if article.title else ""
     title_score = 1.0 if any(kw in title_lower for kw in GUIDELINE_KEYWORDS) else 0.0
@@ -142,47 +165,76 @@ class GuidelinesEngine:
         query: str,
         organization: str | None = None,
     ) -> tuple[list[ClinicalGuideline], CacheMetadata]:
-        cache_key = f"guidelines:{query}:{organization}"
+        cache_key = f"guidelines:v2:{query}:{organization}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [ClinicalGuideline.from_dict(d) for d in cached_data], meta
 
-        # Layer 1: Search with formal publication type filters
+        # Layer 1: Search with formal publication type filters, relaxed down
+        # the ladder while the query keeps over-constraining PubMed to too
+        # few results. Results accumulate across ladder steps.
         pt_query = " OR ".join(GUIDELINE_PUBLICATION_TYPES)
-        l1_query = f"({query}) AND ({pt_query})"
-        articles_l1, meta_l1 = await self.pubmed.search_articles(l1_query, max_results=20)
-        errored = meta_l1.error
+        articles_l1: list[MedicalArticle] = []
+        errored = False
+        for q in _relaxed_queries(query):
+            articles_step, meta_step = await self.pubmed.search_articles(
+                f"({q}) AND ({pt_query})", max_results=20
+            )
+            errored = errored or meta_step.error
+            if meta_step.error:
+                # A fetch failure is not a zero-hit: relaxing further would
+                # mistake a transport error for an over-constrained query.
+                break
+            articles_l1.extend(articles_step)
+            if len(articles_l1) >= LAYER_THRESHOLD:
+                break
 
-        candidates: list[tuple[MedicalArticle, bool]] = [(a, True) for a in articles_l1]
+        candidates: list[tuple[MedicalArticle, bool, bool]] = [
+            (a, True, False) for a in articles_l1
+        ]
         seen_pmids = {a.pmid for a in articles_l1 if a.pmid}
 
         # Layer 2: Semantic keyword fallback if Layer 1 returned few results
         if len(candidates) < LAYER_THRESHOLD:
             kw_terms = " OR ".join(f"{kw}[tiab]" for kw in GUIDELINE_KEYWORDS[:5])
-            l2_query = f"({query}) AND ({kw_terms})"
-            articles_l2, meta_l2 = await self.pubmed.search_articles(l2_query, max_results=20)
-            errored = errored or meta_l2.error
-            for a in articles_l2:
-                if a.pmid and a.pmid not in seen_pmids:
-                    seen_pmids.add(a.pmid)
-                    candidates.append((a, False))
+            for q in _relaxed_queries(query):
+                articles_l2, meta_l2 = await self.pubmed.search_articles(
+                    f"({q}) AND ({kw_terms})", max_results=20
+                )
+                errored = errored or meta_l2.error
+                if meta_l2.error:
+                    break
+                added = 0
+                for a in articles_l2:
+                    if a.pmid and a.pmid not in seen_pmids:
+                        seen_pmids.add(a.pmid)
+                        candidates.append((a, False, True))
+                        added += 1
+                # Layer 2 is the salvage fallback: unlike Layer 1 it stops at
+                # the first step that contributes anything — each extra step
+                # is another NCBI request at 3 req/s, and the scoring gate
+                # filters weak candidates regardless of which step found them.
+                if added:
+                    break
 
         # Filter by organization if specified
         if organization:
             aliases = resolve_organization_aliases(organization)
 
-            filtered_candidates: list[tuple[MedicalArticle, bool]] = []
-            for art, has_pub in candidates:
+            filtered_candidates: list[tuple[MedicalArticle, bool, bool]] = []
+            for art, has_pub, from_kw in candidates:
                 extracted_org = extract_organization(art).lower()
                 art_text = f"{extracted_org} {art.title.lower()} {art.abstract.lower()} {art.journal.lower()}"
                 if any(alias in art_text for alias in aliases):
-                    filtered_candidates.append((art, has_pub))
+                    filtered_candidates.append((art, has_pub, from_kw))
             candidates = filtered_candidates
 
         # Score and build guidelines
         guidelines: list[ClinicalGuideline] = []
-        for art, has_pub in candidates:
-            score = calculate_guideline_score(art, has_pub)
+        for art, has_pub, from_kw in candidates:
+            score = calculate_guideline_score(
+                art, has_pub, from_keyword_layer=from_kw
+            )
             if score.total >= MIN_SCORE_THRESHOLD:
                 url = art.url or (f"https://pubmed.ncbi.nlm.nih.gov/{art.pmid}/" if art.pmid else "")
                 desc = (art.abstract or "")[:300]
