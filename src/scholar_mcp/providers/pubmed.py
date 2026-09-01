@@ -222,9 +222,19 @@ class PubMedProvider:
                     venue = journal_elem.get_text(" ", strip=True)
 
             doi = ids.doi
+            # The article's own DOI lives in PubmedData/ArticleIdList. Each
+            # cited reference under ReferenceList also carries an
+            # ArticleIdList, and taking the last <ArticleId IdType="doi">
+            # document-wide returns a cited reference's DOI instead of the
+            # record's (observed live: PMID 39770434 returned the DOI of a
+            # 2015 reference it cites). Skip anything nested in a Reference.
             for aid in article.find_all("ArticleId"):
-                if aid.get("IdType") == "doi":
-                    doi = aid.get_text(" ", strip=True)
+                if aid.get("IdType") != "doi":
+                    continue
+                if any(parent.name == "Reference" for parent in aid.parents):
+                    continue
+                doi = aid.get_text(" ", strip=True) or doi
+                break
 
             return PaperMetadata(
                 title=title,

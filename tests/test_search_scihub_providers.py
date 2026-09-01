@@ -253,3 +253,60 @@ async def test_pubmed_fetch_abstract_structured_labels(client):
     assert "RESULTS: Survival improved significantly." in meta.abstract
     assert "CONCLUSIONS: Treatment was effective." in meta.abstract
 
+
+@respx.mock
+async def test_pubmed_fetch_abstract_ignores_reference_list_dois(client):
+    """The EFetch document nests one ArticleIdList per cited reference under
+    ReferenceList. The article's own DOI must come from the record's own
+    ArticleIdList/ELocationID, never from a cited reference."""
+    efetch_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>39770434</PMID>
+      <Article>
+        <Journal><Title>Pharmaceuticals</Title></Journal>
+        <ELocationID EIdType="doi" ValidYN="Y">10.3390/ph17121592</ELocationID>
+        <ArticleTitle>Do Major Pharmacovigilance Databases Support Evidence of \
+Fetotoxicity?</ArticleTitle>
+        <Abstract><AbstractText>NSAIDs are fetotoxic.</AbstractText></Abstract>
+        <AuthorList>
+          <Author><LastName>Dathe</LastName><ForeName>Katarina</ForeName></Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">39770434</ArticleId>
+        <ArticleId IdType="doi">10.3390/ph17121592</ArticleId>
+        <ArticleId IdType="pmc">PMC11676342</ArticleId>
+      </ArticleIdList>
+      <ReferenceList>
+        <Reference>
+          <Citation>Earlier related work (2015)</Citation>
+          <ArticleIdList>
+            <ArticleId IdType="pubmed">25645319</ArticleId>
+            <ArticleId IdType="doi">10.1007/s00404-015-3648-7</ArticleId>
+          </ArticleIdList>
+        </Reference>
+        <Reference>
+          <Citation>Another cited paper (2014)</Citation>
+          <ArticleIdList>
+            <ArticleId IdType="doi">10.1111/1471-0528.12653</ArticleId>
+          </ArticleIdList>
+        </Reference>
+      </ReferenceList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>"""
+
+    respx.get(url__startswith="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=efetch_xml)
+    )
+
+    provider = PubMedProvider(client, Settings())
+    meta = await provider.fetch_abstract(IdentifierMap(pmid="39770434"))
+
+    assert meta is not None
+    assert meta.doi == "10.3390/ph17121592"
+
