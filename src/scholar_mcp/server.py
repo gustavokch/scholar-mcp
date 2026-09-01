@@ -28,10 +28,10 @@ from scholar_mcp.medical.formatters import (
 )
 from scholar_mcp.medical.guidelines import GuidelinesEngine
 from scholar_mcp.medical.pediatrics import PediatricsEngine
-from scholar_mcp.medical.who_iris import MAX_RESULTS, WHOIRISEngine
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.medical.rxnorm import RxNormClient
 from scholar_mcp.medical.who import WHOClient
+from scholar_mcp.medical.who_iris import MAX_RESULTS, WHOIRISEngine
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
 settings = Settings.load()
