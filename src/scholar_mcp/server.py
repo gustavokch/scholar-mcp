@@ -546,6 +546,29 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "who-iris"}
 
     @mcp.tool()
+    async def get_who_iris_full_text(
+        handle: str,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve full text of a WHO IRIS guideline by handle.
+
+        Downloads the item's primary PDF from the WHO IRIS repository and extracts
+        its text. Falls back to the item abstract when no PDF is available.
+
+        Args:
+            handle: IRIS handle — bare ("10665/311551"), "hdl:"-prefixed, or the
+                full landing-page URL. Handles are returned by
+                search_who_iris_guidelines as `handle`.
+            max_chars: Maximum character limit for the returned text (defaults to 50,000).
+        """
+        try:
+            payload, meta = await who_iris_engine.get_full_text(handle, max_chars=max_chars)
+            payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
+            return payload
+        except Exception as ex:
+            return {"status": "error", "error": str(ex), "source": "who-iris", "content": ""}
+
+    @mcp.tool()
     async def search_medical_databases(query: str) -> dict[str, Any]:
         """Search across PubMed, ClinicalTrials.gov, and Cochrane Library with cross-database deduplication.
 

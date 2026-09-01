@@ -17,6 +17,7 @@ MEDICAL_TOOLS = {
     "search_aap_guidelines",
     "search_pediatric_literature",
     "search_who_iris_guidelines",
+    "get_who_iris_full_text",
     "search_medical_databases",
     "search_medical_journals",
     "get_medical_cache_stats",
