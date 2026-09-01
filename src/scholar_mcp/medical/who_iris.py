@@ -90,6 +90,7 @@ def _normalize_handle(handle: str) -> str:
     h = handle.strip()
     if "/handle/" in h:
         h = h.split("/handle/", 1)[1]
+    h = h.split("?", 1)[0].split("#", 1)[0]
     if h.lower().startswith("hdl:"):
         h = h[4:]
     return h.strip("/")

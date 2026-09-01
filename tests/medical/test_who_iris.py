@@ -588,3 +588,22 @@ async def test_get_full_text_requests_full_page_size(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_strips_query_and_fragment(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([]))
+        for raw, normalized in (
+            ("https://iris.who.int/handle/10665/311555?show=full", "10665/311555"),
+            ("hdl:10665/311556#abstract", "10665/311556"),
+        ):
+            route.calls.clear()
+            payload, _ = await engine.get_full_text(raw)
+            assert payload["handle"] == normalized
+            assert route.calls[0].request.url.params["id"] == f"hdl:{normalized}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
