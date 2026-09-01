@@ -568,3 +568,23 @@ async def test_get_full_text_truncates_served_content_not_cached(tmp_path: Path,
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_requests_full_page_size(tmp_path: Path):
+    """Bundles/bitstreams lists must request the full DSpace page size, not the default 20."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        bundles_route = respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle()]))
+        bits_route = respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream(mime="text/html", name="index.html")]))
+        payload, meta = await engine.get_full_text("10665/311554")
+        assert payload["content_type"] == "abstract"
+        assert meta.error is False
+        assert bundles_route.calls[0].request.url.params["size"] == "100"
+        assert bits_route.calls[0].request.url.params["size"] == "100"
+    finally:
+        await cache.close()
+        await http_client.aclose()

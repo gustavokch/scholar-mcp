@@ -267,6 +267,7 @@ class WHOIRISEngine:
         try:
             bundles_resp = await self.http_client.get(
                 f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles",
+                params={"size": str(MAX_PAGE_SIZE)},
                 headers={"Accept": "application/json"},
             )
             if bundles_resp is None:
@@ -278,6 +279,7 @@ class WHOIRISEngine:
 
             bits_resp = await self.http_client.get(
                 f"{IRIS_BUNDLE_BITSTREAMS_URL}/{original.get('uuid')}/bitstreams",
+                params={"size": str(MAX_PAGE_SIZE)},
                 headers={"Accept": "application/json"},
             )
             if bits_resp is None:
