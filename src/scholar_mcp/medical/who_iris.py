@@ -10,7 +10,7 @@ IRIS_API_BASE = "https://iris.who.int/server/api"
 IRIS_BROWSE_TITLE_URL = f"{IRIS_API_BASE}/discover/browses/title/items"
 IRIS_SEARCH_URL = f"{IRIS_API_BASE}/discover/search/objects"
 IRIS_HANDLE_BASE = "https://iris.who.int/handle"
-IRIS_ITEM_TYPE_FILTER = "f.itemtype=Publications,equals"
+IRIS_ITEM_TYPE_FILTER = "Publications,equals"
 MAX_PAGE_SIZE = 100
 MAX_RESULTS = 200
 
@@ -74,7 +74,7 @@ def _build_record(item: dict[str, Any]) -> WHOGuideline:
         spatial_coverage=_all_meta(metadata, "dc.coverage.spatial"),
         isbn=_first_meta(metadata, "dc.identifier.isbn"),
         publisher=_first_meta(metadata, "dc.publisher"),
-        item_type="Publications",
+        item_type=_first_meta(metadata, "dc.type"),
     )
 
 
@@ -148,11 +148,14 @@ class WHOIRISEngine:
 
         if mode == "fulltext":
             url = IRIS_SEARCH_URL
-            params = {"query": query.strip(), "f.itemtype": "Publications,equals"}
+            params = {"query": query.strip(), "f.itemtype": IRIS_ITEM_TYPE_FILTER}
             extract = _extract_search_page
         else:
             url = IRIS_BROWSE_TITLE_URL
-            params = {"startsWith": query.strip(), "filter": IRIS_ITEM_TYPE_FILTER}
+            # No item-type filter here: the browse endpoint ignores it (the
+            # search endpoint's f.itemtype is honoured). Item type is derived
+            # from dc.type metadata instead.
+            params = {"startsWith": query.strip()}
             extract = _extract_browse_page
 
         raw_items, errored = await self._fetch_paginated(url, params, extract, limit)

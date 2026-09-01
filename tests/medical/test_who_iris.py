@@ -58,9 +58,15 @@ def _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supple
 async def test_search_guidelines_prefix_mode_parses_item(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
-        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([_iris_item()]))
+        route = respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([_iris_item()]))
 
         guidelines, meta = await engine.search_guidelines("guideline", limit=10, mode="prefix")
+
+        request_params = route.calls[0].request.url.params
+        assert request_params["startsWith"] == "guideline"
+        assert request_params["size"] == "10"
+        assert request_params["page"] == "0"
+        assert "filter" not in request_params  # the browse endpoint ignores it
 
         assert len(guidelines) == 1
         g = guidelines[0]
@@ -73,6 +79,7 @@ async def test_search_guidelines_prefix_mode_parses_item(tmp_path: Path):
         assert g.mesh_subjects == ["Vitamin A", "Infant, Newborn"]
         assert g.isbn == "9789241547965"
         assert g.source == "who-iris"
+        assert g.item_type == ""  # browse payloads carry no dc.type to read
         assert meta.error is False
     finally:
         await cache.close()
@@ -209,10 +216,13 @@ def _search_page(items, page=0, total_pages=1, total_elements=None):
 async def test_search_guidelines_fulltext_mode_parses_item(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
-        respx.get(IRIS_SEARCH_URL).respond(json=_search_page([_iris_item()]))
+        route = respx.get(IRIS_SEARCH_URL).respond(json=_search_page([_iris_item()]))
 
         guidelines, meta = await engine.search_guidelines("vitamin A", limit=10, mode="fulltext")
 
+        request_params = route.calls[0].request.url.params
+        assert request_params["query"] == "vitamin A"
+        assert request_params["f.itemtype"] == "Publications,equals"  # this endpoint honours it
         assert len(guidelines) == 1
         assert guidelines[0].title == "Guideline: neonatal vitamin A supplementation"
         assert meta.error is False
