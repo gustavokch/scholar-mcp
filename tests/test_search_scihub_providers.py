@@ -309,4 +309,92 @@ Fetotoxicity?</ArticleTitle>
 
     assert meta is not None
     assert meta.doi == "10.3390/ph17121592"
+    assert meta.doi != "10.1007/s00404-015-3648-7"
+    assert meta.doi != "10.1111/1471-0528.12653"
+
+
+def _efetch_xml(article_ids: str, elocation: str = "", reference_ids: str = "") -> str:
+    """Build a minimal one-record EFetch document.
+
+    ``article_ids`` populates the record's own PubmedData/ArticleIdList,
+    ``reference_ids`` populates a single cited reference's ArticleIdList.
+    """
+    references = ""
+    if reference_ids:
+        references = f"""
+      <ReferenceList>
+        <Reference>
+          <Citation>Cited work</Citation>
+          <ArticleIdList>{reference_ids}</ArticleIdList>
+        </Reference>
+      </ReferenceList>"""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>39770434</PMID>
+      <Article>
+        <Journal><Title>Pharmaceuticals</Title></Journal>{elocation}
+        <ArticleTitle>Do Major Pharmacovigilance Databases Support Evidence?</ArticleTitle>
+        <Abstract><AbstractText>NSAIDs are fetotoxic.</AbstractText></Abstract>
+        <AuthorList>
+          <Author><LastName>Dathe</LastName><ForeName>Katarina</ForeName></Author>
+        </AuthorList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>{article_ids}</ArticleIdList>{references}
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>"""
+
+
+def _mock_efetch(xml: str) -> None:
+    respx.get(url__startswith="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi").mock(
+        return_value=httpx.Response(200, text=xml)
+    )
+
+
+@respx.mock
+async def test_pubmed_fetch_abstract_uses_elocationid_when_no_own_doi_id(client):
+    """Some records carry the DOI only in Article/ELocationID. The record's own
+    ArticleIdList then holds no doi entry, and the DOI must still be found there
+    rather than falling through to a cited reference or to nothing."""
+    _mock_efetch(
+        _efetch_xml(
+            article_ids=(
+                '<ArticleId IdType="pubmed">39770434</ArticleId>'
+                '<ArticleId IdType="pii">ph17121592</ArticleId>'
+            ),
+            elocation='<ELocationID EIdType="doi" ValidYN="Y">10.3390/ph17121592</ELocationID>',
+            reference_ids='<ArticleId IdType="doi">10.1007/s00404-015-3648-7</ArticleId>',
+        )
+    )
+
+    provider = PubMedProvider(client, Settings())
+    meta = await provider.fetch_abstract(IdentifierMap(pmid="39770434"))
+
+    assert meta is not None
+    assert meta.doi == "10.3390/ph17121592"
+
+
+@respx.mock
+async def test_pubmed_fetch_abstract_skips_empty_own_doi_id(client):
+    """An empty <ArticleId IdType="doi"/> in the record's own list must not end
+    the scan; a later non-empty own entry is still the record's DOI."""
+    _mock_efetch(
+        _efetch_xml(
+            article_ids=(
+                '<ArticleId IdType="doi"></ArticleId>'
+                '<ArticleId IdType="doi">10.3390/ph17121592</ArticleId>'
+            ),
+            reference_ids='<ArticleId IdType="doi">10.1007/s00404-015-3648-7</ArticleId>',
+        )
+    )
+
+    provider = PubMedProvider(client, Settings())
+    meta = await provider.fetch_abstract(IdentifierMap(pmid="39770434"))
+
+    assert meta is not None
+    assert meta.doi == "10.3390/ph17121592"
 

@@ -144,6 +144,32 @@ class PubMedProvider:
         except Exception:
             return []
 
+    @staticmethod
+    def _own_article_id(article: Any, id_type: str) -> str:
+        """Return the record's own ArticleId of ``id_type``, or "" if absent.
+
+        A record's identifiers live in the ArticleIdList that is a direct child
+        of PubmedData. Every cited reference under ReferenceList carries its own
+        nested ArticleIdList, so a document-wide scan picks up a cited
+        reference's identifier instead of the record's (observed live: PMID
+        39770434 yielded the DOI of a 2015 paper it cites). Selecting only the
+        direct child cannot reach a nested list, whatever containers NCBI adds
+        later. Empty elements are skipped rather than ending the scan.
+        """
+        pubmed_data = article.find("PubmedData")
+        if pubmed_data is None:
+            return ""
+        id_list = pubmed_data.find("ArticleIdList", recursive=False)
+        if id_list is None:
+            return ""
+        for aid in id_list.find_all("ArticleId", recursive=False):
+            if aid.get("IdType") != id_type:
+                continue
+            value = aid.get_text(" ", strip=True)
+            if value:
+                return value
+        return ""
+
     async def fetch_abstract(self, ids: IdentifierMap) -> PaperMetadata | None:
         """Fetch abstract and metadata for paper via PubMed efetch."""
         pmid = ids.pmid
@@ -221,20 +247,21 @@ class PubMedProvider:
                 if journal_elem is not None:
                     venue = journal_elem.get_text(" ", strip=True)
 
-            doi = ids.doi
-            # The article's own DOI lives in PubmedData/ArticleIdList. Each
-            # cited reference under ReferenceList also carries an
-            # ArticleIdList, and taking the last <ArticleId IdType="doi">
-            # document-wide returns a cited reference's DOI instead of the
-            # record's (observed live: PMID 39770434 returned the DOI of a
-            # 2015 reference it cites). Skip anything nested in a Reference.
-            for aid in article.find_all("ArticleId"):
-                if aid.get("IdType") != "doi":
-                    continue
-                if any(parent.name == "Reference" for parent in aid.parents):
-                    continue
-                doi = aid.get_text(" ", strip=True) or doi
-                break
+            # A record states its own DOI in PubmedData/ArticleIdList, or, when
+            # that entry is absent, in Article/ELocationID. Both are the
+            # record's own claim; ids.doi is the caller's echo and applies only
+            # when the record states neither.
+            doi = self._own_article_id(article, "doi")
+            if not doi:
+                article_elem = article.find("Article")
+                elocation = (
+                    article_elem.find("ELocationID", attrs={"EIdType": "doi"})
+                    if article_elem is not None
+                    else None
+                )
+                if elocation is not None:
+                    doi = elocation.get_text(" ", strip=True)
+            doi = doi or ids.doi
 
             return PaperMetadata(
                 title=title,
