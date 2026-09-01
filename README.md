@@ -229,11 +229,12 @@ pip install 'scholar-mcp[medical]'
 | `search_drug_nomenclature` | RxNav | Search standardized RxNorm drug concepts, synonyms, RxCUIs, and UMLS CUIs. |
 | `get_health_statistics` | WHO GHO | Query global and country-specific health indicators with synonym expansion. |
 | `get_child_health_statistics` | WHO GHO | Retrieve pediatric and infant health metrics from WHO GHO. |
-| `search_clinical_guidelines` | PubMed | Search PubMed for clinical practice guidelines with heuristic relevance scoring. |
+| `search_clinical_guidelines` | PubMed | Search PubMed for clinical practice guidelines with heuristic relevance scoring. Full text for these results is available through `get_full_text` using the returned `doi`, `pmid`, or `pmc_id`. |
 | `search_pediatric_guidelines` | Bright Futures / AAP Policy | Search pediatric clinical practice guidelines across AAP sources. |
 | `search_aap_guidelines` | Bright Futures & AAP | Concurrent search across AAP Bright Futures and Policy Statements with deduplication. |
 | `search_pediatric_literature` | PubMed | Targeted search across 7 premier pediatric medical journals. |
 | `search_who_iris_guidelines` | WHO IRIS | Search the WHO Institutional Repository for Information Sharing (DSpace JSON API) in title-prefix or full-text mode. |
+| `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
 | `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
