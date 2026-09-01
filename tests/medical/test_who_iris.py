@@ -565,6 +565,10 @@ async def test_get_full_text_truncates_served_content_not_cached(tmp_path: Path,
         second, meta2 = await engine.get_full_text("10665/311551", max_chars=100_000)
         assert meta2.cached is True
         assert len(second["content"]) == 100
+        # max_chars=0 is honored, not silently replaced by the default limit
+        zero, _ = await engine.get_full_text("10665/311551", max_chars=0)
+        assert zero["truncated"] is True
+        assert zero["content"].endswith("[... Truncated due to max_chars limit ...]")
     finally:
         await cache.close()
         await http_client.aclose()

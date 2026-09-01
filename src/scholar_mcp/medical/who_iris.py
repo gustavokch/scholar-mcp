@@ -310,7 +310,10 @@ class WHOIRISEngine:
     @staticmethod
     def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
         served = dict(payload)
-        content, truncated = truncate_content(served.get("content") or "", max_chars or MAX_FULL_TEXT_CHARS)
+        content, truncated = truncate_content(
+            served.get("content") or "",
+            MAX_FULL_TEXT_CHARS if max_chars is None else max_chars,
+        )
         served["content"] = content
         served["truncated"] = truncated
         return served
