@@ -6,6 +6,7 @@ from scholar_mcp.medical.models import (
     MedicalArticle,
     PediatricGuideline,
     RxNormDrug,
+    WHOGuideline,
     WHOIndicatorRecord,
 )
 from scholar_mcp.utils.sqlite_cache import CacheMetadata
@@ -253,3 +254,37 @@ def format_medical_articles(
 
     markdown = append_cache_info("\n".join(lines).strip(), meta)
     return {"data": [a.to_dict() for a in articles], "markdown": markdown}
+
+
+def format_who_iris_guidelines(
+    guidelines: list[WHOGuideline],
+    query: str,
+    meta: CacheMetadata,
+) -> dict[str, Any]:
+    lines = [f"## WHO IRIS Guidelines: {query}", ""]
+    if not guidelines:
+        lines.append(_empty_state(f"No WHO IRIS guidelines found for: {query}", meta))
+    else:
+        for g in guidelines:
+            lines.append(f"### {g.title}")
+            lines.append(f"- **Organization:** {g.organization}")
+            lines.append(f"- **Source:** {g.source}")
+            if g.year:
+                lines.append(f"- **Year:** {g.year}")
+            if g.authors:
+                lines.append(f"- **Authors:** {', '.join(g.authors)}")
+            if g.languages:
+                lines.append(f"- **Languages:** {', '.join(g.languages)}")
+            if g.mesh_subjects:
+                lines.append(f"- **MeSH:** {', '.join(g.mesh_subjects)}")
+            if g.spatial_coverage:
+                lines.append(f"- **Coverage:** {', '.join(g.spatial_coverage)}")
+            if g.url:
+                lines.append(f"- **URL:** {g.url}")
+            if g.description:
+                lines.append("")
+                lines.append(g.description)
+            lines.append("")
+
+    markdown = append_cache_info("\n".join(lines).strip(), meta)
+    return {"data": [g.to_dict() for g in guidelines], "markdown": markdown}
