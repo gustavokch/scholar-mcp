@@ -8,7 +8,20 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 CT_URL = "https://clinicaltrials.gov/api/v2/studies"
 
+# The ClinicalTrials.gov query parser rejects over-complex free-text queries
+# with HTTP 400 "Too complicated query"; ~13 plain terms is enough to trip it.
+# Agent-composed queries routinely exceed that, so cap the term count — the
+# cap only ever fires on queries the API would reject outright.
+CT_MAX_QUERY_TERMS = 10
+
 logger = logging.getLogger(__name__)
+
+
+def _cap_query_terms(query: str, max_terms: int = CT_MAX_QUERY_TERMS) -> str:
+    terms = query.split()
+    if len(terms) <= max_terms:
+        return query
+    return " ".join(terms[:max_terms])
 
 
 class ClinicalTrialsClient:
@@ -37,7 +50,7 @@ class ClinicalTrialsClient:
             resp = await self.http_client.get(
                 CT_URL,
                 params={
-                    "query.term": query,
+                    "query.term": _cap_query_terms(query),
                     "pageSize": str(limit),
                     "format": "json",
                 },

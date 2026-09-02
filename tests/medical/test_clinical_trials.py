@@ -97,3 +97,32 @@ async def test_search_clinical_trials_marks_error_on_fetch_failure(tmp_path: Pat
 
     await cache.close()
     await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_trials_caps_query_terms(tmp_path: Path):
+    # The ClinicalTrials.gov Essie parser rejects over-complex free-text
+    # queries with HTTP 400 ("Too complicated query"); ~13 plain terms is
+    # enough to trip it. The client must cap the outbound query instead of
+    # letting every long agent-composed query fail.
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+
+    respx.get(CT_URL).respond(json={"studies": []})
+
+    # The query from the field failure: 13 terms, parser rejects it verbatim.
+    articles, meta = await client.search_clinical_trials(
+        "ibuprofen pregnancy third trimester FDA pregnancy category D"
+        " premature ductus arteriosus closure oligohydramnios",
+        limit=10,
+    )
+
+    sent = respx.calls.last.request.url.params["query.term"]
+    assert sent == "ibuprofen pregnancy third trimester FDA pregnancy category D premature ductus"
+    assert meta.error is False
+    assert articles == []
+
+    await cache.close()
+    await http_client.aclose()
