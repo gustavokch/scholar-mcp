@@ -30,22 +30,7 @@ from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE, UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
-
-
-def _truncate_content(content: str, max_chars: int) -> tuple[str, bool]:
-    if len(content) <= max_chars:
-        return content, False
-
-    cutoff = max_chars
-    # Try finding paragraph boundary before cutoff
-    para_break = content.rfind("\n\n", 0, cutoff)
-    if para_break > int(cutoff * 0.7):
-        truncated_text = content[:para_break].rstrip()
-    else:
-        truncated_text = content[:cutoff].rstrip()
-
-    marker = "\n\n[... Truncated due to max_chars limit ...]"
-    return truncated_text + marker, True
+from scholar_mcp.utils.text import truncate_content as _truncate_content
 
 
 class WaterfallResolver:
