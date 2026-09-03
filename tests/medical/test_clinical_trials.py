@@ -3,12 +3,17 @@ from pathlib import Path
 import httpx
 import respx
 
+import pytest
+
 from scholar_mcp.config import Settings
-from scholar_mcp.medical.clinical_trials import ClinicalTrialsClient
+from scholar_mcp.medical.clinical_trials import (
+    CT_MAX_QUERY_TERMS,
+    CT_URL,
+    ClinicalTrialsClient,
+    _cap_query_terms,
+)
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
-
-CT_URL = "https://clinicaltrials.gov/api/v2/studies"
 
 
 @respx.mock
@@ -126,3 +131,24 @@ async def test_search_clinical_trials_caps_query_terms(tmp_path: Path):
 
     await cache.close()
     await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("input_query", "max_terms", "expected"),
+    [
+        ("", 10, ""),
+        ("   ", 10, ""),
+        ("asthma", 10, "asthma"),
+        ("one two three four five six seven eight nine ten", 10, "one two three four five six seven eight nine ten"),
+        ("one two three four five six seven eight nine ten eleven", 10, "one two three four five six seven eight nine ten"),
+        ('treatment "for hypertension and heart failure" in elderly patients', 4, 'treatment "for hypertension and"'),
+        ('"asthma', 10, '"asthma"'),
+        ('asthma "treatment', 10, 'asthma "treatment"'),
+        ('"asthma" and "copd"', 10, '"asthma" and "copd"'),
+        ("one two three", 0, ""),
+        ("one two three", -1, ""),
+    ],
+)
+def test_cap_query_terms_matrix(input_query: str, max_terms: int, expected: str):
+    assert _cap_query_terms(input_query, max_terms=max_terms) == expected
+

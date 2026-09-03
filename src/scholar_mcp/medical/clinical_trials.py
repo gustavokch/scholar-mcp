@@ -19,9 +19,16 @@ logger = logging.getLogger(__name__)
 
 def _cap_query_terms(query: str, max_terms: int = CT_MAX_QUERY_TERMS) -> str:
     terms = query.split()
+    if not terms or max_terms <= 0:
+        return ""
     if len(terms) <= max_terms:
-        return query
-    return " ".join(terms[:max_terms])
+        capped = query.strip()
+    else:
+        capped = " ".join(terms[:max_terms])
+
+    if capped.count('"') % 2 != 0:
+        capped += '"'
+    return capped
 
 
 class ClinicalTrialsClient:
