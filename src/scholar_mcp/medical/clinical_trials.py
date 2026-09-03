@@ -8,7 +8,34 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 CT_URL = "https://clinicaltrials.gov/api/v2/studies"
 
+# The ClinicalTrials.gov query parser rejects over-complex free-text queries
+# with HTTP 400 "Too complicated query"; ~13 plain terms is enough to trip it.
+# Agent-composed queries routinely exceed that, so cap the term count — the
+# cap only ever fires on queries the API would reject outright.
+CT_MAX_QUERY_TERMS = 10
+
 logger = logging.getLogger(__name__)
+
+
+def _cap_query_terms(query: str, max_terms: int = CT_MAX_QUERY_TERMS) -> str:
+    terms = query.split()
+    if not terms or max_terms <= 0:
+        return ""
+    if len(terms) <= max_terms:
+        capped = query.strip()
+    else:
+        # Truncation can strand a boolean connector at the end, which the
+        # Essie parser also rejects. Only strip on the truncation path —
+        # queries within the limit go out verbatim.
+        kept = terms[:max_terms]
+        # Essie operators are uppercase; lowercase "and"/"or" is content.
+        while kept and kept[-1] in {"AND", "OR", "NOT"}:
+            kept.pop()
+        capped = " ".join(kept)
+
+    if capped.count('"') % 2 != 0:
+        capped += '"'
+    return capped
 
 
 class ClinicalTrialsClient:
@@ -27,7 +54,8 @@ class ClinicalTrialsClient:
         query: str,
         limit: int = 10,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"clinical_trials:{query}:{limit}"
+        capped_query = _cap_query_terms(query)
+        cache_key = f"clinical_trials:{capped_query}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta
@@ -37,7 +65,7 @@ class ClinicalTrialsClient:
             resp = await self.http_client.get(
                 CT_URL,
                 params={
-                    "query.term": query,
+                    "query.term": capped_query,
                     "pageSize": str(limit),
                     "format": "json",
                 },
