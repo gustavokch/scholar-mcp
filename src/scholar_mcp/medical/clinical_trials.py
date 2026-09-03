@@ -47,7 +47,8 @@ class ClinicalTrialsClient:
         query: str,
         limit: int = 10,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"clinical_trials:{query}:{limit}"
+        capped_query = _cap_query_terms(query)
+        cache_key = f"clinical_trials:{capped_query}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta
@@ -57,7 +58,7 @@ class ClinicalTrialsClient:
             resp = await self.http_client.get(
                 CT_URL,
                 params={
-                    "query.term": _cap_query_terms(query),
+                    "query.term": capped_query,
                     "pageSize": str(limit),
                     "format": "json",
                 },
