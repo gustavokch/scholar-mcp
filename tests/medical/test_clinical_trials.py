@@ -1,9 +1,8 @@
 from pathlib import Path
 
 import httpx
-import respx
-
 import pytest
+import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.clinical_trials import (
@@ -192,6 +191,10 @@ async def test_search_clinical_trials_shares_cache_for_overlong_queries(tmp_path
         ('"asthma', 10, '"asthma"'),
         ('asthma "treatment', 10, 'asthma "treatment"'),
         ('"asthma" and "copd"', 10, '"asthma" and "copd"'),
+        ("one two three four five six seven eight nine ten AND more", 11, "one two three four five six seven eight nine ten"),
+        ("alpha OR beta", 2, "alpha"),
+        ("alpha AND NOT beta", 3, "alpha"),
+        ("alpha and beta", 2, "alpha and"),  # lowercase "and" is content, not an Essie operator
         ("one two three", 0, ""),
         ("one two three", -1, ""),
     ],

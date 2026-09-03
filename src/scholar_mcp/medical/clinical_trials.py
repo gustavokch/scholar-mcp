@@ -24,7 +24,14 @@ def _cap_query_terms(query: str, max_terms: int = CT_MAX_QUERY_TERMS) -> str:
     if len(terms) <= max_terms:
         capped = query.strip()
     else:
-        capped = " ".join(terms[:max_terms])
+        # Truncation can strand a boolean connector at the end, which the
+        # Essie parser also rejects. Only strip on the truncation path —
+        # queries within the limit go out verbatim.
+        kept = terms[:max_terms]
+        # Essie operators are uppercase; lowercase "and"/"or" is content.
+        while kept and kept[-1] in {"AND", "OR", "NOT"}:
+            kept.pop()
+        capped = " ".join(kept)
 
     if capped.count('"') % 2 != 0:
         capped += '"'
