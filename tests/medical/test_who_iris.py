@@ -694,3 +694,93 @@ async def test_search_guidelines_item_bitstream_error_does_not_fail_search(tmp_p
         await cache.close()
         await http_client.aclose()
 
+
+def make_multipage_pdf_bytes(pages_text: list[str]) -> bytes:
+    """Build real multi-page PDF bytes with extractable text via pypdf pages."""
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+    )
+
+    # In-memory Helvetica Type1 font shared by every page.
+    def _font_dict() -> DictionaryObject:
+        return DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+
+    # Fresh indirect font object per content stream PDF (stable object layout).
+    def _make_pdf_bytes(single_page_text: str) -> bytes:
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=300, height=300)
+        escaped = (
+            single_page_text.replace("\\", "\\\\")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+        )
+        stream = DecodedStreamObject()
+        stream.set_data(
+            f"BT /F1 12 Tf 20 150 Td ({escaped}) Tj ET".encode("latin-1")
+        )
+        font_ref = writer._add_object(_font_dict())
+        resources = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+        )
+        page[NameObject("/Resources")] = resources
+        page[NameObject("/Contents")] = writer._add_object(stream)
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    merged = PdfWriter()
+    for text in pages_text:
+        single = PdfReader(io.BytesIO(_make_pdf_bytes(text)))
+        merged.add_page(single.pages[0])
+    out = io.BytesIO()
+    merged.write(out)
+    return out.getvalue()
+
+
+@respx.mock
+async def test_get_full_text_returns_complete_multipage_pdf_and_pdf_url(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        page1 = "World Health Organization Clinical Management of Malaria 2023."
+        page2 = "Section 2: Recommended artemisinin-based combination therapies (ACTs)."
+        page3 = "Section 3: Special considerations for pregnant women and infants."
+        real_pdf_bytes = make_multipage_pdf_bytes([page1, page2, page3])
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item(handle="10665/311551"))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-uuid-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-malaria-pdf", name="who-malaria-guideline.pdf", size=len(real_pdf_bytes))
+            ])
+        )
+        content_route = respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-malaria-pdf/content").respond(
+            content=real_pdf_bytes, headers={"Content-Type": "application/pdf"}
+        )
+
+        payload, meta = await engine.get_full_text("10665/311551")
+
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "pdf"
+        assert payload["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-malaria-pdf/content"
+        # Verify text from all 3 pages is extracted into content
+        assert "Clinical Management of Malaria" in payload["content"]
+        assert "artemisinin-based combination therapies" in payload["content"]
+        assert "Special considerations for pregnant women" in payload["content"]
+        assert payload["truncated"] is False
+        assert meta.error is False
+        assert content_route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
