@@ -652,3 +652,45 @@ def test_who_guideline_model_and_formatter_include_pdf_url():
     assert "- **PDF:** https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content" in formatted["markdown"]
     assert "- **URL:** https://iris.who.int/handle/10665/311551" in formatted["markdown"]
 
+
+@respx.mock
+async def test_search_guidelines_resolves_pdf_links_for_items(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-guideline-pdf", name="guideline.pdf", size=5000)
+            ])
+        )
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        assert len(guidelines) == 1
+        assert guidelines[0].pdf_url == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-guideline-pdf/content"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_item_bitstream_error_does_not_fail_search(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        # Bitstream bundle fetch fails with 500
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(status_code=500)
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        assert len(guidelines) == 1
+        assert guidelines[0].pdf_url == ""  # Graceful fallback
+        assert meta.error is False  # Search overall succeeded
+    finally:
+        await cache.close()
+        await http_client.aclose()
+

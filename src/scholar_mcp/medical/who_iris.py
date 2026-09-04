@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -62,6 +63,47 @@ def _extract_search_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], di
     return items, page_info
 
 
+def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
+    """Extract primary PDF bitstream content URL from an item dict if embedded."""
+    embedded = item.get("_embedded") or {}
+    bundles_container = embedded.get("bundles") or {}
+    bundles = (bundles_container.get("_embedded") or {}).get("bundles") or []
+    if not isinstance(bundles, list):
+        return ""
+
+    original = next(
+        (b for b in bundles if isinstance(b, dict) and b.get("name") == "ORIGINAL"),
+        None,
+    )
+    if not original:
+        return ""
+
+    bitstreams = (original.get("_embedded") or {}).get("bitstreams") or []
+    if not isinstance(bitstreams, list):
+        return ""
+
+    pdfs = [
+        b
+        for b in bitstreams
+        if isinstance(b, dict)
+        and (
+            (b.get("mimeType") or "").startswith("application/pdf")
+            or (b.get("name") or "").lower().endswith(".pdf")
+        )
+    ]
+    if not pdfs:
+        return ""
+
+    best_pdf = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
+    content_href = (best_pdf.get("_links") or {}).get("content", {}).get("href")
+    if content_href:
+        return content_href
+    bitstream_uuid = best_pdf.get("uuid")
+    if bitstream_uuid:
+        return f"{IRIS_BITSTREAM_CONTENT_URL}/{bitstream_uuid}/content"
+    return ""
+
+
 def _build_record(item: dict[str, Any]) -> WHOGuideline:
     metadata = item.get("metadata") or {}
     handle = item.get("handle") or ""
@@ -71,6 +113,7 @@ def _build_record(item: dict[str, Any]) -> WHOGuideline:
         title=title,
         handle=handle,
         url=f"{IRIS_HANDLE_BASE}/{handle}" if handle else "",
+        pdf_url=_extract_pdf_link_from_item(item),
         year=date_issued[:4] if date_issued else "",
         description=_first_meta(metadata, "dc.description.abstract")
         or _first_meta(metadata, "dc.description"),
@@ -178,16 +221,79 @@ class WHOIRISEngine:
 
         raw_items, errored = await self._fetch_paginated(url, params, extract, limit)
 
-        records = [_build_record(item) for item in raw_items if item]
-
-        # A failed page fetch must never be served from cache for the whole TTL:
-        # skip the write whenever any page errored, even when earlier pages
-        # returned a partial result set (same convention as fda.py).
         if errored:
+            records = [_build_record(item) for item in raw_items if item]
             return records, CacheMetadata(cached=False, cache_age=0, error=True)
 
+        async def _enrich_item(item: dict[str, Any]) -> WHOGuideline:
+            rec = _build_record(item)
+            if not rec.pdf_url and item.get("uuid"):
+                pdf_url, _, _ = await self._resolve_pdf_bitstream(
+                    item.get("uuid") or ""
+                )
+                rec.pdf_url = pdf_url
+            return rec
+
+        records = list(
+            await asyncio.gather(*[_enrich_item(i) for i in raw_items if i])
+        )
+
         await self.cache.set(cache_key, [r.to_dict() for r in records], source="who_iris")
-        return records, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return records, CacheMetadata(cached=False, cache_age=0, error=False)
+
+    async def _resolve_pdf_bitstream(self, item_uuid: str) -> tuple[str, str, bool]:
+        """Discover the primary PDF bitstream. Returns (pdf_url, bitstream_uuid, errored)."""
+        if not item_uuid:
+            return "", "", False
+        try:
+            bundles_resp = await self.http_client.get(
+                f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles",
+                params={"size": str(MAX_PAGE_SIZE)},
+                headers={"Accept": "application/json"},
+            )
+            if bundles_resp is None:
+                return "", "", True
+            bundles = (bundles_resp.json().get("_embedded") or {}).get("bundles") or []
+            original = next(
+                (b for b in bundles if isinstance(b, dict) and b.get("name") == "ORIGINAL"),
+                None,
+            )
+            if original is None:
+                return "", "", False
+
+            bits_resp = await self.http_client.get(
+                f"{IRIS_BUNDLE_BITSTREAMS_URL}/{original.get('uuid')}/bitstreams",
+                params={"size": str(MAX_PAGE_SIZE)},
+                headers={"Accept": "application/json"},
+            )
+            if bits_resp is None:
+                return "", "", True
+            bitstreams = (bits_resp.json().get("_embedded") or {}).get("bitstreams") or []
+            pdfs = [
+                b
+                for b in bitstreams
+                if isinstance(b, dict)
+                and (
+                    (b.get("mimeType") or "").startswith("application/pdf")
+                    or (b.get("name") or "").lower().endswith(".pdf")
+                )
+            ]
+            if not pdfs:
+                return "", "", False
+
+            best = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
+            best_uuid = best.get("uuid") or ""
+            pdf_url = (
+                f"{IRIS_BITSTREAM_CONTENT_URL}/{best_uuid}/content" if best_uuid else ""
+            )
+            return pdf_url, best_uuid, False
+        except Exception:
+            logger.warning(
+                "WHO IRIS bitstream resolution failed for item %s",
+                item_uuid,
+                exc_info=True,
+            )
+            return "", "", True
 
     async def get_full_text(
         self,
@@ -244,15 +350,21 @@ class WHOIRISEngine:
 
         # A failed bitstream fetch degrades the result to the abstract but
         # still marks it errored so it is never cached for the whole TTL.
-        pdf_text, errored = await self._extract_pdf_text(item.get("uuid") or "")
+        pdf_text, pdf_url, errored = await self._extract_pdf_text(
+            item.get("uuid") or ""
+        )
         if pdf_text:
-            result = {"content_type": "pdf", "content": pdf_text}
+            result = {"content_type": "pdf", "content": pdf_text, "pdf_url": pdf_url}
         elif abstract:
-            result = {"content_type": "abstract", "content": abstract}
+            result = {
+                "content_type": "abstract",
+                "content": abstract,
+                "pdf_url": pdf_url,
+            }
         else:
             return (
                 {**base, "status": "not_found", "error": "no full text or abstract available",
-                 "title": title, "content_type": "none", "content": ""},
+                 "title": title, "content_type": "none", "content": "", "pdf_url": ""},
                 CacheMetadata(cached=False, cache_age=0, error=errored),
             )
 
@@ -261,51 +373,22 @@ class WHOIRISEngine:
             await self.cache.set(cache_key, payload, source="who_iris")
         return self._serve_full_text(payload, max_chars), CacheMetadata(cached=False, cache_age=0, error=errored)
 
-    async def _extract_pdf_text(self, item_uuid: str) -> tuple[str, bool]:
-        """Extract the primary PDF's text. Returns (text, errored)."""
-        if not item_uuid:
-            return "", False
+    async def _extract_pdf_text(self, item_uuid: str) -> tuple[str, str, bool]:
+        """Extract the primary PDF's text and URL. Returns (text, pdf_url, errored)."""
+        pdf_url, _, errored = await self._resolve_pdf_bitstream(item_uuid)
+        if errored or not pdf_url:
+            return "", pdf_url, errored
+
         try:
-            bundles_resp = await self.http_client.get(
-                f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles",
-                params={"size": str(MAX_PAGE_SIZE)},
-                headers={"Accept": "application/json"},
-            )
-            if bundles_resp is None:
-                return "", True
-            bundles = (bundles_resp.json().get("_embedded") or {}).get("bundles") or []
-            original = next((b for b in bundles if b.get("name") == "ORIGINAL"), None)
-            if original is None:
-                return "", False
-
-            bits_resp = await self.http_client.get(
-                f"{IRIS_BUNDLE_BITSTREAMS_URL}/{original.get('uuid')}/bitstreams",
-                params={"size": str(MAX_PAGE_SIZE)},
-                headers={"Accept": "application/json"},
-            )
-            if bits_resp is None:
-                return "", True
-            bitstreams = (bits_resp.json().get("_embedded") or {}).get("bitstreams") or []
-            # Live IRIS payloads leave bitstream mimeType null; the .pdf name
-            # suffix is then the only marker, so accept either.
-            pdfs = [
-                b for b in bitstreams
-                if (b.get("mimeType") or "").startswith("application/pdf")
-                or (b.get("name") or "").lower().endswith(".pdf")
-            ]
-            if not pdfs:
-                return "", False
-
-            best = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
-            pdf_bytes = await self.http_client.get_bytes(
-                f"{IRIS_BITSTREAM_CONTENT_URL}/{best.get('uuid')}/content"
-            )
+            pdf_bytes = await self.http_client.get_bytes(pdf_url)
             if pdf_bytes is None:
-                return "", True
-            return pdf_bytes_to_text(pdf_bytes), False
+                return "", pdf_url, True
+            return pdf_bytes_to_text(pdf_bytes), pdf_url, False
         except Exception:
-            logger.warning("WHO IRIS full-text fetch failed for item %s", item_uuid, exc_info=True)
-            return "", True
+            logger.warning(
+                "WHO IRIS PDF download failed for item %s", item_uuid, exc_info=True
+            )
+            return "", pdf_url, True
 
     @staticmethod
     def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
