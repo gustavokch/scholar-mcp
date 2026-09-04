@@ -830,3 +830,69 @@ async def test_server_who_iris_tools_end_to_end(tmp_path: Path, monkeypatch):
         await srv.who_iris_engine.cache.close()
         await srv.who_iris_engine.http_client.aclose()
 
+
+@respx.mock
+async def test_resolve_pdf_bitstream_prefers_content_link_and_handles_safe_size(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        custom_content_url = "https://iris.who.int/custom/bitstreams/bit-special/content"
+        bitstream_payload = {
+            "uuid": "bit-special",
+            "name": "malaria-policy.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": "12345",  # string sizeBytes
+            "_links": {"content": {"href": custom_content_url}},
+        }
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="b-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/b-1/bitstreams").respond(
+            json={"_embedded": {"bitstreams": [bitstream_payload]}}
+        )
+
+        pdf_url, best_uuid, errored = await engine._resolve_pdf_bitstream("item-1")
+        assert pdf_url == custom_content_url
+        assert best_uuid == "bit-special"
+        assert errored is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_extract_pdf_link_from_item_handles_string_size_and_content_link():
+    from scholar_mcp.medical.who_iris import _extract_pdf_link_from_item
+
+    item = {
+        "_embedded": {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-small",
+                                        "name": "doc.pdf",
+                                        "sizeBytes": "100",
+                                        "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
+                                    },
+                                    {
+                                        "uuid": "bit-large",
+                                        "name": "doc_full.pdf",
+                                        "sizeBytes": "9999",
+                                        "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
+                                    },
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    extracted = _extract_pdf_link_from_item(item)
+    assert extracted == "https://iris.who.int/bit-large/content"
+
+
+

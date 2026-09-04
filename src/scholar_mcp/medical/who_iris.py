@@ -21,6 +21,7 @@ IRIS_ITEM_TYPE_FILTER = "Publications,equals"
 MAX_PAGE_SIZE = 100
 MAX_RESULTS = 200
 MAX_FULL_TEXT_CHARS = 50_000
+MAX_CONCURRENT_PDF_RESOLUTIONS = 10
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,41 @@ def _extract_search_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], di
     return items, page_info
 
 
+def _safe_size(bitstream: dict[str, Any]) -> int:
+    val = bitstream.get("sizeBytes")
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str) and val.isdigit():
+        return int(val)
+    return 0
+
+
+def _extract_pdf_link_from_bitstreams(
+    bitstreams: list[dict[str, Any]],
+) -> tuple[str, str]:
+    """Find primary PDF bitstream and return (content_url, bitstream_uuid)."""
+    pdfs = [
+        b
+        for b in bitstreams
+        if isinstance(b, dict)
+        and (
+            (b.get("mimeType") or "").startswith("application/pdf")
+            or (b.get("name") or "").lower().endswith(".pdf")
+        )
+    ]
+    if not pdfs:
+        return "", ""
+
+    best_pdf = max(pdfs, key=_safe_size)
+    best_uuid = best_pdf.get("uuid") or ""
+    content_href = (best_pdf.get("_links") or {}).get("content", {}).get("href")
+    if content_href:
+        return content_href, best_uuid
+    if best_uuid:
+        return f"{IRIS_BITSTREAM_CONTENT_URL}/{best_uuid}/content", best_uuid
+    return "", ""
+
+
 def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
     """Extract primary PDF bitstream content URL from an item dict if embedded."""
     embedded = item.get("_embedded") or {}
@@ -82,26 +118,8 @@ def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
     if not isinstance(bitstreams, list):
         return ""
 
-    pdfs = [
-        b
-        for b in bitstreams
-        if isinstance(b, dict)
-        and (
-            (b.get("mimeType") or "").startswith("application/pdf")
-            or (b.get("name") or "").lower().endswith(".pdf")
-        )
-    ]
-    if not pdfs:
-        return ""
-
-    best_pdf = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
-    content_href = (best_pdf.get("_links") or {}).get("content", {}).get("href")
-    if content_href:
-        return content_href
-    bitstream_uuid = best_pdf.get("uuid")
-    if bitstream_uuid:
-        return f"{IRIS_BITSTREAM_CONTENT_URL}/{bitstream_uuid}/content"
-    return ""
+    url, _ = _extract_pdf_link_from_bitstreams(bitstreams)
+    return url
 
 
 def _build_record(item: dict[str, Any]) -> WHOGuideline:
@@ -225,13 +243,16 @@ class WHOIRISEngine:
             records = [_build_record(item) for item in raw_items if item]
             return records, CacheMetadata(cached=False, cache_age=0, error=True)
 
+        sem = asyncio.Semaphore(MAX_CONCURRENT_PDF_RESOLUTIONS)
+
         async def _enrich_item(item: dict[str, Any]) -> WHOGuideline:
             rec = _build_record(item)
             if not rec.pdf_url and item.get("uuid"):
-                pdf_url, _, _ = await self._resolve_pdf_bitstream(
-                    item.get("uuid") or ""
-                )
-                rec.pdf_url = pdf_url
+                async with sem:
+                    pdf_url, _, _ = await self._resolve_pdf_bitstream(
+                        item.get("uuid") or ""
+                    )
+                    rec.pdf_url = pdf_url
             return rec
 
         records = list(
@@ -269,23 +290,7 @@ class WHOIRISEngine:
             if bits_resp is None:
                 return "", "", True
             bitstreams = (bits_resp.json().get("_embedded") or {}).get("bitstreams") or []
-            pdfs = [
-                b
-                for b in bitstreams
-                if isinstance(b, dict)
-                and (
-                    (b.get("mimeType") or "").startswith("application/pdf")
-                    or (b.get("name") or "").lower().endswith(".pdf")
-                )
-            ]
-            if not pdfs:
-                return "", "", False
-
-            best = max(pdfs, key=lambda b: b.get("sizeBytes") or 0)
-            best_uuid = best.get("uuid") or ""
-            pdf_url = (
-                f"{IRIS_BITSTREAM_CONTENT_URL}/{best_uuid}/content" if best_uuid else ""
-            )
+            pdf_url, best_uuid = _extract_pdf_link_from_bitstreams(bitstreams)
             return pdf_url, best_uuid, False
         except Exception:
             logger.warning(
