@@ -212,6 +212,7 @@ class WHOGuideline:
     title: str
     handle: str
     url: str
+    pdf_url: str = ""
     organization: str = "World Health Organization"
     source: str = "who-iris"
     year: str = ""
