@@ -972,3 +972,29 @@ def test_extract_pdf_link_survives_nan_size():
     extracted = _extract_pdf_link_from_item(item)
     assert extracted == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-ok/content"
 
+
+@respx.mock
+async def test_search_guidelines_bitstream_error_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        bundles_route = respx.get(
+            f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles"
+        ).respond(status_code=500)
+
+        first, _ = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        calls_after_first = bundles_route.call_count
+        second, second_meta = await engine.search_guidelines(
+            "guideline", limit=1, mode="prefix"
+        )
+
+        assert len(first) == 1 and first[0].pdf_url == ""
+        # Enrichment errored: results must not be served from cache for the TTL.
+        assert second_meta.cached is False
+        assert bundles_route.call_count > calls_after_first
+        assert second == first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+

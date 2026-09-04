@@ -251,21 +251,29 @@ class WHOIRISEngine:
 
         sem = asyncio.Semaphore(MAX_CONCURRENT_PDF_RESOLUTIONS)
 
-        async def _enrich_item(item: dict[str, Any]) -> WHOGuideline:
+        async def _enrich_item(item: dict[str, Any]) -> tuple[WHOGuideline, bool]:
             rec = _build_record(item)
             if not rec.pdf_url and item.get("uuid"):
                 async with sem:
-                    pdf_url, _, _ = await self._resolve_pdf_bitstream(
+                    pdf_url, _, errored = await self._resolve_pdf_bitstream(
                         item.get("uuid") or ""
                     )
                     rec.pdf_url = pdf_url
-            return rec
+                if errored:
+                    return rec, True
+            return rec, False
 
-        records = list(
-            await asyncio.gather(*[_enrich_item(i) for i in raw_items if i])
-        )
+        enriched = await asyncio.gather(*[_enrich_item(i) for i in raw_items if i])
+        records = [rec for rec, _ in enriched]
+        # A failed bitstream resolution would leave pdf_url blank for the whole
+        # TTL: skip the cache write whenever any enrichment errored (same
+        # convention as failed page fetches above).
+        enrichment_errored = any(errored for _, errored in enriched)
 
-        await self.cache.set(cache_key, [r.to_dict() for r in records], source="who_iris")
+        if not enrichment_errored:
+            await self.cache.set(
+                cache_key, [r.to_dict() for r in records], source="who_iris"
+            )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
 
     async def _resolve_pdf_bitstream(self, item_uuid: str) -> tuple[str, str, bool]:
