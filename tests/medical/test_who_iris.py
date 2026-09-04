@@ -998,3 +998,31 @@ async def test_search_guidelines_bitstream_error_not_cached(tmp_path: Path):
         await cache.close()
         await http_client.aclose()
 
+
+@respx.mock
+async def test_get_full_text_not_found_includes_pdf_url(tmp_path: Path):
+    """not_found payload keeps the resolved pdf_url even when the download fails."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(
+            json=_pid_find_item(handle="10665/311551", abstract="")
+        )
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-uuid-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-x", name="guideline.pdf", size=1000)
+            ])
+        )
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-x/content").respond(
+            status_code=404
+        )
+
+        payload, _meta = await engine.get_full_text("10665/311551")
+
+        assert payload["status"] == "not_found"
+        assert payload["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-x/content"
+    finally:
+        await cache.close()
+        await http_client.aclose()

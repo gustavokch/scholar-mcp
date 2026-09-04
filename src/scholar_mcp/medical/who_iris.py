@@ -383,7 +383,7 @@ class WHOIRISEngine:
         else:
             return (
                 {**base, "status": "not_found", "error": "no full text or abstract available",
-                 "title": title, "content_type": "none", "content": "", "pdf_url": ""},
+                 "title": title, "content_type": "none", "content": "", "pdf_url": pdf_url},
                 CacheMetadata(cached=False, cache_age=0, error=errored),
             )
 
