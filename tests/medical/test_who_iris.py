@@ -41,8 +41,12 @@ def _browse_page(items, page=0, total_pages=1, total_elements=None):
     }
 
 
-def _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supplementation"):
-    return {
+def _iris_item(
+    handle="10665/44626",
+    title="Guideline: neonatal vitamin A supplementation",
+    pdf_url: str = "",
+):
+    item = {
         "id": "20a72e4a-b421-418f-87d7-7712e5f77f74",
         "uuid": "20a72e4a-b421-418f-87d7-7712e5f77f74",
         "handle": handle,
@@ -58,6 +62,28 @@ def _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supple
             "dc.publisher": [{"value": "World Health Organization"}],
         },
     }
+    if pdf_url:
+        item["_embedded"] = {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-1",
+                                        "name": "guideline.pdf",
+                                        "_links": {"content": {"href": pdf_url}},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    return item
 
 
 @respx.mock
@@ -314,7 +340,13 @@ async def test_search_guidelines_partial_failure_is_not_cached(tmp_path: Path):
 async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
-        page_items = [_iris_item(handle=f"10665/{700 + i}") for i in range(100)]
+        page_items = [
+            _iris_item(
+                handle=f"10665/{700 + i}",
+                pdf_url=f"https://iris.who.int/server/api/core/bitstreams/bit-{i}/content",
+            )
+            for i in range(100)
+        ]
         route = respx.get(IRIS_BROWSE_TITLE_URL).respond(
             json=_browse_page(page_items, total_pages=999, total_elements=99900)
         )
