@@ -927,4 +927,48 @@ def test_extract_pdf_link_from_item_handles_string_size_and_content_link():
     assert extracted == "https://iris.who.int/bit-large/content"
 
 
+def test_safe_size_handles_non_finite_and_bad_values():
+    from scholar_mcp.medical.who_iris import _safe_size
+
+    assert _safe_size({"sizeBytes": float("nan")}) == 0
+    assert _safe_size({"sizeBytes": float("inf")}) == 0
+    assert _safe_size({"sizeBytes": "abc"}) == 0
+    assert _safe_size({"sizeBytes": None}) == 0
+    assert _safe_size({}) == 0
+    assert _safe_size({"sizeBytes": 123}) == 123
+    assert _safe_size({"sizeBytes": "123"}) == 123
+
+
+def test_extract_pdf_link_survives_nan_size():
+    from scholar_mcp.medical.who_iris import _extract_pdf_link_from_item
+
+    item = {
+        "_embedded": {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-nan",
+                                        "name": "broken.pdf",
+                                        "sizeBytes": float("nan"),
+                                    },
+                                    {
+                                        "uuid": "bit-ok",
+                                        "name": "ok.pdf",
+                                        "sizeBytes": 4096,
+                                    },
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    extracted = _extract_pdf_link_from_item(item)
+    assert extracted == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-ok/content"
 

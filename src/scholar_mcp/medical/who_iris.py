@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from typing import Any
 
 from scholar_mcp.config import Settings
@@ -66,7 +67,12 @@ def _extract_search_page(data: dict[str, Any]) -> tuple[list[dict[str, Any]], di
 
 def _safe_size(bitstream: dict[str, Any]) -> int:
     val = bitstream.get("sizeBytes")
+    if isinstance(val, bool):
+        return 0
     if isinstance(val, (int, float)):
+        # stdlib json parses NaN/Infinity; int(nan)/int(inf) raise.
+        if isinstance(val, float) and not math.isfinite(val):
+            return 0
         return int(val)
     if isinstance(val, str) and val.isdigit():
         return int(val)
