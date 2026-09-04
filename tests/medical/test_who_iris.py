@@ -624,3 +624,31 @@ async def test_get_full_text_requires_handle(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_who_guideline_model_and_formatter_include_pdf_url():
+    from scholar_mcp.medical.models import WHOGuideline
+    from scholar_mcp.medical.formatters import format_who_iris_guidelines
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    guideline = WHOGuideline(
+        title="WHO Malaria Guidelines",
+        handle="10665/311551",
+        url="https://iris.who.int/handle/10665/311551",
+        pdf_url="https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content",
+        year="2023",
+        authors=["World Health Organization"],
+    )
+
+    data_dict = guideline.to_dict()
+    assert data_dict["pdf_url"] == "https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content"
+
+    restored = WHOGuideline.from_dict(data_dict)
+    assert restored.pdf_url == "https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content"
+
+    formatted = format_who_iris_guidelines(
+        [guideline], query="malaria", meta=CacheMetadata(cached=False, cache_age=0, error=False)
+    )
+    assert "- **PDF:** https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content" in formatted["markdown"]
+    assert "- **URL:** https://iris.who.int/handle/10665/311551" in formatted["markdown"]
+

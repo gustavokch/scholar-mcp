@@ -281,6 +281,8 @@ def format_who_iris_guidelines(
                 lines.append(f"- **Coverage:** {', '.join(g.spatial_coverage)}")
             if g.url:
                 lines.append(f"- **URL:** {g.url}")
+            if g.pdf_url:
+                lines.append(f"- **PDF:** {g.pdf_url}")
             if g.description:
                 lines.append("")
                 lines.append(g.description)
