@@ -784,3 +784,49 @@ async def test_get_full_text_returns_complete_multipage_pdf_and_pdf_url(tmp_path
         await cache.close()
         await http_client.aclose()
 
+
+@respx.mock
+async def test_server_who_iris_tools_end_to_end(tmp_path: Path, monkeypatch):
+    """Server tools expose pdf_url in search data/markdown and full-text payloads."""
+    import scholar_mcp.server as srv
+    import scholar_mcp.medical.who_iris as who_iris_mod
+
+    item = _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supplementation")
+    item_uuid = item["uuid"]
+
+    respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+    pid_item = _pid_find_item(handle="10665/44626")
+    pid_item["uuid"] = item_uuid
+    respx.get(IRIS_PID_FIND_URL).respond(json=pid_item)
+    respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles").respond(
+        json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+    )
+    respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+        json=_bitstreams_page([_bitstream(uuid="bit-100", name="guideline.pdf", size=5000)])
+    )
+    respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content").respond(
+        content=b"%PDF-fake", headers={"Content-Type": "application/pdf"}
+    )
+    monkeypatch.setattr(
+        who_iris_mod, "pdf_bytes_to_text", lambda b: "Full guidelines content from PDF."
+    )
+    monkeypatch.setattr(srv, "who_iris_engine", WHOIRISEngine(
+        http_client=AsyncHttpClient(srv.settings),
+        cache=SQLiteCacheManager(db_path=tmp_path / "e2e.db", settings=srv.settings),
+        settings=srv.settings,
+    ))
+    try:
+        search_res = await srv.search_who_iris_guidelines("neonatal vitamin A")
+        assert "data" in search_res
+        assert search_res["data"][0]["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content"
+        assert f"- **PDF:** {IRIS_BITSTREAM_CONTENT_URL}/bit-100/content" in search_res["markdown"]
+
+        ft_res = await srv.get_who_iris_full_text("10665/44626")
+        assert ft_res["status"] == "success"
+        assert ft_res["content_type"] == "pdf"
+        assert ft_res["content"] == "Full guidelines content from PDF."
+        assert ft_res["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content"
+    finally:
+        await srv.who_iris_engine.cache.close()
+        await srv.who_iris_engine.http_client.aclose()
+
