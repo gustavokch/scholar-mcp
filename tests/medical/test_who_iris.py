@@ -41,8 +41,12 @@ def _browse_page(items, page=0, total_pages=1, total_elements=None):
     }
 
 
-def _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supplementation"):
-    return {
+def _iris_item(
+    handle="10665/44626",
+    title="Guideline: neonatal vitamin A supplementation",
+    pdf_url: str = "",
+):
+    item = {
         "id": "20a72e4a-b421-418f-87d7-7712e5f77f74",
         "uuid": "20a72e4a-b421-418f-87d7-7712e5f77f74",
         "handle": handle,
@@ -58,6 +62,28 @@ def _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supple
             "dc.publisher": [{"value": "World Health Organization"}],
         },
     }
+    if pdf_url:
+        item["_embedded"] = {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-1",
+                                        "name": "guideline.pdf",
+                                        "_links": {"content": {"href": pdf_url}},
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    return item
 
 
 @respx.mock
@@ -314,7 +340,13 @@ async def test_search_guidelines_partial_failure_is_not_cached(tmp_path: Path):
 async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
-        page_items = [_iris_item(handle=f"10665/{700 + i}") for i in range(100)]
+        page_items = [
+            _iris_item(
+                handle=f"10665/{700 + i}",
+                pdf_url=f"https://iris.who.int/server/api/core/bitstreams/bit-{i}/content",
+            )
+            for i in range(100)
+        ]
         route = respx.get(IRIS_BROWSE_TITLE_URL).respond(
             json=_browse_page(page_items, total_pages=999, total_elements=99900)
         )
@@ -621,6 +653,376 @@ async def test_get_full_text_requires_handle(tmp_path: Path):
         assert payload["status"] == "error"
         assert payload["error"] == "handle is required"
         assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_who_guideline_model_and_formatter_include_pdf_url():
+    from scholar_mcp.medical.models import WHOGuideline
+    from scholar_mcp.medical.formatters import format_who_iris_guidelines
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    guideline = WHOGuideline(
+        title="WHO Malaria Guidelines",
+        handle="10665/311551",
+        url="https://iris.who.int/handle/10665/311551",
+        pdf_url="https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content",
+        year="2023",
+        authors=["World Health Organization"],
+    )
+
+    data_dict = guideline.to_dict()
+    assert data_dict["pdf_url"] == "https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content"
+
+    restored = WHOGuideline.from_dict(data_dict)
+    assert restored.pdf_url == "https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content"
+
+    formatted = format_who_iris_guidelines(
+        [guideline], query="malaria", meta=CacheMetadata(cached=False, cache_age=0, error=False)
+    )
+    assert "- **PDF:** https://iris.who.int/server/api/core/bitstreams/bit-uuid-1/content" in formatted["markdown"]
+    assert "- **URL:** https://iris.who.int/handle/10665/311551" in formatted["markdown"]
+
+
+@respx.mock
+async def test_search_guidelines_resolves_pdf_links_for_items(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-guideline-pdf", name="guideline.pdf", size=5000)
+            ])
+        )
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        assert len(guidelines) == 1
+        assert guidelines[0].pdf_url == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-guideline-pdf/content"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_item_bitstream_error_does_not_fail_search(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        # Bitstream bundle fetch fails with 500
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(status_code=500)
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        assert len(guidelines) == 1
+        assert guidelines[0].pdf_url == ""  # Graceful fallback
+        assert meta.error is False  # Search overall succeeded
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def make_multipage_pdf_bytes(pages_text: list[str]) -> bytes:
+    """Build real multi-page PDF bytes with extractable text via pypdf pages."""
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import (
+        DecodedStreamObject,
+        DictionaryObject,
+        NameObject,
+    )
+
+    # In-memory Helvetica Type1 font shared by every page.
+    def _font_dict() -> DictionaryObject:
+        return DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+
+    # Fresh indirect font object per content stream PDF (stable object layout).
+    def _make_pdf_bytes(single_page_text: str) -> bytes:
+        writer = PdfWriter()
+        page = writer.add_blank_page(width=300, height=300)
+        escaped = (
+            single_page_text.replace("\\", "\\\\")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+        )
+        stream = DecodedStreamObject()
+        stream.set_data(
+            f"BT /F1 12 Tf 20 150 Td ({escaped}) Tj ET".encode("latin-1")
+        )
+        font_ref = writer._add_object(_font_dict())
+        resources = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+        )
+        page[NameObject("/Resources")] = resources
+        page[NameObject("/Contents")] = writer._add_object(stream)
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    merged = PdfWriter()
+    for text in pages_text:
+        single = PdfReader(io.BytesIO(_make_pdf_bytes(text)))
+        merged.add_page(single.pages[0])
+    out = io.BytesIO()
+    merged.write(out)
+    return out.getvalue()
+
+
+@respx.mock
+async def test_get_full_text_returns_complete_multipage_pdf_and_pdf_url(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        page1 = "World Health Organization Clinical Management of Malaria 2023."
+        page2 = "Section 2: Recommended artemisinin-based combination therapies (ACTs)."
+        page3 = "Section 3: Special considerations for pregnant women and infants."
+        real_pdf_bytes = make_multipage_pdf_bytes([page1, page2, page3])
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item(handle="10665/311551"))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-uuid-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-malaria-pdf", name="who-malaria-guideline.pdf", size=len(real_pdf_bytes))
+            ])
+        )
+        content_route = respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-malaria-pdf/content").respond(
+            content=real_pdf_bytes, headers={"Content-Type": "application/pdf"}
+        )
+
+        payload, meta = await engine.get_full_text("10665/311551")
+
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "pdf"
+        assert payload["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-malaria-pdf/content"
+        # Verify text from all 3 pages is extracted into content
+        assert "Clinical Management of Malaria" in payload["content"]
+        assert "artemisinin-based combination therapies" in payload["content"]
+        assert "Special considerations for pregnant women" in payload["content"]
+        assert payload["truncated"] is False
+        assert meta.error is False
+        assert content_route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_server_who_iris_tools_end_to_end(tmp_path: Path, monkeypatch):
+    """Server tools expose pdf_url in search data/markdown and full-text payloads."""
+    import scholar_mcp.server as srv
+    import scholar_mcp.medical.who_iris as who_iris_mod
+
+    item = _iris_item(handle="10665/44626", title="Guideline: neonatal vitamin A supplementation")
+    item_uuid = item["uuid"]
+
+    respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+    pid_item = _pid_find_item(handle="10665/44626")
+    pid_item["uuid"] = item_uuid
+    respx.get(IRIS_PID_FIND_URL).respond(json=pid_item)
+    respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item_uuid}/bundles").respond(
+        json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+    )
+    respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+        json=_bitstreams_page([_bitstream(uuid="bit-100", name="guideline.pdf", size=5000)])
+    )
+    respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content").respond(
+        content=b"%PDF-fake", headers={"Content-Type": "application/pdf"}
+    )
+    monkeypatch.setattr(
+        who_iris_mod, "pdf_bytes_to_text", lambda b: "Full guidelines content from PDF."
+    )
+    monkeypatch.setattr(srv, "who_iris_engine", WHOIRISEngine(
+        http_client=AsyncHttpClient(srv.settings),
+        cache=SQLiteCacheManager(db_path=tmp_path / "e2e.db", settings=srv.settings),
+        settings=srv.settings,
+    ))
+    try:
+        search_res = await srv.search_who_iris_guidelines("neonatal vitamin A")
+        assert "data" in search_res
+        assert search_res["data"][0]["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content"
+        assert f"- **PDF:** {IRIS_BITSTREAM_CONTENT_URL}/bit-100/content" in search_res["markdown"]
+
+        ft_res = await srv.get_who_iris_full_text("10665/44626")
+        assert ft_res["status"] == "success"
+        assert ft_res["content_type"] == "pdf"
+        assert ft_res["content"] == "Full guidelines content from PDF."
+        assert ft_res["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-100/content"
+    finally:
+        await srv.who_iris_engine.cache.close()
+        await srv.who_iris_engine.http_client.aclose()
+
+
+@respx.mock
+async def test_resolve_pdf_bitstream_prefers_content_link_and_handles_safe_size(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        custom_content_url = "https://iris.who.int/custom/bitstreams/bit-special/content"
+        bitstream_payload = {
+            "uuid": "bit-special",
+            "name": "malaria-policy.pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": "12345",  # string sizeBytes
+            "_links": {"content": {"href": custom_content_url}},
+        }
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="b-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/b-1/bitstreams").respond(
+            json={"_embedded": {"bitstreams": [bitstream_payload]}}
+        )
+
+        pdf_url, best_uuid, errored = await engine._resolve_pdf_bitstream("item-1")
+        assert pdf_url == custom_content_url
+        assert best_uuid == "bit-special"
+        assert errored is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_extract_pdf_link_from_item_handles_string_size_and_content_link():
+    from scholar_mcp.medical.who_iris import _extract_pdf_link_from_item
+
+    item = {
+        "_embedded": {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-small",
+                                        "name": "doc.pdf",
+                                        "sizeBytes": "100",
+                                        "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
+                                    },
+                                    {
+                                        "uuid": "bit-large",
+                                        "name": "doc_full.pdf",
+                                        "sizeBytes": "9999",
+                                        "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
+                                    },
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    extracted = _extract_pdf_link_from_item(item)
+    assert extracted == "https://iris.who.int/bit-large/content"
+
+
+def test_safe_size_handles_non_finite_and_bad_values():
+    from scholar_mcp.medical.who_iris import _safe_size
+
+    assert _safe_size({"sizeBytes": float("nan")}) == 0
+    assert _safe_size({"sizeBytes": float("inf")}) == 0
+    assert _safe_size({"sizeBytes": "abc"}) == 0
+    assert _safe_size({"sizeBytes": None}) == 0
+    assert _safe_size({}) == 0
+    assert _safe_size({"sizeBytes": 123}) == 123
+    assert _safe_size({"sizeBytes": "123"}) == 123
+
+
+def test_extract_pdf_link_survives_nan_size():
+    from scholar_mcp.medical.who_iris import _extract_pdf_link_from_item
+
+    item = {
+        "_embedded": {
+            "bundles": {
+                "_embedded": {
+                    "bundles": [
+                        {
+                            "name": "ORIGINAL",
+                            "_embedded": {
+                                "bitstreams": [
+                                    {
+                                        "uuid": "bit-nan",
+                                        "name": "broken.pdf",
+                                        "sizeBytes": float("nan"),
+                                    },
+                                    {
+                                        "uuid": "bit-ok",
+                                        "name": "ok.pdf",
+                                        "sizeBytes": 4096,
+                                    },
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    extracted = _extract_pdf_link_from_item(item)
+    assert extracted == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-ok/content"
+
+
+@respx.mock
+async def test_search_guidelines_bitstream_error_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(handle="10665/44626", title="Guideline A")
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        bundles_route = respx.get(
+            f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles"
+        ).respond(status_code=500)
+
+        first, _ = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+        calls_after_first = bundles_route.call_count
+        second, second_meta = await engine.search_guidelines(
+            "guideline", limit=1, mode="prefix"
+        )
+
+        assert len(first) == 1 and first[0].pdf_url == ""
+        # Enrichment errored: results must not be served from cache for the TTL.
+        assert second_meta.cached is False
+        assert bundles_route.call_count > calls_after_first
+        assert second == first
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_not_found_includes_pdf_url(tmp_path: Path):
+    """not_found payload keeps the resolved pdf_url even when the download fails."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(IRIS_PID_FIND_URL).respond(
+            json=_pid_find_item(handle="10665/311551", abstract="")
+        )
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-uuid-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([
+                _bitstream(uuid="bit-x", name="guideline.pdf", size=1000)
+            ])
+        )
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-x/content").respond(
+            status_code=404
+        )
+
+        payload, _meta = await engine.get_full_text("10665/311551")
+
+        assert payload["status"] == "not_found"
+        assert payload["pdf_url"] == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-x/content"
     finally:
         await cache.close()
         await http_client.aclose()
