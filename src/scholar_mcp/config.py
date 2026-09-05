@@ -3,11 +3,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_SCIHUB_MIRRORS = [
-    "https://sci-hub.hkvisa.net",
     "https://sci-hub.mksa.top",
-    "https://sci-hub.ren",
-    "https://sci-hub.se",
+    "https://sci-hub.hkvisa.net",
+    "https://sci-hub.ru",
     "https://sci-hub.st",
+    "https://sci-hub.se",
+    "https://sci-hub.ren",
     "https://sci-hub.ee",
 ]
 

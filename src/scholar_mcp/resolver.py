@@ -52,7 +52,11 @@ class WaterfallResolver:
         self.pmc = PMCProvider(self.http_client)
         self.arxiv = ArxivProvider(self.http_client)
         self.unpaywall = UnpaywallProvider(self.http_client, email=self.settings.unpaywall_email)
-        self.scihub = SciHubProvider(self.http_client, mirrors=self.settings.scihub_mirrors)
+        self.scihub = SciHubProvider(
+            self.http_client,
+            mirrors=self.settings.scihub_mirrors,
+            settings=self.settings,
+        )
         self.pubmed = PubMedProvider(self.http_client, self.settings)
         self.crossref = CrossRefProvider(self.http_client)
         self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)

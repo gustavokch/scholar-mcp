@@ -2,7 +2,7 @@ import re
 from typing import Any
 from bs4 import BeautifulSoup
 
-from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS
+from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS, Settings
 from scholar_mcp.models import FullTextResponse, IdentifierMap
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
@@ -54,9 +54,57 @@ class SciHubProvider(BaseProvider):
         self,
         http_client: AsyncHttpClient,
         mirrors: list[str] | None = None,
+        settings: Settings | None = None,
     ) -> None:
         super().__init__(http_client)
-        self.mirrors = mirrors if mirrors is not None else list(DEFAULT_SCIHUB_MIRRORS)
+        self.settings = settings or Settings.load()
+        self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
+
+    async def _fetch_via_camoufox(
+        self,
+        clean_doi: str,
+    ) -> tuple[bytes | None, str | None]:
+        """Browser-driven scrape using Camoufox (anti-detection Firefox)
+        when plain HTTP requests are blocked by upstream Cloudflare/bot-guards."""
+        try:
+            from camoufox.async_api import AsyncCamoufox
+        except ImportError:
+            return None, None
+
+        try:
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                for mirror in self.mirrors:
+                    mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
+                    try:
+                        await page.goto(
+                            mirror_url,
+                            wait_until="domcontentloaded",
+                            timeout=15000,
+                        )
+                        content = await page.content()
+                        pdf_url = _extract_pdf_url(content)
+                        if not pdf_url:
+                            continue
+
+                        try:
+                            resp = await page.request.get(pdf_url, timeout=15000)
+                            if resp.status == 200:
+                                b = await resp.body()
+                                if b and b.startswith(b"%PDF-"):
+                                    return b, pdf_url
+                        except Exception:
+                            pass
+
+                        pdf_bytes = await self.http_client.get_bytes(pdf_url)
+                        if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
+                            return pdf_bytes, pdf_url
+                    except Exception:
+                        continue
+        except Exception:
+            return None, None
+
+        return None, None
 
     async def fetch_pdf_bytes(
         self,
@@ -83,6 +131,11 @@ class SciHubProvider(BaseProvider):
                     return pdf_bytes, pdf_url
             except Exception:
                 continue
+
+        if self.settings.enable_browser_fallback:
+            camoufox_bytes, camoufox_url = await self._fetch_via_camoufox(clean_doi)
+            if camoufox_bytes:
+                return camoufox_bytes, camoufox_url
 
         return None, None
 
