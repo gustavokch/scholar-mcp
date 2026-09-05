@@ -262,6 +262,25 @@ async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
 
 
 @respx.mock
+async def test_scihub_fetch_pdf_bytes_ignores_non_pdf_content(client):
+    """When a mirror returns HTML/error page instead of PDF bytes, it should be ignored."""
+    respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://mirror1.org/paper.pdf"></iframe></html>',
+        )
+    )
+    respx.get("https://mirror1.org/paper.pdf").mock(
+        return_value=httpx.Response(200, content=b"<html>Cloudflare error</html>")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
+    assert pdf_bytes is None
+    assert pdf_url is None
+
+
+@respx.mock
 async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
     rendered_html = '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'

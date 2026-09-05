@@ -135,7 +135,7 @@ class SciHubProvider(BaseProvider):
                     continue
 
                 pdf_bytes = await self.http_client.get_bytes(pdf_url)
-                if pdf_bytes:
+                if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                     return pdf_bytes, pdf_url
             except Exception:
                 continue
