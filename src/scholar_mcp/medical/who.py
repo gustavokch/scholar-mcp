@@ -31,16 +31,68 @@ INDICATOR_SYNONYMS: dict[str, list[str]] = {
     "obesity": ["obesity", "overweight"],
 }
 
-WHO_CHILD_HEALTH_INDICATORS = [
-    "MDG_0000000029",  # Under-five mortality rate
-    "MDG_0000000030",  # Infant mortality rate
-    "MDG_0000000031",  # Neonatal mortality rate
-    "MDG_0000000032",  # Child mortality rate (1-4 years)
-    "MDG_0000000033",  # Measles immunization coverage
-    "MDG_0000000034",  # DPT3 immunization coverage
-    "WHS4_544",        # Child malnutrition
-    "WHS9_86",         # Exclusive breastfeeding
-]
+WHO_CHILD_HEALTH_INDICATORS: dict[str, str] = {
+    # Names are WHO's own, from the GHO Indicator dimension. They are stored
+    # rather than fetched so a record can say what it measures without a second
+    # request, and so a query can be matched against them offline.
+    #
+    # The previous list held eight codes that were mostly not child health at
+    # all -- adult HIV prevalence, two adult tuberculosis rates, adult
+    # antiretroviral coverage, maternal mortality and total population -- while
+    # infant, neonatal and under-five mortality were absent entirely. A request
+    # for infant mortality returned whichever of those happened to hold data.
+    "MDG_0000000001": (
+        "Infant mortality rate (probability of dying between birth and age 1 "
+        "per 1000 live births)"
+    ),
+    "MDG_0000000007": (
+        "Under-five mortality rate (probability of dying by age 5 per 1000 "
+        "live births)"
+    ),
+    "WHOSIS_000003": "Neonatal mortality rate (per 1000 live births)",
+    "NUTSTUNTINGPREV": (
+        "Stunting prevalence among children under 5 years of age "
+        "(% height-for-age <-2 SD), model-based estimates"
+    ),
+    "NUTRITION_WH_2": (
+        "Wasting prevalence among children under 5 years of age "
+        "(% weight-for-height <-2 SD), survey-based estimates"
+    ),
+    "LBW_PREVALENCE": "Low birth weight prevalence (%)",
+    "NUTRITION_579": "Exclusive breastfeeding under 6 months (%)",
+    "WHS8_110": (
+        "Measles-containing-vaccine first-dose (MCV1) immunization coverage "
+        "among 1-year-olds (%)"
+    ),
+    "WHS4_100": (
+        "Diphtheria tetanus toxoid and pertussis third-dose (DTP3) "
+        "immunization coverage among 1-year-olds (%)"
+    ),
+    "WHS4_544": (
+        "Polio vaccine: inactivated second or third-dose polio vaccine (IPVc) "
+        "immunization coverage by the locally recommended age (%)"
+    ),
+}
+
+
+def select_child_indicators(indicator: str) -> list[str]:
+    """Child-health indicator codes whose names answer the query.
+
+    The caller's query used to be discarded, so every request walked the whole
+    panel and returned whichever indicator happened to hold data for the
+    country -- an infant-mortality question could come back with immunization
+    coverage. A query that matches nothing keeps the full panel: the caller did
+    ask for child health statistics, and a broad answer beats an empty one.
+    """
+    wanted = set(_indicator_tokens(indicator)) - _INDICATOR_MEASURES
+    if not wanted:
+        return list(WHO_CHILD_HEALTH_INDICATORS)
+    matched = [
+        code
+        for code, name in WHO_CHILD_HEALTH_INDICATORS.items()
+        if wanted & (set(_indicator_tokens(name)) - _INDICATOR_MEASURES)
+    ]
+    return matched or list(WHO_CHILD_HEALTH_INDICATORS)
 
 
 # Words that carry no indicator identity. WHO writes its indicator names as
@@ -379,7 +431,7 @@ class WHOClient:
         all_records: list[WHOIndicatorRecord] = []
         errored = False
 
-        for code in WHO_CHILD_HEALTH_INDICATORS:
+        for code in select_child_indicators(indicator):
             params: dict[str, str] = {
                 "$format": "json",
                 "$top": str(limit),
@@ -396,7 +448,9 @@ class WHOClient:
                     raise FetchError("who child-health record request failed")
                 rows = resp.json().get("value", [])
                 for row in rows:
-                    record = _parse_indicator_record(row, code)
+                    record = _parse_indicator_record(
+                        row, code, WHO_CHILD_HEALTH_INDICATORS.get(code, "")
+                    )
                     all_records.append(record)
             except Exception:
                 logger.warning(

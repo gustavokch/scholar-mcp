@@ -127,23 +127,20 @@ async def test_get_health_statistics_non_numeric_fields(tmp_path: Path):
 @respx.mock
 async def test_get_child_health_statistics(tmp_path: Path):
     client, cache, http_client = _client(tmp_path)
-    respx.get(f"{GHO_BASE}/MDG_0000000029").respond(
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    respx.get(f"{GHO_BASE}/MDG_0000000001").respond(
         json={"value": [{"SpatialDim": "USA", "TimeDim": "2021", "NumericValue": 6.2}]}
     )
     # All other child-health codes return empty values.
-    for code in (
-        "MDG_0000000030",
-        "MDG_0000000031",
-        "MDG_0000000032",
-        "MDG_0000000033",
-        "MDG_0000000034",
-        "WHS4_544",
-        "WHS9_86",
-    ):
-        respx.get(f"{GHO_BASE}/{code}").respond(json={"value": []})
+    for code in WHO_CHILD_HEALTH_INDICATORS:
+        if code != "MDG_0000000001":
+            respx.get(f"{GHO_BASE}/{code}").respond(json={"value": []})
 
-    records, meta = await client.get_child_health_statistics("mortality", limit=5)
-    assert records[0].indicator_code == "MDG_0000000029"
+    records, meta = await client.get_child_health_statistics(
+        "infant mortality", limit=5
+    )
+    assert records[0].indicator_code == "MDG_0000000001"
     assert records[0].numeric_value == 6.2
     await cache.close()
     await http_client.aclose()
@@ -347,3 +344,101 @@ def test_rank_indicators_prefers_the_general_indicator_over_a_narrower_one():
     ]
     ranked = _rank_indicators(candidates, "suicide mortality rate")
     assert ranked[0]["IndicatorCode"] == "MH_12"
+
+
+# --- Child-health indicator selection ---------------------------------------
+#
+# get_child_health_statistics took an ``indicator`` argument, used it only to
+# build a cache key, and then walked a fixed list of eight codes. Asking it for
+# "infant mortality rate" returned measles immunization coverage, because
+# WHS4_544 happened to hold data for the country and MDG_0000000001 -- infant
+# mortality -- is not in the list at all.
+
+CHILD_CODES = [
+    "MDG_0000000029",
+    "MDG_0000000030",
+    "MDG_0000000031",
+    "MDG_0000000032",
+    "MDG_0000000033",
+    "MDG_0000000034",
+    "WHS4_544",
+    "WHS9_86",
+]
+
+
+def test_child_health_indicators_are_named_not_bare_codes():
+    """Records built from the fixed list carried the code as their own title
+    ("WHS4_544"), so a caller could not tell what the number measured."""
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    assert isinstance(WHO_CHILD_HEALTH_INDICATORS, dict)
+    assert "immunization" in WHO_CHILD_HEALTH_INDICATORS["WHS4_544"].lower()
+    # Infant mortality is a child-health statistic and must be reachable.
+    assert any(
+        "infant" in name.lower() for name in WHO_CHILD_HEALTH_INDICATORS.values()
+    )
+
+
+def test_child_health_selects_indicators_matching_the_query():
+    """The query must choose which of the child-health indicators to fetch.
+    Asking for infant mortality must not return immunization coverage."""
+    from scholar_mcp.medical.who import select_child_indicators
+
+    chosen = select_child_indicators("infant mortality rate")
+    assert chosen, "query matching a known indicator must select something"
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    assert all("infant" in WHO_CHILD_HEALTH_INDICATORS[c].lower() for c in chosen)
+
+
+def test_child_health_query_that_matches_nothing_keeps_every_indicator():
+    """A vague query must still return the full panel rather than nothing --
+    the caller asked for child health statistics and should get them."""
+    from scholar_mcp.medical.who import (
+        WHO_CHILD_HEALTH_INDICATORS,
+        select_child_indicators,
+    )
+
+    assert set(select_child_indicators("child health")) == set(
+        WHO_CHILD_HEALTH_INDICATORS
+    )
+
+
+@respx.mock
+async def test_get_child_health_statistics_uses_the_query(tmp_path: Path):
+    """End to end: an infant-mortality query must not spend its result slots on
+    an immunization indicator that merely happens to have data."""
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    client, cache, http_client = _client(tmp_path)
+    for code in WHO_CHILD_HEALTH_INDICATORS:
+        value = [{"SpatialDim": "JPN", "TimeDim": "2024", "NumericValue": 98.0}]
+        respx.get(f"{GHO_BASE}/{code}").respond(json={"value": value})
+
+    records, _ = await client.get_child_health_statistics(
+        "infant mortality rate", country="JPN", limit=5
+    )
+    assert records, "infant mortality is a child-health indicator"
+    assert all("infant" in r.indicator_name.lower() for r in records)
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_child_health_records_carry_indicator_names(tmp_path: Path):
+    """A record's name must describe the measure, not repeat its code."""
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    client, cache, http_client = _client(tmp_path)
+    for code in WHO_CHILD_HEALTH_INDICATORS:
+        respx.get(f"{GHO_BASE}/{code}").respond(
+            json={"value": [{"SpatialDim": "JPN", "TimeDim": "2024", "NumericValue": 1.0}]}
+        )
+
+    records, _ = await client.get_child_health_statistics("child health", country="JPN")
+    assert records
+    for r in records:
+        assert r.indicator_name != r.indicator_code
+        assert r.indicator_name == WHO_CHILD_HEALTH_INDICATORS[r.indicator_code]
+    await cache.close()
+    await http_client.aclose()
