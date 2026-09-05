@@ -289,7 +289,16 @@ async def test_scihub_browser_fallback_disabled_skips_camoufox(client, monkeypat
 
 
 async def test_scihub_camoufox_import_error_gracefully_handled(client, monkeypatch):
-    monkeypatch.setattr("builtins.__import__", lambda name, *a, **k: (_ for _ in ()).throw(ImportError("no camoufox")) if "camoufox" in name else __import__(name, *a, **k))
+    import builtins
+
+    _real_import = builtins.__import__
+
+    def _block_camoufox(name, *args, **kwargs):
+        if "camoufox" in name:
+            raise ImportError("no camoufox")
+        return _real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _block_camoufox)
     settings = Settings(enable_browser_fallback=True)
     provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     bytes_res, url_res = await provider._fetch_via_camoufox("10.1038/test")
