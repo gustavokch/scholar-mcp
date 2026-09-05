@@ -188,3 +188,162 @@ async def test_get_child_health_statistics_marks_error_on_failure(tmp_path: Path
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+# --- Indicator name matching ------------------------------------------------
+#
+# The GHO filter used to be one literal substring test over the whole query:
+# ``contains(IndicatorName, 'suicide mortality rate')``. WHO names the suicide
+# indicators "Age-standardized suicide rates (per 100 000 population)" and
+# "Crude suicide rates (per 100 000 population)", so that phrasing is not a
+# substring of either and the lookup returned nothing at all -- while the bare
+# word "suicide" matched both. Whether a caller found the data came down to how
+# it happened to word the query.
+
+SUICIDE_NAMES = [
+    "Age-standardized suicide rates (per 100 000 population)",
+    "Crude suicide rates (per 100 000 population)",
+]
+
+
+def _matches(filter_expr: str, name: str) -> bool:
+    """Evaluate an OData ``contains(...) and contains(...)`` filter locally."""
+    import re
+
+    terms = re.findall(r"contains\(IndicatorName, '([^']*)'\)", filter_expr)
+    assert terms, f"no contains() terms in {filter_expr!r}"
+    return all(t.lower() in name.lower() for t in terms)
+
+
+def test_indicator_filter_matches_despite_extra_query_words():
+    """A caller writing "suicide mortality rate" must still reach an indicator
+    named "...suicide rates...". Words the name does not carry are dropped
+    rather than failing the whole match."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("suicide mortality rate")
+    assert all(_matches(expr, name) for name in SUICIDE_NAMES)
+
+
+def test_indicator_filter_matches_the_official_indicator_name():
+    """The indicator's own name must match itself -- it did not before, because
+    unit punctuation and the singular/plural of "rate" made the literal
+    substring test fail."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("Age-standardized suicide rates (per 100 000 population)")
+    assert _matches(expr, SUICIDE_NAMES[0])
+
+
+def test_indicator_filter_still_matches_a_bare_term():
+    """The phrasing that always worked must keep working."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    assert all(_matches(indicator_filter("suicide"), n) for n in SUICIDE_NAMES)
+
+
+def test_indicator_filter_does_not_match_an_unrelated_indicator():
+    """Dropping noise words must not turn the filter into a wildcard: every
+    surviving token still has to appear in the name."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("tuberculosis incidence")
+    assert not any(_matches(expr, name) for name in SUICIDE_NAMES)
+
+
+def test_indicator_filter_keeps_a_query_that_is_all_noise_words():
+    """"mortality rate" is entirely stopwords and unit noise under the token
+    rule. Emptying the filter would match every indicator WHO publishes, so the
+    query must fall back to its own text."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("mortality rate")
+    assert _matches(expr, "Maternal mortality ratio (per 100 000 live births)") or _matches(
+        expr, "Adult mortality rate (probability of dying between 15 and 60 years)"
+    )
+    assert not _matches(expr, "Population using safely managed drinking-water services (%)")
+
+
+def test_indicator_filter_escapes_quotes():
+    """A query with an apostrophe is interpolated into an OData string literal;
+    unescaped it produces a malformed filter."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("women's health")
+    assert "''" in expr or "'" not in expr.split("contains(IndicatorName, '")[1].rsplit("')", 1)[0]
+
+
+def test_indicator_filter_anchors_on_the_subject_not_the_measure():
+    """"mortality" appears in a large share of WHO's indicator names, so
+    anchoring there returns everything about death. The subject beside it is
+    what makes the query specific."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    assert indicator_filter("suicide mortality rate") == indicator_filter("suicide")
+    assert "neonatal" in indicator_filter("neonatal mortality rate")
+    assert "tuberculosis" in indicator_filter("tuberculosis incidence rate")
+
+
+def test_indicator_filter_keeps_hyphenated_subjects_intact():
+    """"under-five" is one subject. Split on the hyphen it anchors on "under",
+    a word that appears in unrelated indicator names and identifies nothing."""
+    from scholar_mcp.medical.who import indicator_filter
+
+    expr = indicator_filter("under-five mortality rate")
+    assert _matches(
+        expr, "Under-five mortality rate (probability of dying by age 5 per 1000 live births)"
+    )
+    assert not _matches(expr, "Population under the age of 25 (%)")
+
+
+def test_rank_indicators_puts_the_closest_name_first():
+    """The subject filter is broad on purpose, so the caller's remaining words
+    decide which candidate is wanted -- an adult indicator must not win a query
+    that says "neonatal"."""
+    from scholar_mcp.medical.who import _rank_indicators
+
+    candidates = [
+        {"IndicatorCode": "X", "IndicatorName": "Adult mortality rate"},
+        {"IndicatorCode": "Y", "IndicatorName": "Neonatal mortality rate (per 1000 live births)"},
+    ]
+    ranked = _rank_indicators(candidates, "neonatal mortality rate")
+    assert ranked[0]["IndicatorCode"] == "Y"
+
+
+def test_rank_indicators_keeps_every_candidate():
+    """Ranking reorders; it must not drop candidates, or a query whose wording
+    matches nothing well would return empty instead of merely imperfect."""
+    from scholar_mcp.medical.who import _rank_indicators
+
+    candidates = [
+        {"IndicatorCode": "A", "IndicatorName": "Something unrelated"},
+        {"IndicatorCode": "B", "IndicatorName": "Neonatal mortality rate"},
+    ]
+    assert len(_rank_indicators(candidates, "neonatal")) == 2
+
+
+def test_rank_indicators_prefers_the_general_indicator_over_a_narrower_one():
+    """WHO publishes sub-population variants whose names are supersets of the
+    general one: "In-prison suicide mortality rate" contains every word of
+    "suicide mortality rate", while the indicator actually wanted --
+    "Age-standardized suicide rates" -- matches fewer of them. Scoring on
+    overlap alone therefore ranks the narrow variant first and, with only the
+    top few candidates queried, the general indicator is never fetched.
+    """
+    from scholar_mcp.medical.who import _rank_indicators
+
+    candidates = [
+        {
+            "IndicatorCode": "PRISON_D3",
+            "IndicatorName": (
+                "In-prison suicide mortality rate "
+                "(per 100 000 incarcerated persons per year)"
+            ),
+        },
+        {
+            "IndicatorCode": "MH_12",
+            "IndicatorName": "Age-standardized suicide rates (per 100 000 population)",
+        },
+    ]
+    ranked = _rank_indicators(candidates, "suicide mortality rate")
+    assert ranked[0]["IndicatorCode"] == "MH_12"

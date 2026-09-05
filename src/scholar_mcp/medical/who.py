@@ -43,6 +43,127 @@ WHO_CHILD_HEALTH_INDICATORS = [
 ]
 
 
+# Words that carry no indicator identity. WHO writes its indicator names as
+# "<subject> <measure> (per <unit> <denominator>)", so a caller's natural
+# phrasing tends to differ from the stored name in exactly these words --
+# "mortality rate" against "rates", a spelled-out unit against "(per 100 000
+# population)" -- while agreeing on the subject.
+_INDICATOR_NOISE = frozenset(
+    """a an the of in for and or by per to with at from on
+    rate rates ratio ratios level levels value values number numbers
+    total estimate estimates estimated prevalence percent percentage
+    population populations year years age aged
+    live birth births person persons people
+    100 000 100000 1000 10000""".split()
+)
+
+# Words that name a measure rather than a subject. Almost every mortality
+# indicator contains "mortality", so anchoring a query there returns hundreds of
+# unrelated rows; the subject beside it is what makes the query specific.
+_INDICATOR_MEASURES = frozenset(
+    """mortality incidence death deaths dying probability expectancy
+    standardized standardised crude adjusted""".split()
+)
+
+_INDICATOR_TOKEN_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+
+
+def _is_measure(token: str) -> bool:
+    """True for a token that names a measure rather than a subject.
+
+    Tested per hyphen part, because WHO hyphenates measures as readily as
+    subjects: "age-standardized" is a measure whose parts are both generic,
+    while "under-five" is a subject that must survive.
+    """
+    parts = token.split("-")
+    return all(p in _INDICATOR_MEASURES or p in _INDICATOR_NOISE for p in parts)
+
+
+def _indicator_tokens(indicator_name: str) -> list[str]:
+    """Content tokens of a query, longest first.
+
+    Plurals are folded to their singular so "rates" and "rate" agree, and the
+    noise words above are dropped -- they are what make a natural phrasing miss
+    a stored name that means the same thing.
+    """
+    tokens: list[str] = []
+    for raw in _INDICATOR_TOKEN_RE.findall(indicator_name.lower()):
+        if raw in _INDICATOR_NOISE:
+            continue
+        # Fold a simple plural ("rates" -> "rate"). Words whose singular is not
+        # formed this way ("tuberculosis", "diabetes") end in "is"/"es" after a
+        # consonant and must be left alone, or the filter searches for a string
+        # that appears in no indicator name at all.
+        token = (
+            raw[:-1]
+            if len(raw) > 3
+            and raw.endswith("s")
+            and not raw.endswith(("ss", "is", "us", "es"))
+            else raw
+        )
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def indicator_filter(indicator_name: str) -> str:
+    """OData filter selecting indicators whose name carries every content word.
+
+    A single ``contains()`` over the whole query is a literal substring test, so
+    "suicide mortality rate" could not reach "Age-standardized suicide rates
+    (per 100 000 population)" -- the stored name carries neither "mortality" nor
+    the singular "rate" in that order. Requiring each content token separately
+    matches on what the two phrasings agree about, and still excludes an
+    unrelated indicator, since every token must appear.
+    """
+    tokens = _indicator_tokens(indicator_name)
+    if not tokens:
+        # An all-noise query ("mortality rate") would otherwise produce an empty
+        # filter, which selects every indicator WHO publishes. Fall back to the
+        # caller's own text, restoring the old literal behaviour for that case.
+        tokens = [indicator_name.strip().lower()]
+    # Query on the subject alone, then rank locally (see _rank_indicators).
+    # WHO names an indicator by subject and measure, and a caller often supplies
+    # a measure the stored name does not use -- "suicide mortality rate" against
+    # "Age-standardized suicide rates". Requiring every token would reject that
+    # match; requiring the subject keeps the candidate set small enough to rank.
+    # Generic measure words are skipped so "suicide mortality rate" anchors on
+    # "suicide" rather than on "mortality", which every death indicator carries.
+    anchor = next((t for t in tokens if not _is_measure(t)), tokens[0])
+    return "contains(IndicatorName, '{}')".format(anchor.replace("'", "''"))
+
+
+def _rank_indicators(
+    indicators: list[dict[str, Any]], indicator_name: str
+) -> list[dict[str, Any]]:
+    """Indicators ordered by how much of the query their name accounts for.
+
+    The subject-only filter is deliberately broad, so the caller's remaining
+    words decide which candidates are actually wanted. Ties keep WHO's own
+    order, and nothing is discarded -- a low-scoring candidate is still better
+    than the arbitrary first three the caller would otherwise have taken.
+    """
+    wanted = set(_indicator_tokens(indicator_name))
+    if not wanted:
+        return indicators
+
+    def score(ind: dict[str, Any]) -> float:
+        name_tokens = set(_indicator_tokens(str(ind.get("IndicatorName") or "")))
+        hits = len(wanted & name_tokens)
+        # Extra words are not all equal. A measure or unit word ("live births",
+        # "age-standardized") only says how the same quantity is expressed, but
+        # an extra subject word changes what is being counted: "In-prison
+        # suicide mortality rate" matches every word of "suicide mortality rate"
+        # yet measures a different population. Only the latter is penalised, so
+        # a fully-qualified name still beats a merely shorter one.
+        extra_subjects = sum(
+            1 for t in name_tokens - wanted if not _is_measure(t)
+        )
+        return hits - 1.5 * extra_subjects
+
+    return sorted(indicators, key=score, reverse=True)
+
+
 def indicator_variations(indicator_name: str) -> list[str]:
     lower = indicator_name.lower()
     variations: list[str] = []
@@ -146,7 +267,7 @@ class WHOClient:
             resp = await self.http_client.get(
                 f"{WHO_API_BASE}/Indicator",
                 params={
-                    "$filter": f"contains(IndicatorName, '{indicator}')",
+                    "$filter": indicator_filter(indicator),
                     "$format": "json",
                 },
             )
@@ -167,7 +288,7 @@ class WHOClient:
                     resp = await self.http_client.get(
                         f"{WHO_API_BASE}/Indicator",
                         params={
-                            "$filter": f"contains(IndicatorName, '{term}')",
+                            "$filter": indicator_filter(term),
                             "$format": "json",
                         },
                     )
@@ -194,7 +315,7 @@ class WHOClient:
 
         all_records: list[WHOIndicatorRecord] = []
 
-        for ind in indicators[:3]:
+        for ind in _rank_indicators(indicators, indicator)[:3]:
             code = ind.get("IndicatorCode")
             name = ind.get("IndicatorName", "")
             if not code:
