@@ -1,3 +1,4 @@
+import asyncio
 import re
 from typing import Any
 from bs4 import BeautifulSoup
@@ -7,6 +8,9 @@ from scholar_mcp.models import FullTextResponse, IdentifierMap
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
+
+_CAMOUFOX_MAX_MIRRORS = 3
+_CAMOUFOX_TOTAL_TIMEOUT = 20
 
 
 def _extract_pdf_url(html: str) -> str | None:
@@ -71,10 +75,10 @@ class SciHubProvider(BaseProvider):
         except ImportError:
             return None, None
 
-        try:
+        async def _try_mirrors() -> tuple[bytes | None, str | None]:
             async with AsyncCamoufox(headless=True) as browser:
                 page = await browser.new_page()
-                for mirror in self.mirrors:
+                for mirror in self.mirrors[:_CAMOUFOX_MAX_MIRRORS]:
                     mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
                     try:
                         await page.goto(
@@ -101,10 +105,14 @@ class SciHubProvider(BaseProvider):
                             return pdf_bytes, pdf_url
                     except Exception:
                         continue
-        except Exception:
             return None, None
 
-        return None, None
+        try:
+            return await asyncio.wait_for(
+                _try_mirrors(), timeout=_CAMOUFOX_TOTAL_TIMEOUT
+            )
+        except (asyncio.TimeoutError, Exception):
+            return None, None
 
     async def fetch_pdf_bytes(
         self,

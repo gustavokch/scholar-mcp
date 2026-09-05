@@ -314,6 +314,22 @@ async def test_scihub_without_doi_is_miss(client):
 
 
 @respx.mock
+async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
+    """Camoufox fallback must try at most _CAMOUFOX_MAX_MIRRORS mirrors,
+    not all 5 provided."""
+    mirrors = [f"https://m{i}.org" for i in range(5)]
+    for m in mirrors:
+        respx.get(url__startswith=m).mock(return_value=httpx.Response(403))
+    # Camoufox returns no PDF from any mirror (empty HTML)
+    _, captured = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    await provider._fetch_via_camoufox("10.1038/test")
+    from scholar_mcp.providers.scihub import _CAMOUFOX_MAX_MIRRORS
+    assert len(captured) == _CAMOUFOX_MAX_MIRRORS
+
+
+@respx.mock
 async def test_pubmed_fetch_abstract_structured_labels(client):
     efetch_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <PubmedArticleSet>
