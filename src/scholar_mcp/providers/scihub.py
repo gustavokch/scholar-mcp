@@ -1,6 +1,7 @@
 import asyncio
 import re
 from typing import Any
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS, Settings
@@ -13,7 +14,18 @@ _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
 
 
-def _extract_pdf_url(html: str) -> str | None:
+def _normalize_pdf_url(url: str, base_url: str | None = None) -> str:
+    url = url.split("#")[0]
+    if url.startswith("//"):
+        return "https:" + url
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    if base_url:
+        return urljoin(base_url, url)
+    return url
+
+
+def _extract_pdf_url(html: str, base_url: str | None = None) -> str | None:
     """Extract PDF URL from Sci-Hub HTML response."""
     if not html:
         return None
@@ -23,13 +35,11 @@ def _extract_pdf_url(html: str) -> str | None:
 
         iframe = soup.find("iframe")
         if iframe and iframe.get("src") and ".pdf" in iframe["src"]:
-            url = iframe["src"].split("#")[0]
-            return "https:" + url if url.startswith("//") else url
+            return _normalize_pdf_url(iframe["src"], base_url)
 
         embed = soup.find("embed")
         if embed and embed.get("src") and ".pdf" in embed["src"]:
-            url = embed["src"].split("#")[0]
-            return "https:" + url if url.startswith("//") else url
+            return _normalize_pdf_url(embed["src"], base_url)
 
         for tag in soup.find_all(attrs={"onclick": True}):
             m = re.search(
@@ -37,12 +47,10 @@ def _extract_pdf_url(html: str) -> str | None:
                 tag["onclick"].replace("\\/", "/"),
             )
             if m:
-                url = m.group(1).split("#")[0]
-                return "https:" + url if url.startswith("//") else url
+                return _normalize_pdf_url(m.group(1), base_url)
 
         for match in re.findall(r'((?:https?:)?//[^\s"\'<>]+\.pdf)', html):
-            url = match if match.startswith("http") else "https:" + match
-            return url.split("#")[0]
+            return _normalize_pdf_url(match, base_url)
     except Exception:
         pass
 
@@ -87,7 +95,7 @@ class SciHubProvider(BaseProvider):
                             timeout=15000,
                         )
                         content = await page.content()
-                        pdf_url = _extract_pdf_url(content)
+                        pdf_url = _extract_pdf_url(content, base_url=mirror_url)
                         if not pdf_url:
                             continue
 
@@ -130,7 +138,7 @@ class SciHubProvider(BaseProvider):
                 if resp is None or resp.status_code != 200 or not resp.text:
                     continue
 
-                pdf_url = _extract_pdf_url(resp.text)
+                pdf_url = _extract_pdf_url(resp.text, base_url=mirror_url)
                 if not pdf_url:
                     continue
 

@@ -7,7 +7,7 @@ from scholar_mcp.models import IdentifierMap, PaperMetadata
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import annotate_oa_status
 from scholar_mcp.providers.pubmed import PubMedProvider
-from scholar_mcp.providers.scihub import SciHubProvider
+from scholar_mcp.providers.scihub import SciHubProvider, _extract_pdf_url
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -251,6 +251,16 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-f
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
     return attempts, captured_urls
+
+
+def test_scihub_extract_pdf_url_resolves_relative_path():
+    html = '<html><iframe src="/storage/10.1038/test.pdf#view=fitH"></iframe></html>'
+    res = _extract_pdf_url(html, base_url="https://sci-hub.se/10.1038/test")
+    assert res == "https://sci-hub.se/storage/10.1038/test.pdf"
+
+    html_embed = '<html><embed src="/tree/10.1038/test.pdf"/></html>'
+    res_embed = _extract_pdf_url(html_embed, base_url="https://sci-hub.se/10.1038/test")
+    assert res_embed == "https://sci-hub.se/tree/10.1038/test.pdf"
 
 
 @respx.mock
