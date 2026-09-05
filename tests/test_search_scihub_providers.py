@@ -7,7 +7,7 @@ from scholar_mcp.models import IdentifierMap, PaperMetadata
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import annotate_oa_status
 from scholar_mcp.providers.pubmed import PubMedProvider
-from scholar_mcp.providers.scihub import SciHubProvider
+from scholar_mcp.providers.scihub import SciHubProvider, _extract_pdf_url
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -194,22 +194,182 @@ async def test_scihub_mirror_fallback(client, monkeypatch):
     monkeypatch.setattr(
         "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "SciHub Extracted Content"
     )
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"])
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
     assert res is not None and res.source == "scihub"
     assert "SciHub Extracted Content" in res.content
 
 
+def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-fake-data"):
+    import sys
+    import types
+
+    attempts: list[bool] = []
+    captured_urls: list[str] = []
+
+    class _FakeResponse:
+        status = 200
+
+        async def body(self):
+            return pdf_bytes
+
+    class _FakeRequest:
+        async def get(self, url, *a, **k):
+            return _FakeResponse()
+
+    class _FakePage:
+        def __init__(self):
+            self.request = _FakeRequest()
+
+        async def goto(self, url, *a, **k):
+            captured_urls.append(url)
+            return None
+
+        async def content(self):
+            return rendered_html
+
+    class _FakeBrowser:
+        async def new_page(self, *a, **k):
+            return _FakePage()
+
+    class _FakeCamoufoxContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _FakeBrowser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _fake_async_camoufox(**launch_options):
+        return _FakeCamoufoxContext()
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = _fake_async_camoufox
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    return attempts, captured_urls
+
+
+def test_scihub_extract_pdf_url_resolves_relative_path():
+    html = '<html><iframe src="/storage/10.1038/test.pdf#view=fitH"></iframe></html>'
+    res = _extract_pdf_url(html, base_url="https://sci-hub.se/10.1038/test")
+    assert res == "https://sci-hub.se/storage/10.1038/test.pdf"
+
+    html_embed = '<html><embed src="/tree/10.1038/test.pdf"/></html>'
+    res_embed = _extract_pdf_url(html_embed, base_url="https://sci-hub.se/10.1038/test")
+    assert res_embed == "https://sci-hub.se/tree/10.1038/test.pdf"
+
+
 @respx.mock
-async def test_scihub_all_mirrors_down_is_miss(client):
+async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(503))
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"])
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(doi="10.1038/test")) is None
 
 
+@respx.mock
+async def test_scihub_fetch_pdf_bytes_ignores_non_pdf_content(client):
+    """When a mirror returns HTML/error page instead of PDF bytes, it should be ignored."""
+    respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://mirror1.org/paper.pdf"></iframe></html>',
+        )
+    )
+    respx.get("https://mirror1.org/paper.pdf").mock(
+        return_value=httpx.Response(200, content=b"<html>Cloudflare error</html>")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
+    assert pdf_bytes is None
+    assert pdf_url is None
+
+
+@respx.mock
+async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
+    respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
+    rendered_html = '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
+    attempts, captured = _install_fake_camoufox(monkeypatch, rendered_html=rendered_html)
+    monkeypatch.setattr(
+        "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "Camoufox SciHub Content"
+    )
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
+    assert res is not None and res.source == "scihub"
+    assert "Camoufox SciHub Content" in res.content
+    assert len(attempts) == 1
+    assert "https://mirror1.org/10.1038/test" in captured
+
+
+@respx.mock
+async def test_scihub_browser_fallback_disabled_skips_camoufox(client, monkeypatch):
+    respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
+    attempts, _ = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
+    assert res is None
+    assert len(attempts) == 0
+
+
+async def test_scihub_camoufox_import_error_gracefully_handled(client, monkeypatch):
+    import builtins
+
+    _real_import = builtins.__import__
+
+    def _block_camoufox(name, *args, **kwargs):
+        if "camoufox" in name:
+            raise ImportError("no camoufox")
+        return _real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _block_camoufox)
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    bytes_res, url_res = await provider._fetch_via_camoufox("10.1038/test")
+    assert bytes_res is None
+    assert url_res is None
+
+
 async def test_scihub_without_doi_is_miss(client):
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"])
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(pmid="123")) is None
+
+
+@respx.mock
+async def test_scihub_whitespace_doi_is_miss(client):
+    route = respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(200, text="<html>home</html>")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    assert await provider.fetch_full_text(IdentifierMap(doi="   ")) is None
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="   "))
+    assert pdf_bytes is None
+    assert pdf_url is None
+    assert route.call_count == 0
+
+
+@respx.mock
+async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
+    """Camoufox fallback must try at most _CAMOUFOX_MAX_MIRRORS mirrors,
+    not all 5 provided."""
+    mirrors = [f"https://m{i}.org" for i in range(5)]
+    for m in mirrors:
+        respx.get(url__startswith=m).mock(return_value=httpx.Response(403))
+    # Camoufox returns no PDF from any mirror (empty HTML)
+    _, captured = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    await provider._fetch_via_camoufox("10.1038/test")
+    from scholar_mcp.providers.scihub import _CAMOUFOX_MAX_MIRRORS
+    assert len(captured) == _CAMOUFOX_MAX_MIRRORS
 
 
 @respx.mock
