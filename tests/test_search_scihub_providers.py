@@ -194,7 +194,8 @@ async def test_scihub_mirror_fallback(client, monkeypatch):
     monkeypatch.setattr(
         "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "SciHub Extracted Content"
     )
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"])
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
     assert res is not None and res.source == "scihub"
     assert "SciHub Extracted Content" in res.content
@@ -307,7 +308,8 @@ async def test_scihub_camoufox_import_error_gracefully_handled(client, monkeypat
 
 
 async def test_scihub_without_doi_is_miss(client):
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"])
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(pmid="123")) is None
 
 
