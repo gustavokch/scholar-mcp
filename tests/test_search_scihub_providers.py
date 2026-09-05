@@ -343,6 +343,20 @@ async def test_scihub_without_doi_is_miss(client):
 
 
 @respx.mock
+async def test_scihub_whitespace_doi_is_miss(client):
+    route = respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(200, text="<html>home</html>")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    assert await provider.fetch_full_text(IdentifierMap(doi="   ")) is None
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="   "))
+    assert pdf_bytes is None
+    assert pdf_url is None
+    assert route.call_count == 0
+
+
+@respx.mock
 async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
     """Camoufox fallback must try at most _CAMOUFOX_MAX_MIRRORS mirrors,
     not all 5 provided."""

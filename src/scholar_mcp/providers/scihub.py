@@ -127,7 +127,7 @@ class SciHubProvider(BaseProvider):
         ids: IdentifierMap,
     ) -> tuple[bytes | None, str | None]:
         """Attempt to fetch raw PDF bytes across Sci-Hub mirrors, returning (bytes, pdf_url)."""
-        if not ids.doi:
+        if not ids.doi or not ids.doi.strip():
             return None, None
 
         clean_doi = ids.doi.strip()
@@ -156,7 +156,7 @@ class SciHubProvider(BaseProvider):
         return None, None
 
     async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
-        if not ids.doi:
+        if not ids.doi or not ids.doi.strip():
             return None
 
         pdf_bytes, pdf_url = await self.fetch_pdf_bytes(ids)
