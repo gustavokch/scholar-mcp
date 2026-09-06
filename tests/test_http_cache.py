@@ -1,8 +1,8 @@
 import asyncio
+import logging
 import time
 
 import httpx
-import pytest
 import respx
 
 from scholar_mcp.config import Settings
@@ -58,6 +58,45 @@ def test_ncbi_credential_injection():
 
 
 @respx.mock
+async def test_ncbi_credentials_survive_explicit_params():
+    """httpx replaces the URL query when params= is given; credentials must survive."""
+    route = respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(
+        settings=Settings(
+            pubmed_api_key="secret-key", pubmed_email="e@example.com", pubmed_tool="TestApp"
+        )
+    )
+    await client.get(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        params={"db": "pubmed", "term": "q"},
+    )
+    sent = str(route.calls[0].request.url)
+    assert "api_key=secret-key" in sent
+    assert "tool=TestApp" in sent
+    assert "db=pubmed" in sent
+    assert "term=q" in sent
+    await client.aclose()
+
+
+@respx.mock
+async def test_non_ncbi_params_are_still_sent():
+    """Folding params into the URL must not drop them for hosts without injection."""
+    route = respx.get(url__regex=r"https://api\.unpaywall\.org/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings())
+    await client.get(
+        "https://api.unpaywall.org/v2/10.1038/abc", params={"email": "e@example.com"}
+    )
+    sent = str(route.calls[0].request.url)
+    assert "email=e%40example.com" in sent or "email=e@example.com" in sent
+    assert "/v2/10.1038/abc" in sent
+    await client.aclose()
+
+
+@respx.mock
 async def test_retries_then_succeeds():
     route = respx.get("https://example.org/data").mock(
         side_effect=[
@@ -106,3 +145,122 @@ async def test_limiters_concurrent_access():
     assert len(set(id(lim) for lim in limiters)) == 1
     await client.aclose()
 
+
+@respx.mock
+async def test_http_client_logs_warning_on_4xx_5xx(caplog):
+    respx.get("https://example.org/bad").mock(
+        return_value=httpx.Response(400, text="Bad Request error detail")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5))
+    with caplog.at_level(logging.WARNING):
+        resp = await client.get("https://example.org/bad")
+    assert resp is None
+    assert any("failed with status 400" in rec.message for rec in caplog.records)
+    assert any("Bad Request error detail" in rec.message for rec in caplog.records)
+    await client.aclose()
+
+
+@respx.mock
+async def test_http_client_logs_warning_on_transport_error(caplog):
+    respx.get("https://example.org/timeout").mock(
+        side_effect=httpx.ConnectTimeout("Connection timed out")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    with caplog.at_level(logging.WARNING):
+        resp = await client.get("https://example.org/timeout")
+    assert resp is None
+    terminal = [rec for rec in caplog.records if "failed after 2 attempts" in rec.message]
+    assert len(terminal) == 1
+    assert terminal[0].levelno == logging.WARNING
+    assert "Connection timed out" in terminal[0].message
+    await client.aclose()
+
+
+@respx.mock
+async def test_http_logs_never_leak_credentials(caplog):
+    """Injected api_key/email must not reach the log stream on failure paths."""
+    respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
+        return_value=httpx.Response(400, text="Bad Request")
+    )
+    client = AsyncHttpClient(
+        settings=Settings(pubmed_api_key="secret-key", pubmed_email="e@example.com")
+    )
+    with caplog.at_level(logging.WARNING):
+        assert await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params={"db": "pubmed", "term": "q"},
+        ) is None
+    assert "secret-key" not in caplog.text
+    assert "e@example.com" not in caplog.text
+    assert "e%40example.com" not in caplog.text
+    # The diagnostic itself must survive redaction.
+    assert "api_key=REDACTED" in caplog.text
+    assert "term=q" in caplog.text
+    await client.aclose()
+
+
+@respx.mock
+async def test_error_body_log_is_bounded_and_binary_safe(caplog, monkeypatch):
+    """The error excerpt must come from bounded bytes, never a whole-body decode."""
+
+    def _forbidden(self):
+        raise AssertionError("resp.text decodes the whole body; slice resp.content instead")
+
+    monkeypatch.setattr(httpx.Response, "text", property(_forbidden))
+    body = b"\xff\xfe" + b"A" * 200_000
+    respx.get("https://example.org/binary-error").mock(
+        return_value=httpx.Response(400, content=body)
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5))
+    with caplog.at_level(logging.WARNING):
+        assert await client.get("https://example.org/binary-error") is None
+    record = next(r for r in caplog.records if "failed with status 400" in r.message)
+    assert len(record.message) < 1000
+    await client.aclose()
+
+
+@respx.mock
+async def test_retry_is_logged_below_warning(caplog):
+    """NCBI 429 backoff is routine; only the terminal failure deserves WARNING."""
+    respx.get("https://example.org/flaky").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, text="ok")]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    with caplog.at_level(logging.DEBUG):
+        resp = await client.get("https://example.org/flaky")
+    assert resp is not None
+    retry_records = [r for r in caplog.records if "retryable status 503" in r.message]
+    assert retry_records, "the retry must still be reported"
+    assert all(r.levelno == logging.INFO for r in retry_records)
+    await client.aclose()
+
+
+def test_pypdf_sees_fonttools():
+    """pypdf gates its fontTools code paths behind this flag at import time.
+
+    Note: in pypdf 6.16 those paths are `Font.from_truetype_font_file` and
+    `_get_typographic_maps`, both on the *writer* side. Text extraction
+    (`pypdf._cmap`) does not use fontTools at all.
+    """
+    from pypdf._font import HAS_FONTTOOLS
+
+    assert HAS_FONTTOOLS is True
+
+
+
+
+@respx.mock
+async def test_merge_params_skips_none_values():
+    """httpx drops None-valued params; folding into URL must match, not send 'None'."""
+    route = respx.get(url__regex=r"https://api\.unpaywall\.org/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings())
+    await client.get(
+        "https://api.unpaywall.org/v2/10.1038/abc",
+        params={"email": "e@example.com", "unused": None},
+    )
+    sent = str(route.calls[0].request.url)
+    assert "unused" not in sent
+    assert "email=" in sent
+    await client.aclose()
