@@ -248,3 +248,20 @@ def test_pypdf_sees_fonttools():
     assert HAS_FONTTOOLS is True
 
 
+
+
+@respx.mock
+async def test_merge_params_skips_none_values():
+    """httpx drops None-valued params; folding into URL must match, not send 'None'."""
+    route = respx.get(url__regex=r"https://api\.unpaywall\.org/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings())
+    await client.get(
+        "https://api.unpaywall.org/v2/10.1038/abc",
+        params={"email": "e@example.com", "unused": None},
+    )
+    sent = str(route.calls[0].request.url)
+    assert "unused" not in sent
+    assert "email=" in sent
+    await client.aclose()

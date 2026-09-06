@@ -98,6 +98,9 @@ class AsyncHttpClient:
         parsed = urllib.parse.urlparse(url)
         query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         for key, value in params.items():
+            if value is None:
+                # Match httpx, which drops None-valued params from the wire.
+                continue
             if isinstance(value, (list, tuple)):
                 query_dict[key] = [str(item) for item in value]
             else:
