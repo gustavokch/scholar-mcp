@@ -201,6 +201,42 @@ async def test_http_logs_never_leak_credentials(caplog):
     await client.aclose()
 
 
+@respx.mock
+async def test_error_body_log_is_bounded_and_binary_safe(caplog, monkeypatch):
+    """The error excerpt must come from bounded bytes, never a whole-body decode."""
+
+    def _forbidden(self):
+        raise AssertionError("resp.text decodes the whole body; slice resp.content instead")
+
+    monkeypatch.setattr(httpx.Response, "text", property(_forbidden))
+    body = b"\xff\xfe" + b"A" * 200_000
+    respx.get("https://example.org/binary-error").mock(
+        return_value=httpx.Response(400, content=body)
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5))
+    with caplog.at_level(logging.WARNING):
+        assert await client.get("https://example.org/binary-error") is None
+    record = next(r for r in caplog.records if "failed with status 400" in r.message)
+    assert len(record.message) < 1000
+    await client.aclose()
+
+
+@respx.mock
+async def test_retry_is_logged_below_warning(caplog):
+    """NCBI 429 backoff is routine; only the terminal failure deserves WARNING."""
+    respx.get("https://example.org/flaky").mock(
+        side_effect=[httpx.Response(503), httpx.Response(200, text="ok")]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    with caplog.at_level(logging.DEBUG):
+        resp = await client.get("https://example.org/flaky")
+    assert resp is not None
+    retry_records = [r for r in caplog.records if "retryable status 503" in r.message]
+    assert retry_records, "the retry must still be reported"
+    assert all(r.levelno == logging.INFO for r in retry_records)
+    await client.aclose()
+
+
 def test_fonttools_installed():
     """Verify fontTools is installed so pypdf can decode CFF Type1 font encodings."""
     import fontTools

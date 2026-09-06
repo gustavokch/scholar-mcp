@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
+# How much of a failing response body to quote in the log. Bytes are sliced before
+# decoding so a multi-megabyte PDF or XML body is never decoded in full.
+ERROR_BODY_LOG_CHARS = 500
+
 # Query parameters whose values must never reach the log stream. `email` is here
 # because NCBI's contact address identifies the operator, not because it is a key.
 SENSITIVE_QUERY_PARAMS = frozenset(
@@ -161,7 +165,8 @@ class AsyncHttpClient:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
-                    logger.warning(
+                    # Routine on rate-limited hosts; only terminal failure is a warning.
+                    logger.info(
                         "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",
                         log_url,
                         resp.status_code,
@@ -178,7 +183,7 @@ class AsyncHttpClient:
                         "HTTP GET %s failed with status %d: %s",
                         log_url,
                         resp.status_code,
-                        resp.text[:500],
+                        resp.content[:ERROR_BODY_LOG_CHARS].decode("utf-8", "replace"),
                     )
                     return None
                 return resp
@@ -187,7 +192,7 @@ class AsyncHttpClient:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
-                    logger.warning(
+                    logger.info(
                         "HTTP GET %s raised %s (attempt %d/%d), retrying in %.2fs: %s",
                         log_url,
                         type(exc).__name__,
