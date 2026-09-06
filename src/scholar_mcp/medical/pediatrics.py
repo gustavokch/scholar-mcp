@@ -179,7 +179,10 @@ class PediatricsEngine:
         Camoufox (anti-detection Firefox) because the AAP hosts sit behind
         Cloudflare and 403 plain HTTP clients. It manages its own coherent
         fingerprint, so no custom user agent is sent."""
-        from camoufox.async_api import AsyncCamoufox
+        try:
+            from camoufox.async_api import AsyncCamoufox
+        except ImportError:
+            return []
 
         async with AsyncCamoufox(headless=True) as browser:
             page = await browser.new_page()

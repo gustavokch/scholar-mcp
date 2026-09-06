@@ -4,7 +4,11 @@ import httpx
 import respx
 
 from scholar_mcp.config import Settings
-from scholar_mcp.medical.pediatrics import PediatricsEngine
+from scholar_mcp.medical.pediatrics import (
+    AAP_BASE,
+    AAP_ITEM_SELECTORS,
+    PediatricsEngine,
+)
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
@@ -495,3 +499,31 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_pediatrics_camoufox_import_error_gracefully_handled(tmp_path: Path, monkeypatch):
+    """When camoufox is not installed, _camoufox_scrape must catch ImportError and return empty list."""
+    import builtins
+
+    _real_import = builtins.__import__
+
+    def _block_camoufox(name, *args, **kwargs):
+        if "camoufox" in name:
+            raise ImportError("no camoufox")
+        return _real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _block_camoufox)
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        res = await engine._camoufox_scrape(
+            "https://publications.aap.org/pediatrics/search",
+            "autism",
+            AAP_ITEM_SELECTORS,
+            AAP_BASE,
+            "aap-policy",
+        )
+        assert res == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
