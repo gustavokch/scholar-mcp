@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 import threading
 from typing import Any
@@ -8,6 +9,8 @@ import httpx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.utils.rate_limit import AsyncRateLimiter
+
+logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
@@ -117,22 +120,57 @@ class AsyncHttpClient:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    logger.warning(
+                        "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",
+                        target_url,
+                        resp.status_code,
+                        attempt + 1,
+                        self.max_retries,
+                        wait_time,
+                    )
                     await asyncio.sleep(wait_time)
                     continue
                 if ok_statuses and resp.status_code in ok_statuses:
                     return resp
                 if resp.status_code >= 400:
+                    logger.warning(
+                        "HTTP GET %s failed with status %d: %s",
+                        target_url,
+                        resp.status_code,
+                        resp.text[:500],
+                    )
                     return None
                 return resp
-            except (httpx.TransportError, httpx.TimeoutException):
+            except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < self.max_retries - 1:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    logger.warning(
+                        "HTTP GET %s raised %s (attempt %d/%d), retrying in %.2fs: %s",
+                        target_url,
+                        type(exc).__name__,
+                        attempt + 1,
+                        self.max_retries,
+                        wait_time,
+                        exc,
+                    )
                     await asyncio.sleep(wait_time)
                     continue
+                logger.warning(
+                    "HTTP GET %s failed after %d attempts: %s",
+                    target_url,
+                    self.max_retries,
+                    exc,
+                )
                 return None
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "HTTP GET %s raised unexpected exception: %s",
+                    target_url,
+                    exc,
+                    exc_info=True,
+                )
                 return None
         return None
 

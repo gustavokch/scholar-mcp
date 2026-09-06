@@ -106,3 +106,41 @@ async def test_limiters_concurrent_access():
     assert len(set(id(lim) for lim in limiters)) == 1
     await client.aclose()
 
+
+@respx.mock
+async def test_http_client_logs_warning_on_4xx_5xx(caplog):
+    import logging
+
+    respx.get("https://example.org/bad").mock(
+        return_value=httpx.Response(400, text="Bad Request error detail")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5))
+    with caplog.at_level(logging.WARNING):
+        resp = await client.get("https://example.org/bad")
+    assert resp is None
+    assert any("failed with status 400" in rec.message for rec in caplog.records)
+    assert any("Bad Request error detail" in rec.message for rec in caplog.records)
+    await client.aclose()
+
+
+@respx.mock
+async def test_http_client_logs_warning_on_transport_error(caplog):
+    import logging
+
+    respx.get("https://example.org/timeout").mock(
+        side_effect=httpx.ConnectTimeout("Connection timed out")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    with caplog.at_level(logging.WARNING):
+        resp = await client.get("https://example.org/timeout")
+    assert resp is None
+    assert any("ConnectTimeout" in rec.message or "failed after 2 attempts" in rec.message for rec in caplog.records)
+    await client.aclose()
+
+
+def test_fonttools_installed():
+    """Verify fontTools is installed so pypdf can decode CFF Type1 font encodings."""
+    import fontTools
+    assert fontTools.__version__ is not None
+
+
