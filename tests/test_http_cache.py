@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 
 import httpx
@@ -55,6 +56,45 @@ def test_ncbi_credential_injection():
 
     other = client._inject_credentials("https://api.unpaywall.org/v2/10.1038/abc")
     assert "api_key" not in other
+
+
+@respx.mock
+async def test_ncbi_credentials_survive_explicit_params():
+    """httpx replaces the URL query when params= is given; credentials must survive."""
+    route = respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(
+        settings=Settings(
+            pubmed_api_key="secret-key", pubmed_email="e@example.com", pubmed_tool="TestApp"
+        )
+    )
+    await client.get(
+        "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+        params={"db": "pubmed", "term": "q"},
+    )
+    sent = str(route.calls[0].request.url)
+    assert "api_key=secret-key" in sent
+    assert "tool=TestApp" in sent
+    assert "db=pubmed" in sent
+    assert "term=q" in sent
+    await client.aclose()
+
+
+@respx.mock
+async def test_non_ncbi_params_are_still_sent():
+    """Folding params into the URL must not drop them for hosts without injection."""
+    route = respx.get(url__regex=r"https://api\.unpaywall\.org/.*").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings())
+    await client.get(
+        "https://api.unpaywall.org/v2/10.1038/abc", params={"email": "e@example.com"}
+    )
+    sent = str(route.calls[0].request.url)
+    assert "email=e%40example.com" in sent or "email=e@example.com" in sent
+    assert "/v2/10.1038/abc" in sent
+    await client.aclose()
 
 
 @respx.mock
@@ -135,6 +175,29 @@ async def test_http_client_logs_warning_on_transport_error(caplog):
         resp = await client.get("https://example.org/timeout")
     assert resp is None
     assert any("ConnectTimeout" in rec.message or "failed after 2 attempts" in rec.message for rec in caplog.records)
+    await client.aclose()
+
+
+@respx.mock
+async def test_http_logs_never_leak_credentials(caplog):
+    """Injected api_key/email must not reach the log stream on failure paths."""
+    respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
+        return_value=httpx.Response(400, text="Bad Request")
+    )
+    client = AsyncHttpClient(
+        settings=Settings(pubmed_api_key="secret-key", pubmed_email="e@example.com")
+    )
+    with caplog.at_level(logging.WARNING):
+        assert await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+            params={"db": "pubmed", "term": "q"},
+        ) is None
+    assert "secret-key" not in caplog.text
+    assert "e@example.com" not in caplog.text
+    assert "e%40example.com" not in caplog.text
+    # The diagnostic itself must survive redaction.
+    assert "api_key=REDACTED" in caplog.text
+    assert "term=q" in caplog.text
     await client.aclose()
 
 
