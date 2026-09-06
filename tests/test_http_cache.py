@@ -3,7 +3,6 @@ import logging
 import time
 
 import httpx
-import pytest
 import respx
 
 from scholar_mcp.config import Settings

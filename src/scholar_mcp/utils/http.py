@@ -18,10 +18,11 @@ RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 # decoding so a multi-megabyte PDF or XML body is never decoded in full.
 ERROR_BODY_LOG_CHARS = 500
 
-# Query parameters whose values must never reach the log stream. `email` is here
-# because NCBI's contact address identifies the operator, not because it is a key.
+# Query parameters whose values must never reach the log stream. Kept narrow:
+# only credential-bearing keys. `email` is here because NCBI's contact
+# address identifies the operator, not because it is a key.
 SENSITIVE_QUERY_PARAMS = frozenset(
-    {"api_key", "apikey", "key", "email", "token", "access_token", "mailto"}
+    {"api_key", "apikey", "email", "token", "access_token"}
 )
 
 
