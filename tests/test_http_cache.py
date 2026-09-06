@@ -149,8 +149,6 @@ async def test_limiters_concurrent_access():
 
 @respx.mock
 async def test_http_client_logs_warning_on_4xx_5xx(caplog):
-    import logging
-
     respx.get("https://example.org/bad").mock(
         return_value=httpx.Response(400, text="Bad Request error detail")
     )
@@ -165,8 +163,6 @@ async def test_http_client_logs_warning_on_4xx_5xx(caplog):
 
 @respx.mock
 async def test_http_client_logs_warning_on_transport_error(caplog):
-    import logging
-
     respx.get("https://example.org/timeout").mock(
         side_effect=httpx.ConnectTimeout("Connection timed out")
     )
@@ -174,7 +170,10 @@ async def test_http_client_logs_warning_on_transport_error(caplog):
     with caplog.at_level(logging.WARNING):
         resp = await client.get("https://example.org/timeout")
     assert resp is None
-    assert any("ConnectTimeout" in rec.message or "failed after 2 attempts" in rec.message for rec in caplog.records)
+    terminal = [rec for rec in caplog.records if "failed after 2 attempts" in rec.message]
+    assert len(terminal) == 1
+    assert terminal[0].levelno == logging.WARNING
+    assert "Connection timed out" in terminal[0].message
     await client.aclose()
 
 
@@ -237,9 +236,15 @@ async def test_retry_is_logged_below_warning(caplog):
     await client.aclose()
 
 
-def test_fonttools_installed():
-    """Verify fontTools is installed so pypdf can decode CFF Type1 font encodings."""
-    import fontTools
-    assert fontTools.__version__ is not None
+def test_pypdf_sees_fonttools():
+    """pypdf gates its fontTools code paths behind this flag at import time.
+
+    Note: in pypdf 6.16 those paths are `Font.from_truetype_font_file` and
+    `_get_typographic_maps`, both on the *writer* side. Text extraction
+    (`pypdf._cmap`) does not use fontTools at all.
+    """
+    from pypdf._font import HAS_FONTTOOLS
+
+    assert HAS_FONTTOOLS is True
 
 
