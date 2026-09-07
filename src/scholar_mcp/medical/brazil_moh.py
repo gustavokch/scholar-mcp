@@ -170,6 +170,15 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
     return record.country == BRAZIL_COUNTRY
 
 
+def _is_allowed_host(url: str) -> bool:
+    """True only for the BVS hosts this module is permitted to fetch."""
+    try:
+        host = urllib.parse.urlparse(url or "").netloc.lower()
+    except ValueError:
+        return False
+    return host in FULLTEXT_ALLOWED_HOSTS
+
+
 def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Exact deduplication on the Solr ``id``, keeping first occurrence.
 
@@ -247,5 +256,117 @@ class BrazilMoHEngine:
             source="brazil_moh",
         )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
+
+    async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
+        """Resolve one record by its Solr id. Returns (record, errored)."""
+        resp = await self.http_client.get(
+            BVS_SEARCH_URL,
+            headers=BVS_HEADERS,
+            params={"q": f'id:"{record_id}"', "output": "json", "count": 5},
+        )
+        if resp is None:
+            return None, True
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, True
+        docs = _dedupe_by_id(_extract_docs(data))
+        if not docs:
+            return None, False
+        return _build_record(docs[0]), False
+
+    async def _extract_pdf_text(self, document_url: str) -> tuple[str, bool]:
+        """Fetch and extract the document PDF. Returns (text, errored).
+
+        Gates on content-type explicitly. ``get_bytes`` is not used here:
+        its HTML guard only catches Cloudflare-style challenge pages, so a
+        plain "Estamos em manutenção" WAF page would reach the PDF parser.
+        """
+        if not _is_allowed_host(document_url):
+            return "", False
+        resp = await self.http_client.get(document_url, headers=BVS_HEADERS)
+        if resp is None:
+            return "", True
+        content_type = resp.headers.get("content-type", "").lower()
+        if "application/pdf" not in content_type:
+            logger.info(
+                "brazil_moh full text is not a PDF (content-type=%r)", content_type
+            )
+            return "", True
+        try:
+            return pdf_bytes_to_text(resp.content), False
+        except Exception as exc:
+            logger.warning("brazil_moh PDF extraction failed: %s", exc)
+            return "", True
+
+    async def get_full_text(
+        self,
+        record_id: str,
+        max_chars: int | None = None,
+    ) -> tuple[dict[str, Any], CacheMetadata]:
+        normalized = (record_id or "").strip()
+        base = {
+            "source": "brazil-moh",
+            "record_id": normalized,
+            "document_url": "",
+            "truncated": False,
+        }
+        if not normalized:
+            return (
+                {**base, "status": "error", "error": "record_id is required",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+
+        cache_key = f"brazil_moh_fulltext:{normalized}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and cached_data is not None:
+            return self._serve_full_text(cached_data, max_chars), meta
+
+        record, errored = await self._lookup_record(normalized)
+        if errored:
+            return (
+                {**base, "status": "error", "error": "bvs request failed",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+        if record is None:
+            return (
+                {**base, "status": "not_found", "error": "no record for id",
+                 "title": "", "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+
+        base["document_url"] = record.document_url
+        pdf_text, errored = await self._extract_pdf_text(record.document_url)
+
+        if pdf_text:
+            result = {"content_type": "pdf", "content": pdf_text}
+        elif record.abstract:
+            result = {"content_type": "abstract", "content": record.abstract}
+        else:
+            return (
+                {**base, "status": "not_found",
+                 "error": "no full text or abstract available",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=errored),
+            )
+
+        payload = {**base, "status": "success", "title": record.title, **result}
+        # An errored payload is never cached: a transient block must not
+        # poison a 30-day TTL.
+        if not errored:
+            await self.cache.set(cache_key, payload, source="brazil_moh")
+        return (
+            self._serve_full_text(payload, max_chars),
+            CacheMetadata(cached=False, cache_age=0, error=errored),
+        )
+
+    @staticmethod
+    def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
+        limit = MAX_FULL_TEXT_CHARS if max_chars is None else max(1, max_chars)
+        content, truncated = truncate_content(payload.get("content", ""), limit)
+        return {**payload, "content": content, "truncated": truncated}
+
 
 

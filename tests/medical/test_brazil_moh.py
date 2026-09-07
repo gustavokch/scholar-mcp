@@ -435,3 +435,210 @@ async def test_search_caches_success_and_serves_from_cache(tmp_path: Path):
         await http_client.aclose()
 
 
+from scholar_mcp.medical.brazil_moh import _is_allowed_host
+
+PDF_URL = "https://docs.bvsalud.org/biblioref/2026/08/1708363/protocolo.pdf"
+FI_ADMIN_URL = "https://fi-admin.bvsalud.org/document/view/cfpaj"
+
+
+def test_is_allowed_host_accepts_bvs_hosts_only():
+    assert _is_allowed_host(FI_ADMIN_URL) is True
+    assert _is_allowed_host(PDF_URL) is True
+    assert _is_allowed_host("https://www.sciencedirect.com/x") is False
+    assert _is_allowed_host("https://evil.example.com/fi-admin.bvsalud.org") is False
+    assert _is_allowed_host("") is False
+
+
+@respx.mock
+async def test_get_full_text_extracts_pdf(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text",
+        lambda _: "Texto integral do protocolo.",
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF-1.5 fake", headers={"content-type": "application/pdf"}
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "pdf"
+        assert payload["content"] == "Texto integral do protocolo."
+        assert payload["source"] == "brazil-moh"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_offsite_url_degrades_without_fetching(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        doc = _bvs_doc(record_id="biblio-1", ab=["Resumo apenas."])
+        doc["ur"] = ["https://www.sciencedirect.com/science/article/pii/S123"]
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        offsite = respx.get(url__startswith="https://www.sciencedirect.com").mock(
+            return_value=httpx.Response(200, content=b"should never be requested")
+        )
+        payload, _ = await engine.get_full_text("biblio-1")
+        assert offsite.called is False
+        assert payload["content_type"] == "abstract"
+        assert payload["content"] == "Resumo apenas."
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_html_response_degrades_to_abstract(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, text="<html>Estamos em manutenção</html>",
+                headers={"content-type": "text/html"},
+            )
+        )
+        payload, _ = await engine.get_full_text("biblio-1")
+        assert payload["content_type"] == "abstract"
+        assert payload["content"] == "Resumo."
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_no_pdf_and_no_abstract_is_not_found(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        doc = _bvs_doc(record_id="biblio-1")
+        doc["ur"] = ["https://www.sciencedirect.com/x"]
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        payload, _ = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "not_found"
+        assert payload["content_type"] == "none"
+        assert payload["content"] == ""
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_unknown_record_is_not_found(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        payload, meta = await engine.get_full_text("biblio-missing")
+        assert payload["status"] == "not_found"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_get_full_text_requires_record_id(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        payload, meta = await engine.get_full_text("")
+        assert payload["status"] == "error"
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["content_type"] == "abstract"
+        assert meta.error is True
+        _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_caches_success(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: "Conteúdo."
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        search = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        await engine.get_full_text("biblio-1")
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert search.call_count == 1
+        assert meta.cached is True
+        assert payload["content"] == "Conteúdo."
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_truncates_served_not_cached(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: "x" * 500
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        payload, _ = await engine.get_full_text("biblio-1", max_chars=100)
+        assert payload["content"].startswith("x" * 100)
+        assert payload["truncated"] is True
+        assert len(payload["content"]) < 500
+        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        assert len(cached["content"]) == 500
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+
