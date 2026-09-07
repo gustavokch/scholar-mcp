@@ -16,6 +16,7 @@ def test_medical_settings_defaults():
     assert settings.cache_ttl_child_health == 604800
     assert settings.cache_ttl_pediatric_drugs == 86400
     assert settings.cache_ttl_clinical_trials == 86400
+    assert settings.cache_ttl_brazil_moh == 2592000
     assert settings.cache_max_entries == 1000
     assert settings.enable_browser_fallback is True
     assert settings.enable_medical_tools is True
@@ -47,3 +48,18 @@ def test_medical_settings_legacy_playwright_env_alias(monkeypatch):
     monkeypatch.setenv("ENABLE_PLAYWRIGHT_FALLBACK", "false")
     settings = Settings.load()
     assert settings.enable_browser_fallback is False
+
+
+def test_brazil_moh_ttl_env_override(monkeypatch):
+    monkeypatch.setenv("CACHE_TTL_BRAZIL_MOH", "600")
+    settings = Settings.load()
+    assert settings.cache_ttl_brazil_moh == 600
+
+
+def test_brazil_moh_cache_source_uses_its_own_ttl(tmp_path):
+    from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+
+    settings = Settings.load()
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    assert cache._ttl_for("brazil_moh", None) == 2592000
+
