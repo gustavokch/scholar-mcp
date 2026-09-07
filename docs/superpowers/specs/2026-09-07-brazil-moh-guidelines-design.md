@@ -177,7 +177,10 @@ Brazil scoping is two-stage because `pais_publicacao` cannot be queried:
 `pais_publicacao` drops Portugal and PAHO records.
 
 Deduplication is on `id`, keeping first occurrence so that removal never
-reorders survivors.
+reorders survivors. It is exact-key equality, implemented locally.
+`utils/deduplication.py` is deliberately not reused: `deduplicate_papers`
+performs fuzzy Levenshtein title matching over paper dicts, which would
+collapse distinct guidelines that share a similar title.
 
 Because duplicates consume result slots at roughly a 2.1–2.3x rate, the engine
 over-fetches and then trims. Module constants:
@@ -210,9 +213,11 @@ Chain:
    the abstract.
 3. GET the fi-admin URL with redirects followed and browser headers, arriving at
    `docs.bvsalud.org/biblioref/YYYY/MM/<id>/<name>.pdf`.
-4. Require `content-type` to contain `application/pdf`.
-   `AsyncHttpClient._is_unexpected_html` already treats an HTML body as a miss,
-   which is what a WAF interstitial returns.
+4. Require `content-type` to contain `application/pdf`, checked explicitly on
+   the response. `AsyncHttpClient.get_bytes` is not sufficient here: its HTML
+   guard (`_is_unexpected_html`) fires only when the body carries a
+   Cloudflare-style challenge marker, so a plain "Estamos em manutenção" WAF
+   page would pass through to the PDF parser.
 5. `pdf_bytes_to_text` from `parsers/pdf.py`, then `truncate_content`, with
    `MAX_FULL_TEXT_CHARS = 50_000` as in `who_iris.py`.
 
@@ -322,7 +327,7 @@ Required cases, each tied to a probe finding:
 - `fulltext_id` is set for a fi-admin `document_url` and empty for a
   `sciencedirect.com` one.
 - An off-allowlist `document_url` degrades to abstract and issues no second
-  request, asserted against the fake client's call log.
+  request, asserted with `route.called is False` on a `respx`-mocked route.
 - The degradation ladder covers PDF, abstract, and `not_found`.
 - An errored payload is not written to cache.
 - `max_chars` truncates the served payload, not the cached one.
