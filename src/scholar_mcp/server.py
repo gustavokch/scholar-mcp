@@ -26,6 +26,10 @@ from scholar_mcp.medical.formatters import (
     format_rxnorm_drugs,
     format_who_iris_guidelines,
 )
+from scholar_mcp.medical.brazil_moh import MAX_RESULTS as BRAZIL_MAX_RESULTS
+from scholar_mcp.medical.brazil_moh import VALID_COLLECTIONS as BRAZIL_VALID_COLLECTIONS
+from scholar_mcp.medical.brazil_moh import BrazilMoHEngine
+from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
 from scholar_mcp.medical.guidelines import GuidelinesEngine
 from scholar_mcp.medical.pediatrics import PediatricsEngine
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
@@ -45,6 +49,7 @@ fda_client = FDAClient(http_client=http_client, cache=medical_cache, settings=se
 rxnorm_client = RxNormClient(http_client=http_client, cache=medical_cache, settings=settings)
 who_client = WHOClient(http_client=http_client, cache=medical_cache, settings=settings)
 who_iris_engine = WHOIRISEngine(http_client=http_client, cache=medical_cache, settings=settings)
+brazil_moh_engine = BrazilMoHEngine(http_client=http_client, cache=medical_cache, settings=settings)
 clinical_trials_client = ClinicalTrialsClient(http_client=http_client, cache=medical_cache, settings=settings)
 guidelines_engine = GuidelinesEngine(pubmed=pubmed_client, cache=medical_cache, settings=settings)
 pediatrics_engine = PediatricsEngine(
@@ -567,6 +572,66 @@ if settings.enable_medical_tools:
             return payload
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "who-iris", "content": ""}
+
+    @mcp.tool()
+    async def search_brazil_moh_guidelines(
+        query: str,
+        limit: int = 10,
+        collection: str = "all",
+    ) -> dict[str, Any]:
+        """Search Brazilian Ministry of Health technical publications (BVS/iAHx).
+
+        Covers PCDT (Protocolos Clínicos e Diretrizes Terapêuticas), CONITEC
+        health-technology assessments, cadernos de atenção básica, manuais
+        técnicos, and normas de vigilância. Results are in Portuguese.
+
+        Args:
+            query: Free-text search terms. Portuguese terms match best;
+                every token is required (they are ANDed).
+            limit: Maximum number of results to return (max 50).
+            collection: 'all' (default, all Brazilian grey literature) or
+                'brisa' (health-technology assessments and PCDT only).
+        """
+        clamped = min(max(1, limit), BRAZIL_MAX_RESULTS)
+        if collection not in BRAZIL_VALID_COLLECTIONS:
+            return {
+                "status": "error",
+                "error": f"unknown collection {collection!r}; expected 'all' or 'brisa'",
+                "source": "brazil-moh",
+            }
+        try:
+            guidelines, meta = await brazil_moh_engine.search_guidelines(
+                query, limit=clamped, collection=collection
+            )
+            return format_brazil_moh_guidelines(guidelines, query, meta)
+        except Exception as ex:
+            return {"status": "error", "error": str(ex), "source": "brazil-moh"}
+
+    @mcp.tool()
+    async def get_brazil_moh_full_text(
+        record_id: str,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Retrieve full text of a Brazilian Ministry of Health document.
+
+        Downloads the document PDF from the BVS repository and extracts its
+        text. Falls back to the record abstract when the document is hosted
+        off-site or the PDF cannot be retrieved.
+
+        Args:
+            record_id: The `record_id` field returned by
+                search_brazil_moh_guidelines (e.g. 'biblio-1701387').
+            max_chars: Maximum character limit for the returned text
+                (defaults to 50,000).
+        """
+        try:
+            payload, meta = await brazil_moh_engine.get_full_text(
+                record_id, max_chars=max_chars
+            )
+            payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
+            return payload
+        except Exception as ex:
+            return {"status": "error", "error": str(ex), "source": "brazil-moh", "content": ""}
 
     @mcp.tool()
     async def search_medical_databases(query: str) -> dict[str, Any]:
