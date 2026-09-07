@@ -192,3 +192,246 @@ def test_is_brazilian_keeps_brasil_and_drops_others():
     assert _is_brazilian(portuguese) is False
     assert _is_brazilian(unknown) is False
 
+
+from pathlib import Path
+
+import httpx
+import respx
+
+from scholar_mcp.config import Settings
+from scholar_mcp.medical.brazil_moh import (
+    BVS_SEARCH_URL,
+    BrazilMoHEngine,
+    _dedupe_by_id,
+)
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+
+
+async def _engine(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    return engine, cache, http_client
+
+
+def _bvs_doc(record_id="biblio-1", title="Protocolo", country="^iBrazil^eBrasil", **extra):
+    doc = {
+        "id": record_id,
+        "ti": [title],
+        "la": ["pt"],
+        "da": "202609",
+        "pais_publicacao": [country],
+        "ur": ["https://fi-admin.bvsalud.org/document/view/cfpaj"],
+    }
+    doc.update(extra)
+    return doc
+
+
+def _bvs_response(docs, num_found=None):
+    return {
+        "diaServerResponse": [
+            {
+                "responseHeader": {"status": 0},
+                "response": {
+                    "numFound": len(docs) if num_found is None else num_found,
+                    "docs": docs,
+                },
+            }
+        ]
+    }
+
+
+def test_dedupe_by_id_keeps_first_occurrence_and_order():
+    docs = [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": "c"}]
+    assert [d["id"] for d in _dedupe_by_id(docs)] == ["a", "b", "c"]
+
+
+def test_dedupe_by_id_keeps_records_without_id():
+    docs = [{"id": ""}, {"id": ""}]
+    assert len(_dedupe_by_id(docs)) == 2
+
+
+@respx.mock
+async def test_search_deduplicates_and_trims_to_limit(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        docs = []
+        for index in range(6):
+            doc = _bvs_doc(record_id=f"biblio-{index}")
+            docs.extend([doc, doc])  # every record duplicated
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(docs))
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=4)
+        assert len(records) == 4
+        assert [r.record_id for r in records] == [
+            "biblio-0",
+            "biblio-1",
+            "biblio-2",
+            "biblio-3",
+        ]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_requests_overfetched_count(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        await engine.search_guidelines("dengue", limit=10)
+        requested = str(route.calls[0].request.url)
+        assert "count=30" in requested
+        assert "output=json" in requested
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_caps_requested_count_at_page_size(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        await engine.search_guidelines("dengue", limit=50)
+        assert "count=150" in str(route.calls[0].request.url)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_composes_filters_into_q_and_never_fq(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        await engine.search_guidelines("tratamento tuberculose", limit=5, collection="brisa")
+        requested = str(route.calls[0].request.url)
+        assert "fq=" not in requested
+        assert "non-conventional" in requested
+        assert "BRISA" in requested
+        assert "AND" in requested
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_sends_browser_headers(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        await engine.search_guidelines("dengue", limit=5)
+        headers = route.calls[0].request.headers
+        assert "Mozilla/5.0" in headers["user-agent"]
+        assert headers["accept-language"].startswith("pt-BR")
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_drops_non_brazilian_records(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        docs = [
+            _bvs_doc(record_id="biblio-br", country="^iBrazil^eBrasil"),
+            _bvs_doc(record_id="biblio-pt", country="^iPortugal^ePortugal"),
+        ]
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(docs))
+        )
+        records, _ = await engine.search_guidelines("dengue", limit=10)
+        assert [r.record_id for r in records] == ["biblio-br"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_returns_short_list_as_success(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=25)
+        assert len(records) == 1
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_search_rejects_unknown_collection(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        records, meta = await engine.search_guidelines("dengue", collection="everything")
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clamps_limit_inside_engine(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        await engine.search_guidelines("dengue", limit=9999)
+        assert "count=150" in str(route.calls[0].request.url)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_network_failure_is_error_and_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=httpx.ConnectError("reset by peer")
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+        assert records == []
+        assert meta.error is True
+        cached, cache_meta = await cache.get("brazil_moh_search:all:5:dengue")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_caches_success_and_serves_from_cache(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        first, first_meta = await engine.search_guidelines("dengue", limit=5)
+        second, second_meta = await engine.search_guidelines("dengue", limit=5)
+        assert route.call_count == 1
+        assert first_meta.cached is False
+        assert second_meta.cached is True
+        assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+

@@ -169,3 +169,83 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
     """
     return record.country == BRAZIL_COUNTRY
 
+
+def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exact deduplication on the Solr ``id``, keeping first occurrence.
+
+    BVS emits one row per indexing collection, inflating results by roughly
+    2.1-2.3x. Exact-key dedup is deliberate: the fuzzy title matching in
+    utils/deduplication.py would collapse genuinely distinct guidelines with
+    similar titles.
+    """
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for doc in docs:
+        record_id = str(doc.get("id") or "")
+        if record_id:
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+        unique.append(doc)
+    return unique
+
+
+class BrazilMoHEngine:
+    """Search and full-text retrieval for Brazilian MoH publications."""
+
+    def __init__(
+        self,
+        http_client: AsyncHttpClient,
+        cache: SQLiteCacheManager,
+        settings: Settings,
+    ) -> None:
+        self.http_client = http_client
+        self.cache = cache
+        self.settings = settings
+
+    async def search_guidelines(
+        self,
+        query: str,
+        limit: int = 10,
+        collection: str = "all",
+    ) -> tuple[list[BrazilGuideline], CacheMetadata]:
+        if collection not in VALID_COLLECTIONS:
+            logger.warning("unknown brazil_moh collection %r", collection)
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        clamped = min(max(1, limit), MAX_RESULTS)
+        cache_key = f"brazil_moh_search:{collection}:{clamped}:{query}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and cached_data is not None:
+            return [BrazilGuideline.from_dict(item) for item in cached_data], meta
+
+        count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+        resp = await self.http_client.get(
+            BVS_SEARCH_URL,
+            headers=BVS_HEADERS,
+            params={
+                "q": _build_query(query, collection),
+                "output": "json",
+                "count": count,
+            },
+        )
+        if resp is None:
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning("brazil_moh search returned non-JSON payload")
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
+        records = [record for record in records if _is_brazilian(record)][:clamped]
+
+        await self.cache.set(
+            cache_key,
+            [record.to_dict() for record in records],
+            source="brazil_moh",
+        )
+        return records, CacheMetadata(cached=False, cache_age=0, error=False)
+
+
