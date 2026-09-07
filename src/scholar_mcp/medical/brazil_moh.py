@@ -107,3 +107,65 @@ def _derive_fulltext_id(url: str) -> str:
     """Short slug of a fi-admin document view URL, or "" for any other URL."""
     match = FI_ADMIN_DOC_RE.match(url or "")
     return match.group(1) if match else ""
+
+
+def _build_query(query: str, collection: str) -> str:
+    """Compose every filter into ``q``.
+
+    ``fq`` is silently ignored by this API, and the default operator is OR,
+    so user tokens are explicitly ANDed inside their own group.
+    """
+    clauses = [BASE_FILTER]
+    if collection == "brisa":
+        clauses.append(BRISA_FILTER)
+    tokens = [token for token in (query or "").split() if token]
+    if tokens:
+        clauses.append("(" + " AND ".join(tokens) + ")")
+    return " AND ".join(clauses)
+
+
+def _extract_docs(data: Any) -> list[dict[str, Any]]:
+    """Pull the document list out of the nested BVS envelope."""
+    if not isinstance(data, dict):
+        return []
+    responses = data.get("diaServerResponse") or []
+    if not isinstance(responses, list) or not responses:
+        return []
+    first = responses[0]
+    if not isinstance(first, dict):
+        return []
+    response = first.get("response") or {}
+    docs = response.get("docs") or []
+    return [doc for doc in docs if isinstance(doc, dict)]
+
+
+def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
+    """Map one Solr document onto a BrazilGuideline."""
+    document_url = _first(doc.get("ur"))
+    year, issued = _parse_issued(doc.get("da"))
+    return BrazilGuideline(
+        title=_first(doc.get("ti")),
+        title_en=_first(doc.get("ti_en")),
+        record_id=_first(doc.get("id")),
+        document_url=document_url,
+        fulltext_id=_derive_fulltext_id(document_url),
+        abstract=_first(doc.get("ab")),
+        year=year,
+        issued=issued,
+        country=_parse_country(doc.get("pais_publicacao")),
+        authors=_as_list(doc.get("au")),
+        languages=_as_list(doc.get("la")),
+        collections=_as_list(doc.get("db")),
+        mesh_subjects=_as_list(doc.get("mh")),
+    )
+
+
+def _is_brazilian(record: BrazilGuideline) -> bool:
+    """Client-side Brazil assertion.
+
+    ``pais_publicacao`` cannot be filtered server-side, so ``la:"pt"``
+    narrows the pool and this drops the Portuguese-language records
+    published elsewhere.
+    """
+    return record.country == BRAZIL_COUNTRY
+
