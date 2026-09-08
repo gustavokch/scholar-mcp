@@ -14,6 +14,9 @@ src/scholar_mcp/
 ├── server.py             # FastMCP server tool and prompt definitions
 ├── citation_check.py     # Claim-to-source grounding checker (check_citations MCP tool)
 ├── ranking.py            # ScoringEngine + RankingPipeline: query-aware re-ranking, Z-scoring, evidence/impact/authority signals
+├── data/
+│   ├── scimago_sjr.json  # Journal-impact lookup table for the ranking signal (ships empty)
+│   └── SOURCES.md        # Procedure for populating scimago_sjr.json
 ├── medical/
 │   ├── __init__.py
 │   ├── clinical_trials.py # ClinicalTrials.gov search and metadata lookup
