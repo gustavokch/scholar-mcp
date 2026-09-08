@@ -313,3 +313,32 @@ def test_format_brazil_moh_guidelines_empty_error_does_not_claim_absence():
     )
     assert FETCH_FAILED_LINE in result["markdown"]
 
+
+def test_format_brazil_moh_guidelines_fulltext_retrievability_note():
+    from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
+    from scholar_mcp.medical.models import BrazilGuideline
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    # Allowed repository direct PDF URL without fi-admin fulltext_id
+    allowed_doc = BrazilGuideline(
+        title="Protocolo BVS Docs",
+        record_id="biblio-10",
+        document_url="https://docs.bvsalud.org/biblioref/2026/08/doc.pdf",
+    )
+    res_allowed = format_brazil_moh_guidelines(
+        [allowed_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert "hosted off-site" not in res_allowed["markdown"]
+
+    # Off-site document URL
+    offsite_doc = BrazilGuideline(
+        title="Artigo Offsite",
+        record_id="biblio-11",
+        document_url="https://www.sciencedirect.com/science/article/pii/123",
+    )
+    res_offsite = format_brazil_moh_guidelines(
+        [offsite_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert "- **Full text:** not retrievable; document is hosted off-site" in res_offsite["markdown"]
+
+
