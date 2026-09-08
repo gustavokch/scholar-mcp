@@ -326,7 +326,15 @@ class BrazilMoHEngine:
             data = resp.json()
         except ValueError:
             return None, True
-        docs = _dedupe_by_id(_extract_docs(data))
+        # ``id:"..."`` is a phrase query against a tokenized field, so a
+        # near-miss record can come back ahead of the requested one. Only an
+        # exact id is accepted: the wrong record would otherwise be served and
+        # cached under the caller's id for the full TTL.
+        docs = [
+            doc
+            for doc in _dedupe_by_id(_extract_docs(data))
+            if _first(doc.get("id")) == record_id
+        ]
         if not docs:
             return None, False
         return _build_record(docs[0]), False

@@ -807,3 +807,24 @@ async def test_get_full_text_truncates_served_not_cached(tmp_path: Path, monkeyp
 
 
 
+
+
+@respx.mock
+async def test_get_full_text_ignores_non_matching_lookup_hit(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=_bvs_response(
+                    [_bvs_doc(record_id="biblio-999", ab="Resumo do outro registro.")]
+                ),
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "not_found"
+        assert payload["content"] == ""
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
