@@ -382,9 +382,17 @@ class BrazilMoHEngine:
         elif record.abstract:
             result = {"content_type": "abstract", "content": record.abstract}
         else:
+            # A transient fetch failure with nothing to fall back on is an
+            # error, not an absence: callers must retry, not move on.
+            status = "error" if errored else "not_found"
+            error_text = (
+                "full text fetch failed and no abstract available"
+                if errored
+                else "no full text or abstract available"
+            )
             return (
-                {**base, "status": "not_found",
-                 "error": "no full text or abstract available",
+                {**base, "status": status,
+                 "error": error_text,
                  "title": record.title, "content_type": "none", "content": ""},
                 CacheMetadata(cached=False, cache_age=0, error=errored),
             )
