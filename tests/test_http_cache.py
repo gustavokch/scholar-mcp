@@ -121,12 +121,14 @@ async def test_returns_none_after_exhausting_retries():
 
 @respx.mock
 async def test_ncbi_requests_are_rate_limited(monkeypatch):
-    """Without an API key the NCBI host bucket must be 3 rps, not unlimited."""
+    """Without an API key the NCBI host bucket must be safe 2.8 rps, not unlimited."""
     respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
         return_value=httpx.Response(200, text="ok")
     )
     client = AsyncHttpClient(settings=Settings(pubmed_api_key=None))
-    assert client._limiter_for("eutils.ncbi.nlm.nih.gov").rate_per_sec == 3.0
+    assert client._limiter_for("eutils.ncbi.nlm.nih.gov").rate_per_sec == 2.8
+    # Host grouping: subdomains share the ncbi.nlm.nih.gov limiter bucket
+    assert client._limiter_for("www.ncbi.nlm.nih.gov") is client._limiter_for("eutils.ncbi.nlm.nih.gov")
     await client.aclose()
 
 
@@ -264,3 +266,76 @@ async def test_merge_params_skips_none_values():
     assert "unused" not in sent
     assert "email=" in sent
     await client.aclose()
+
+
+def test_parse_retry_after_delta_seconds():
+    from scholar_mcp.utils.http import _parse_retry_after
+
+    resp = httpx.Response(429, headers={"Retry-After": "120"})
+    assert _parse_retry_after(resp) == 120.0
+
+    resp_float = httpx.Response(429, headers={"Retry-After": "2.5"})
+    assert _parse_retry_after(resp_float) == 2.5
+
+    resp_none = httpx.Response(429)
+    assert _parse_retry_after(resp_none) is None
+
+    resp_invalid = httpx.Response(429, headers={"Retry-After": "invalid"})
+    assert _parse_retry_after(resp_invalid) is None
+
+
+def test_parse_retry_after_http_date():
+    from scholar_mcp.utils.http import _parse_retry_after
+    from datetime import datetime, timezone, timedelta
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=60)
+    date_str = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    resp = httpx.Response(429, headers={"Retry-After": date_str})
+    val = _parse_retry_after(resp)
+    assert val is not None and 50.0 <= val <= 65.0
+
+
+def test_host_key_normalization():
+    from scholar_mcp.utils.http import _host_key
+
+    assert _host_key("eutils.ncbi.nlm.nih.gov") == "ncbi.nlm.nih.gov"
+    assert _host_key("www.ncbi.nlm.nih.gov:443") == "ncbi.nlm.nih.gov"
+    assert _host_key("export.arxiv.org") == "arxiv.org"
+    assert _host_key("api.fda.gov") == "api.fda.gov"
+
+
+@respx.mock
+async def test_429_retries_and_throttles_limiter():
+    route = respx.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi").mock(
+        side_effect=[
+            httpx.Response(429, text='{"error":"API rate limit exceeded"}'),
+            httpx.Response(200, text="<eSummaryResult>ok</eSummaryResult>"),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    resp = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
+    assert resp is not None and "ok" in resp.text
+    assert route.call_count == 2
+    limiter = client._limiter_for("eutils.ncbi.nlm.nih.gov")
+    # Limiter throttled_until must have been set
+    assert limiter.throttled_until > 0.0
+    await client.aclose()
+
+
+@respx.mock
+async def test_429_honors_retry_after_header():
+    route = respx.get("https://api.semanticscholar.org/graph/v1/paper/123").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0.05"}, text="Rate limit"),
+            httpx.Response(200, json={"title": "Paper"}),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    start = time.monotonic()
+    resp = await client.get("https://api.semanticscholar.org/graph/v1/paper/123")
+    elapsed = time.monotonic() - start
+    assert resp is not None
+    assert route.call_count == 2
+    assert elapsed >= 0.04
+    await client.aclose()
+

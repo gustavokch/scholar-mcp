@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timezone
+import email.utils
 import logging
 import random
 import threading
@@ -13,6 +15,51 @@ from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+DEFAULT_HOST_RATES: dict[str, float] = {
+    "arxiv.org": 0.33,
+    "api.fda.gov": 4.0,
+    "api.crossref.org": 10.0,
+    "api.openalex.org": 10.0,
+    "www.ebi.ac.uk": 10.0,
+    "clinicaltrials.gov": 5.0,
+    "rxnav.nlm.nih.gov": 5.0,
+}
+DEFAULT_FALLBACK_RATE = 5.0
+
+
+def _host_key(host: str) -> str:
+    """Normalize and group hostnames for rate limiting."""
+    hostname = host.lower().split(":")[0].strip()
+    if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
+        return "ncbi.nlm.nih.gov"
+    if hostname == "arxiv.org" or hostname.endswith(".arxiv.org"):
+        return "arxiv.org"
+    return hostname
+
+
+def _parse_retry_after(resp: httpx.Response) -> float | None:
+    """Extract Retry-After header value as duration in seconds."""
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return None
+    raw = raw.strip()
+    try:
+        seconds = float(raw)
+        return max(0.0, seconds)
+    except ValueError:
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+        if dt is not None:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = (dt - now).total_seconds()
+            return max(0.0, delta)
+    except Exception:
+        pass
+    return None
 
 # How much of a failing response body to quote in the log. Bytes are sliced before
 # decoding so a multi-megabyte PDF or XML body is never decoded in full.
@@ -57,7 +104,7 @@ class AsyncHttpClient:
     def __init__(
         self,
         settings: Settings | None = None,
-        max_retries: int = 3,
+        max_retries: int = 4,
         backoff_base: float = 0.5,
     ) -> None:
         self.settings = settings or Settings.load()
@@ -74,18 +121,20 @@ class AsyncHttpClient:
         self._limiters_lock = threading.Lock()
 
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
-        host = host.lower()
+        key = _host_key(host)
         with self._limiters_lock:
-            if host not in self._limiters:
-                if host == "eutils.ncbi.nlm.nih.gov":
+            if key not in self._limiters:
+                if key == "ncbi.nlm.nih.gov":
                     rate = self.settings.ncbi_rate_limit
-                elif host == "api.semanticscholar.org":
+                elif key == "api.semanticscholar.org":
                     # S2 shared pool without a key; dedicated quota with one.
                     rate = 5.0 if self.settings.s2_api_key else 1.0
+                elif key in DEFAULT_HOST_RATES:
+                    rate = DEFAULT_HOST_RATES[key]
                 else:
-                    rate = 10.0
-                self._limiters[host] = AsyncRateLimiter(rate_per_sec=rate)
-            return self._limiters[host]
+                    rate = DEFAULT_FALLBACK_RATE
+                self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
+            return self._limiters[key]
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.
@@ -166,9 +215,19 @@ class AsyncHttpClient:
             try:
                 resp = await self.client.get(target_url, headers=headers)
                 if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries - 1:
-                    wait_time = self.backoff_base * (2**attempt) + random.uniform(
+                    retry_after = _parse_retry_after(resp)
+                    calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    if resp.status_code == 429:
+                        min_wait = 1.0 if self.backoff_base >= 0.1 else calc_wait
+                        wait_time = max(retry_after or 0.0, calc_wait, min_wait)
+                        limiter.throttle(wait_time)
+                    else:
+                        wait_time = max(retry_after or 0.0, calc_wait)
+                        if retry_after is not None:
+                            limiter.throttle(wait_time)
+
                     # Routine on rate-limited hosts; only terminal failure is a warning.
                     logger.info(
                         "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",

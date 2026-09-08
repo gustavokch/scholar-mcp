@@ -54,9 +54,9 @@ def test_scihub_disabled_beats_preference(monkeypatch):
 
 def test_ncbi_rate_limit_depends_on_api_key(monkeypatch):
     monkeypatch.delenv("PUBMED_API_KEY", raising=False)
-    assert Settings.load().ncbi_rate_limit == 3.0
+    assert Settings.load().ncbi_rate_limit == 2.8
     monkeypatch.setenv("PUBMED_API_KEY", "k")
-    assert Settings.load().ncbi_rate_limit == 10.0
+    assert Settings.load().ncbi_rate_limit == 9.0
 
 
 def test_paper_metadata_serialization():
