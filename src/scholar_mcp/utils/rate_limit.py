@@ -14,7 +14,24 @@ class AsyncRateLimiter:
         self._lock = asyncio.Lock()
 
     def throttle(self, duration: float) -> None:
-        """Dynamically throttle all subsequent requests for ``duration`` seconds."""
+        """Pause every request on this bucket for ``duration`` seconds.
+
+        Called from the 429 path in ``AsyncHttpClient.get`` so sibling coroutines
+        on the same host back off too, not just the one that was rejected.
+
+        Deliberately synchronous, and so deliberately not holding ``_lock``: it
+        must be callable from inside a request that is not currently in
+        ``acquire``, and taking the lock there would deadlock against a waiter
+        already sleeping under it. Because there is no await between the reads
+        and the writes below, the update is atomic with respect to the event
+        loop. That makes it safe for one event loop only -- do not call it from
+        another thread.
+
+        ``last_update`` is pushed forward to ``throttled_until`` on purpose: it
+        stops the bucket from accruing tokens during the pause, so the first
+        request after the throttle still pays a full token interval instead of
+        firing immediately into the host that just rejected us.
+        """
         now = time.monotonic()
         self.throttled_until = max(self.throttled_until, now + max(0.0, duration))
         self.tokens = 0.0
