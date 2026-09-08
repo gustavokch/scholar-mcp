@@ -35,33 +35,43 @@ src/scholar_mcp/
 │   └── pdf.py            # In-memory PDF text extraction, dehyphenation, running header/footer removal
 ├── providers/
 │   ├── __init__.py
+│   ├── arxiv.py          # arXiv preprint search and PDF full-text extraction
 │   ├── base.py           # BaseProvider ABC with MIN_USEFUL_CHARS threshold
+│   ├── crossref.py       # CrossRef bibliographic search and metadata lookup
 │   ├── europe_pmc.py     # Europe PMC JATS XML full text and batched OA annotation
+│   ├── openalex.py       # OpenAlex metadata enrichment, citations fallback, author h-index
 │   ├── pmc.py            # PubMed Central NCBI E-utilities XML provider
-│   ├── unpaywall.py      # Unpaywall open-access PDF extractor
-│   ├── scihub.py         # Sci-Hub multi-mirror scraper and PDF text extractor
 │   ├── pubmed.py         # PubMed E-utilities search and abstract retrieval
-│   └── crossref.py       # CrossRef bibliographic search and metadata lookup
+│   ├── scihub.py         # Sci-Hub multi-mirror scraper, PDF text extractor, Camoufox fallback
+│   ├── semantic_scholar.py # Semantic Scholar paper search and recommendations
+│   └── unpaywall.py      # Unpaywall open-access PDF extractor
 └── utils/
     ├── __init__.py
     ├── cache.py          # LRU TTLCache with async locks
-    ├── http.py           # AsyncHttpClient with per-host rate limiting, retries, exponential backoff
-    └── rate_limit.py     # AsyncRateLimiter token bucket
+    ├── deduplication.py  # Fuzzy and normalized deduplication for medical search
+    ├── http.py           # AsyncHttpClient with per-host rate limiting, retries, exponential backoff, logging
+    ├── rate_limit.py     # AsyncRateLimiter token bucket
+    ├── sqlite_cache.py   # Persistent SQLite cache for medical intelligence subsystem
+    └── text.py           # Text processing utilities, dehyphenation, tokenization, truncation
 ```
 
 ## Key Architectural Decisions
 
 1. **Async-first on `httpx`** — All network I/O is asynchronous using a single shared `httpx.AsyncClient` inside `AsyncHttpClient`. No `requests` or `urllib3` are used. `asyncio.to_thread` is permitted in exactly one place: saving downloaded PDFs to local disk in `WaterfallResolver.download_article`.
-2. **5-Tier Waterfall Resolver** — The order is:
+2. **6-Tier Waterfall Resolver** — The order is:
    - Tier 1: Europe PMC (JATS XML -> Markdown)
    - Tier 2: PMC (JATS XML -> Markdown)
    - Tier 3: Unpaywall (Legal OA PDF -> Text)
-   - Tier 4: Sci-Hub (Mirror-rotated PDF -> Text)
-   - Tier 5: Abstract Fallback (PubMed / CrossRef metadata)
-3. **Caching Policy** — Identifier maps and paper metadata are cached in `TTLCache`. Full-text bodies and raw PDF bytes are **never cached** to keep memory consumption bounded.
+   - Tier 4: arXiv (Preprint PDF -> Text, automatic for arXiv DOIs `10.48550/arXiv.*` and arXiv IDs)
+   - Tier 5: Sci-Hub (Mirror-rotated PDF -> Text with Camoufox anti-detection fallback)
+   - Tier 6: Abstract Fallback (PubMed / CrossRef metadata)
+3. **Caching Policy** — Identifier maps and paper metadata are cached in `TTLCache`. Full-text bodies and raw PDF bytes in the core waterfall are **never cached** to keep memory consumption bounded. The medical subsystem uses persistent `SQLiteCacheManager` with source-specific TTLs (FDA 24h, PubMed 1h, WHO GHO 7d, RxNorm 30d, Guidelines 7d, AAP Bright Futures 30d, AAP Policy 7d, Clinical Trials 24h, WHO IRIS 30d, Brazil MoH 30d).
 4. **Resilience and Error Boundaries** — Providers never raise on network failure or unexpected payloads; they report a miss/skip and allow the waterfall to degrade smoothly. The same boundary applies to the ranking enrichment stage (time-bounded by `RANKING_ENRICHMENT_TIMEOUT`) and to `check_citations` (per-claim failure isolation).
 5. **Download Sandbox** — `download_paper` enforces that paths resolve within `SCHOLAR_DOWNLOAD_DIR` and rejects path traversal.
 6. **Query-aware re-ranking** — `search_papers` re-ranks the candidate pool with six Z-score-standardized signals (relevance, citations, recency, evidence grade, journal impact, author authority). The relevance signal blends lexical coverage of the query against title/abstract with a `1/sqrt(rank+1)` source-position prior. `ScoringEngine` exposes `tokenize`, `text_coverage`, and `best_matching_sentence` as shared primitives reused by `medical/ranking.py` and `citation_check.py`. Journal-impact data is loaded from `src/scholar_mcp/data/scimago_sjr.json` (ships empty; see `src/scholar_mcp/data/SOURCES.md`).
+7. **Browser Scraping Fallback via Camoufox** — When HTTP requests to bot-protected sources (Sci-Hub mirrors, AAP Bright Futures/Policy, Cochrane) hit Cloudflare or 403 blocks, a headless anti-detection Firefox browser (`camoufox`) is invoked as a last-resort fallback. Sci-Hub browser fallback is capped to 3 mirrors and 20s total timeout. If `camoufox` is not installed, the subsystem degrades gracefully with an `ImportError` boundary.
+8. **Medical Intelligence Subsystem** — Standalone tools backed by openFDA, RxNav, WHO GHO, ClinicalTrials.gov (with a 10-term Essie parser cap to avoid HTTP 400 errors), PubMed (with query relaxation ladder and partial keyword credit for guideline searches), WHO IRIS (DSpace 7.6 REST API with direct PDF resolution and full-text extraction), and Brazilian Ministry of Health technical publications (BVS/iAHx API with country filtering, exact-id deduplication, and allowlisted PDF retrieval).
+9. **HTTP Client Resilience and Redaction** — `AsyncHttpClient` folds caller-supplied `params` into the URL before credential injection (`api_key`, `email`, `tool`) to ensure query parameters are not overwritten by `httpx`. Diagnostic logs capture `>= 400` errors, retries, and timeouts while automatically redacting sensitive credentials. Response body decoding on errors is bounded to 500 characters with `errors="replace"`.
 
 ## Local Development & Testing
 
