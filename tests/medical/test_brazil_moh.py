@@ -270,6 +270,12 @@ def test_dedupe_by_id_keeps_first_occurrence_and_order():
     assert [d["id"] for d in _dedupe_by_id(docs)] == ["a", "b", "c"]
 
 
+def test_dedupe_by_id_handles_list_ids():
+    docs = [{"id": ["a"]}, {"id": "b"}, {"id": "a"}, {"id": ["b"]}]
+    assert len(_dedupe_by_id(docs)) == 2
+    assert _dedupe_by_id(docs) == [{"id": ["a"]}, {"id": "b"}]
+
+
 def test_dedupe_by_id_keeps_records_without_id():
     docs = [{"id": ""}, {"id": ""}]
     assert len(_dedupe_by_id(docs)) == 2

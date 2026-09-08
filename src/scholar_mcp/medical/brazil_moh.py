@@ -214,7 +214,7 @@ def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for doc in docs:
-        record_id = str(doc.get("id") or "")
+        record_id = _first(doc.get("id"))
         if record_id:
             if record_id in seen:
                 continue
