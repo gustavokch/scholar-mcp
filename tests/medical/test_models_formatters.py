@@ -263,3 +263,82 @@ def test_format_who_iris_guidelines():
     assert "World Health Organization" in out["markdown"]
     assert "10665/44626" in out["markdown"] or "iris.who.int/handle/10665/44626" in out["markdown"]
     assert len(out["data"]) == 1
+
+
+def test_format_brazil_moh_guidelines_renders_fields():
+    from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
+    from scholar_mcp.medical.models import BrazilGuideline
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    guideline = BrazilGuideline(
+        title="Protocolo Clínico",
+        record_id="biblio-1",
+        document_url="https://fi-admin.bvsalud.org/document/view/cfpaj",
+        fulltext_id="cfpaj",
+        year="2026",
+        authors=["Brasil. Ministério da Saúde"],
+        collections=["BRISA"],
+        abstract="Resumo do protocolo.",
+    )
+    result = format_brazil_moh_guidelines(
+        [guideline], "tuberculose", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert result["data"][0]["record_id"] == "biblio-1"
+    markdown = result["markdown"]
+    assert "Protocolo Clínico" in markdown
+    assert "biblio-1" in markdown
+    assert "2026" in markdown
+    assert "BRISA" in markdown
+    assert "Resumo do protocolo." in markdown
+    assert "[Fresh response]" in markdown
+
+
+def test_format_brazil_moh_guidelines_empty_success_says_no_results():
+    from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    result = format_brazil_moh_guidelines([], "x", CacheMetadata(cached=False, cache_age=0))
+    assert "No Brazilian Ministry of Health documents found" in result["markdown"]
+
+
+def test_format_brazil_moh_guidelines_empty_error_does_not_claim_absence():
+    from scholar_mcp.medical.formatters import (
+        FETCH_FAILED_LINE,
+        format_brazil_moh_guidelines,
+    )
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    result = format_brazil_moh_guidelines(
+        [], "x", CacheMetadata(cached=False, cache_age=0, error=True)
+    )
+    assert FETCH_FAILED_LINE in result["markdown"]
+
+
+def test_format_brazil_moh_guidelines_fulltext_retrievability_note():
+    from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
+    from scholar_mcp.medical.models import BrazilGuideline
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    # Allowed repository direct PDF URL without fi-admin fulltext_id
+    allowed_doc = BrazilGuideline(
+        title="Protocolo BVS Docs",
+        record_id="biblio-10",
+        document_url="https://docs.bvsalud.org/biblioref/2026/08/doc.pdf",
+    )
+    res_allowed = format_brazil_moh_guidelines(
+        [allowed_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert "hosted off-site" not in res_allowed["markdown"]
+
+    # Off-site document URL
+    offsite_doc = BrazilGuideline(
+        title="Artigo Offsite",
+        record_id="biblio-11",
+        document_url="https://www.sciencedirect.com/science/article/pii/123",
+    )
+    res_offsite = format_brazil_moh_guidelines(
+        [offsite_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert "- **Full text:** not retrievable; document is hosted off-site" in res_offsite["markdown"]
+
+

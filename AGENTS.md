@@ -14,6 +14,21 @@ src/scholar_mcp/
 ├── server.py             # FastMCP server tool and prompt definitions
 ├── citation_check.py     # Claim-to-source grounding checker (check_citations MCP tool)
 ├── ranking.py            # ScoringEngine + RankingPipeline: query-aware re-ranking, Z-scoring, evidence/impact/authority signals
+├── medical/
+│   ├── __init__.py
+│   ├── clinical_trials.py # ClinicalTrials.gov search and metadata lookup
+│   ├── databases.py      # Cross-database medical search and deduplication
+│   ├── fda.py            # openFDA drug search and pediatric drug lookups
+│   ├── formatters.py     # Medical response formatting helpers
+│   ├── guidelines.py     # Clinical practice guidelines engine
+│   ├── models.py         # Medical data models
+│   ├── pediatrics.py     # Pediatric literature and guidelines engine
+│   ├── pubmed.py         # Dedicated medical PubMed client
+│   ├── ranking.py        # Medical article ranking
+│   ├── rxnorm.py         # RxNorm drug nomenclature
+│   ├── who.py            # WHO GHO health statistics client
+│   ├── who_iris.py       # WHO IRIS publication repository search and full-text retrieval
+│   └── brazil_moh.py     # Brazilian MoH publications via BVS/iAHx search + PDF full text
 ├── parsers/
 │   ├── __init__.py
 │   ├── jats.py           # JATS XML to clean Markdown parser and section extractor

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- `search_brazil_moh_guidelines` and `get_brazil_moh_full_text` MCP tools for
+  Brazilian Ministry of Health technical publications, sourced from BVS/iAHx
+  with host-allowlisted PDF full-text retrieval.
 - **Query-aware re-ranking** in `search_papers`. The relevance signal now blends real lexical coverage of the query against title (weighted 2x) and abstract with the source `1/sqrt(rank + 1)` position prior; previously the query was not used for scoring. New `ScoringEngine` primitives: `tokenize`, `text_coverage`, `best_matching_sentence`. `medical/ranking.py` refactored to reuse them (behavior preserved).
 - **Evidence grade ranking signal**. `classify_evidence_grade` maps PubMed `PublicationType` to an Oxford CEBM-style ladder (`1a` / `1b` / `2b` / `3b` / `4` / `5`); the best (lowest-rank) grade wins when a paper carries multiple types. PubMed enrichment now captures `study_type` and `issn` to support it.
 - **Journal impact ranking signal**. `lookup_journal_impact(issn, venue)` resolves a Scimago SJR value with ISSN-first, normalized-name-second lookup. `src/scholar_mcp/data/scimago_sjr.json` ships empty; the signal contributes a neutral `0.0` for every paper until the dataset is populated (procedure: `src/scholar_mcp/data/SOURCES.md`). Regenerator: `scripts/update_scimago_data.py`.

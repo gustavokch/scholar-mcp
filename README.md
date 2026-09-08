@@ -235,6 +235,8 @@ pip install 'scholar-mcp[medical]'
 | `search_pediatric_literature` | PubMed | Targeted search across 7 premier pediatric medical journals. |
 | `search_who_iris_guidelines` | WHO IRIS | Search the WHO Institutional Repository for Information Sharing (DSpace JSON API) in title-prefix or full-text mode. |
 | `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
+| `search_brazil_moh_guidelines` | BVS / iAHx | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS. |
+| `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
 | `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
@@ -278,6 +280,7 @@ All options are configured via environment variables:
 | `CACHE_TTL_PEDIATRIC_DRUGS` | `86400` | Pediatric drug search cache TTL in seconds (24h). |
 | `CACHE_TTL_CLINICAL_TRIALS` | `86400` | ClinicalTrials.gov cache TTL in seconds (24h). |
 | `CACHE_TTL_WHO_IRIS` | `2592000` | WHO IRIS guideline search cache TTL in seconds (30d). |
+| `CACHE_TTL_BRAZIL_MOH` | `2592000` | Brazilian MoH document cache TTL in seconds (30d). |
 | `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
 | `RANKING_ENABLED` | `true` | Master switch for `search_papers` re-ranking. |

@@ -235,3 +235,39 @@ class WHOGuideline:
             return cls(title="", handle="", url="")
         fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**fields)
+
+
+@dataclass
+class BrazilGuideline:
+    """A Brazilian Ministry of Health technical publication from BVS/iAHx.
+
+    ``fulltext_id`` is set only when ``document_url`` points at a
+    fi-admin document view; it is empty when the record links off-site.
+    ``score`` is reserved for a future ranking pass and is unset in v1.
+    """
+
+    title: str = ""
+    title_en: str = ""
+    record_id: str = ""
+    document_url: str = ""
+    fulltext_id: str = ""
+    source: str = "brazil-moh"
+    abstract: str = ""
+    year: str = ""
+    issued: str = ""
+    country: str = ""
+    authors: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
+    collections: list[str] = field(default_factory=list)
+    mesh_subjects: list[str] = field(default_factory=list)
+    score: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "BrazilGuideline":
+        if not data or not isinstance(data, dict):
+            return cls()
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**fields)

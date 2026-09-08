@@ -18,6 +18,8 @@ MEDICAL_TOOLS = {
     "search_pediatric_literature",
     "search_who_iris_guidelines",
     "get_who_iris_full_text",
+    "search_brazil_moh_guidelines",
+    "get_brazil_moh_full_text",
     "search_medical_databases",
     "search_medical_journals",
     "get_medical_cache_stats",
@@ -62,3 +64,73 @@ async def test_get_medical_cache_stats_tool(monkeypatch):
     monkeypatch.setattr(srv, "medical_cache", mock)
     result = await srv.get_medical_cache_stats()
     assert result["total_entries"] == 0
+
+
+async def test_search_brazil_moh_guidelines_tool(monkeypatch):
+    from scholar_mcp.medical.models import BrazilGuideline
+
+    mock = AsyncMock(
+        return_value=(
+            [BrazilGuideline(title="Protocolo", record_id="biblio-1")],
+            CacheMetadata(cached=False, cache_age=0),
+        )
+    )
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("tuberculose", limit=5)
+    assert result["data"][0]["record_id"] == "biblio-1"
+    assert mock.await_args.kwargs["limit"] == 5
+
+
+async def test_search_brazil_moh_guidelines_forwards_raw_limit(monkeypatch):
+    # The engine owns clamping; the tool passes the caller's limit through.
+    mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    await srv.search_brazil_moh_guidelines("x", limit=9999)
+    assert mock.await_args.kwargs["limit"] == 9999
+
+
+async def test_search_brazil_moh_guidelines_rejects_unknown_collection(monkeypatch):
+    mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("x", collection="everything")
+    assert result["status"] == "error"
+    assert result["source"] == "brazil-moh"
+    assert mock.await_count == 0
+
+
+async def test_search_brazil_moh_guidelines_normalizes_collection(monkeypatch):
+    mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("dengue", collection=" BRISA ")
+    assert result.get("status") != "error"
+    assert mock.await_args.kwargs["collection"] == "brisa"
+
+
+async def test_search_brazil_moh_guidelines_returns_error_envelope(monkeypatch):
+    mock = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("x")
+    assert result["status"] == "error"
+    assert result["source"] == "brazil-moh"
+
+
+async def test_get_brazil_moh_full_text_tool(monkeypatch):
+    mock = AsyncMock(
+        return_value=(
+            {"status": "success", "content": "texto", "content_type": "pdf"},
+            CacheMetadata(cached=True, cache_age=42),
+        )
+    )
+    monkeypatch.setattr(srv.brazil_moh_engine, "get_full_text", mock)
+    result = await srv.get_brazil_moh_full_text("biblio-1")
+    assert result["content"] == "texto"
+    assert result["cache"] == {"cached": True, "cache_age": 42}
+
+
+async def test_get_brazil_moh_full_text_returns_error_envelope(monkeypatch):
+    mock = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(srv.brazil_moh_engine, "get_full_text", mock)
+    result = await srv.get_brazil_moh_full_text("biblio-1")
+    assert result["status"] == "error"
+    assert result["content"] == ""
+

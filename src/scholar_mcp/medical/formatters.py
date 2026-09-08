@@ -1,6 +1,8 @@
 from typing import Any
 
+from scholar_mcp.medical.brazil_moh import is_allowed_bvs_host
 from scholar_mcp.medical.models import (
+    BrazilGuideline,
     ClinicalGuideline,
     DrugLabel,
     MedicalArticle,
@@ -286,6 +288,44 @@ def format_who_iris_guidelines(
             if g.description:
                 lines.append("")
                 lines.append(g.description)
+            lines.append("")
+
+    markdown = append_cache_info("\n".join(lines).strip(), meta)
+    return {"data": [g.to_dict() for g in guidelines], "markdown": markdown}
+
+
+def format_brazil_moh_guidelines(
+    guidelines: list[BrazilGuideline],
+    query: str,
+    meta: CacheMetadata,
+) -> dict[str, Any]:
+    lines = [f"## Brazilian Ministry of Health Documents: {query}", ""]
+    if not guidelines:
+        lines.append(
+            _empty_state(
+                f"No Brazilian Ministry of Health documents found for: {query}", meta
+            )
+        )
+    else:
+        for g in guidelines:
+            lines.append(f"### {g.title}")
+            lines.append(f"- **Record ID:** {g.record_id}")
+            lines.append(f"- **Source:** {g.source}")
+            if g.year:
+                lines.append(f"- **Year:** {g.year}")
+            if g.authors:
+                lines.append(f"- **Authors:** {', '.join(g.authors)}")
+            if g.collections:
+                lines.append(f"- **Collections:** {', '.join(g.collections)}")
+            if g.mesh_subjects:
+                lines.append(f"- **DeCS/MeSH:** {', '.join(g.mesh_subjects)}")
+            if g.document_url:
+                lines.append(f"- **URL:** {g.document_url}")
+            if g.document_url and not is_allowed_bvs_host(g.document_url):
+                lines.append("- **Full text:** not retrievable; document is hosted off-site")
+            if g.abstract:
+                lines.append("")
+                lines.append(g.abstract)
             lines.append("")
 
     markdown = append_cache_info("\n".join(lines).strip(), meta)
