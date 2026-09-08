@@ -66,7 +66,7 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
         return min(max(0.0, seconds), MAX_RETRY_AFTER)
     try:
         dt = email.utils.parsedate_to_datetime(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, IndexError, OverflowError):
         return None
     if dt is None:
         return None

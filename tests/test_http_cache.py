@@ -294,6 +294,11 @@ def test_parse_retry_after_http_date():
     val = _parse_retry_after(resp)
     assert val is not None and 50.0 <= val <= 65.0
 
+    # Malformed or out-of-range dates must return None
+    assert _parse_retry_after(httpx.Response(429, headers={"Retry-After": "Sun, 99 Foo 99999 99:99:99 GMT"})) is None
+    assert _parse_retry_after(httpx.Response(429, headers={"Retry-After": "Wed, 00 Feb 2026"})) is None
+
+
 
 def test_host_key_normalization():
     from scholar_mcp.utils.http import _host_key
