@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Brazilian MoH guidelines tools**: `search_brazil_moh_guidelines` and `get_brazil_moh_full_text` MCP tools for Brazilian Ministry of Health technical publications (PCDT, CONITEC, cadernos, manuais) via BVS/iAHx API with allowlisted PDF full-text extraction, Portuguese language support, and exact-id deduplication (PR #19).
 - **`CACHE_TTL_BRAZIL_MOH` setting**: Configurable cache TTL (default 2,592,000s / 30d) for caching Brazilian MoH searches and document full text in SQLite (PR #19).
 - **`fonttools>=4.40.0` dependency**: Added to `pyproject.toml` for `pypdf` optional font processing support (PR #18).
-- **HTTP diagnostic logging with credential redaction**: `AsyncHttpClient` logs `>= 400` errors, retries, timeouts, and exceptions with automatic query-parameter credential redaction (`api_key`, `email`, `tool`) (PR #18).
+- **HTTP diagnostic logging with credential redaction**: `AsyncHttpClient` logs `>= 400` errors, retries, timeouts, and exceptions with automatic query-parameter credential redaction (`api_key`, `apikey`, `email`, `token`, `access_token`) (PR #18).
 - **Camoufox browser fallback for Sci-Hub**: Last-resort headless anti-detection browser fallback in `SciHubProvider` for Cloudflare-protected/blocked mirrors, capped to 3 mirrors and 20s total timeout with `%PDF-` magic header validation (PR #17).
 - **Direct PDF links in WHO IRIS**: `WHOGuideline.pdf_url` field exposed in WHO IRIS search results and markdown formatted responses (PR #16).
 - **`get_who_iris_full_text` MCP tool**: Full-text retrieval for WHO IRIS guidelines from DSpace 7 PDF bitstreams with abstract fallback and serve-time character truncation (PR #14).
