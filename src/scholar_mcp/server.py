@@ -592,7 +592,8 @@ if settings.enable_medical_tools:
                 'brisa' (health-technology assessments and PCDT only).
         """
         # The engine clamps limit; no server-side clamp.
-        if collection not in BRAZIL_VALID_COLLECTIONS:
+        norm_collection = (collection or "all").strip().lower()
+        if norm_collection not in BRAZIL_VALID_COLLECTIONS:
             return {
                 "status": "error",
                 "error": f"unknown collection {collection!r}; expected 'all' or 'brisa'",
@@ -600,7 +601,7 @@ if settings.enable_medical_tools:
             }
         try:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
-                query, limit=limit, collection=collection
+                query, limit=limit, collection=norm_collection
             )
             return format_brazil_moh_guidelines(guidelines, query, meta)
         except Exception as ex:

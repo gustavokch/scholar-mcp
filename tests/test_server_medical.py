@@ -98,6 +98,14 @@ async def test_search_brazil_moh_guidelines_rejects_unknown_collection(monkeypat
     assert mock.await_count == 0
 
 
+async def test_search_brazil_moh_guidelines_normalizes_collection(monkeypatch):
+    mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("dengue", collection=" BRISA ")
+    assert result.get("status") != "error"
+    assert mock.await_args.kwargs["collection"] == "brisa"
+
+
 async def test_search_brazil_moh_guidelines_returns_error_envelope(monkeypatch):
     mock = AsyncMock(side_effect=RuntimeError("boom"))
     monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)

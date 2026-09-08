@@ -270,12 +270,13 @@ class BrazilMoHEngine:
         limit: int = 10,
         collection: str = "all",
     ) -> tuple[list[BrazilGuideline], CacheMetadata]:
-        if collection not in VALID_COLLECTIONS:
+        norm_collection = (collection or "all").strip().lower()
+        if norm_collection not in VALID_COLLECTIONS:
             logger.warning("unknown brazil_moh collection %r", collection)
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         clamped = min(max(1, limit), MAX_RESULTS)
-        cache_key = f"brazil_moh_search:{collection}:{clamped}:{query}"
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -285,7 +286,7 @@ class BrazilMoHEngine:
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
             params={
-                "q": _build_query(query, collection),
+                "q": _build_query(query, norm_collection),
                 "output": "json",
                 "count": count,
             },
