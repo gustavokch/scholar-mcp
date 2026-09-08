@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 import email.utils
 import logging
+import math
 import random
 import threading
 from typing import Any
@@ -27,6 +28,11 @@ DEFAULT_HOST_RATES: dict[str, float] = {
 }
 DEFAULT_FALLBACK_RATE = 5.0
 
+# Upper bound on any server-supplied Retry-After. Without it a hostile or
+# misconfigured host can park a request -- and, via limiter.throttle, every
+# other request to that host -- for hours.
+MAX_RETRY_AFTER = 60.0
+
 
 def _host_key(host: str) -> str:
     """Normalize and group hostnames for rate limiting."""
@@ -46,20 +52,23 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
     raw = raw.strip()
     try:
         seconds = float(raw)
-        return max(0.0, seconds)
     except ValueError:
         pass
+    else:
+        # float() also accepts "inf"/"nan"; neither is a usable duration.
+        if not math.isfinite(seconds):
+            return None
+        return min(max(0.0, seconds), MAX_RETRY_AFTER)
     try:
         dt = email.utils.parsedate_to_datetime(raw)
-        if dt is not None:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            delta = (dt - now).total_seconds()
-            return max(0.0, delta)
-    except Exception:
-        pass
-    return None
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = (dt - datetime.now(timezone.utc)).total_seconds()
+    return min(max(0.0, delta), MAX_RETRY_AFTER)
 
 # How much of a failing response body to quote in the log. Bytes are sliced before
 # decoding so a multi-megabyte PDF or XML body is never decoded in full.

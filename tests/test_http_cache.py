@@ -271,8 +271,8 @@ async def test_merge_params_skips_none_values():
 def test_parse_retry_after_delta_seconds():
     from scholar_mcp.utils.http import _parse_retry_after
 
-    resp = httpx.Response(429, headers={"Retry-After": "120"})
-    assert _parse_retry_after(resp) == 120.0
+    resp = httpx.Response(429, headers={"Retry-After": "30"})
+    assert _parse_retry_after(resp) == 30.0
 
     resp_float = httpx.Response(429, headers={"Retry-After": "2.5"})
     assert _parse_retry_after(resp_float) == 2.5
@@ -339,3 +339,25 @@ async def test_429_honors_retry_after_header():
     assert elapsed >= 0.04
     await client.aclose()
 
+
+def test_parse_retry_after_rejects_non_finite():
+    from scholar_mcp.utils.http import _parse_retry_after
+
+    for raw in ("inf", "+Inf", "-inf", "1e400", "NaN", "nan"):
+        resp = httpx.Response(429, headers={"Retry-After": raw})
+        assert _parse_retry_after(resp) is None, raw
+
+
+def test_parse_retry_after_clamps_to_max():
+    from scholar_mcp.utils.http import MAX_RETRY_AFTER, _parse_retry_after
+
+    resp = httpx.Response(429, headers={"Retry-After": "86400"})
+    assert _parse_retry_after(resp) == MAX_RETRY_AFTER
+
+    from datetime import datetime, timedelta, timezone
+
+    far = datetime.now(timezone.utc) + timedelta(days=1)
+    resp_date = httpx.Response(
+        429, headers={"Retry-After": far.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+    )
+    assert _parse_retry_after(resp_date) == MAX_RETRY_AFTER
