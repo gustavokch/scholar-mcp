@@ -97,15 +97,19 @@ def _parse_country(value: Any) -> str:
     """Read the ``^e`` subfield out of a ``pais_publicacao`` value.
 
     The field is encoded as "^iBrazil^eBrasil^pBrasil^fBrésil"; ``^e`` holds
-    the Portuguese name. Returns "" when no ``^e`` subfield is present.
+    the Portuguese name. A value carrying no ``^`` is an unencoded name and
+    is matched against Brazil only -- scanning it for subfields would read
+    "Espanha" as the ``^e`` subfield "spanha". Returns "" when neither form
+    yields a recognised name.
     """
     for raw in _as_list(value):
+        if "^" not in raw:
+            if raw.strip().lower() == BRAZIL_COUNTRY.lower():
+                return BRAZIL_COUNTRY
+            continue
         for part in raw.split("^"):
             if part[:1] == "e" and part[1:].strip():
                 return part[1:].strip()
-        cleaned = raw.strip()
-        if cleaned.lower() == BRAZIL_COUNTRY.lower():
-            return BRAZIL_COUNTRY
     return ""
 
 

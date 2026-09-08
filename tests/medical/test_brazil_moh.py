@@ -64,6 +64,11 @@ def test_parse_country_handles_plain_string_without_subfields():
     assert _parse_country(["brasil"]) == "Brasil"
 
 
+def test_parse_country_plain_string_starting_with_e_is_not_truncated():
+    # Without the "^" guard the subfield scan reads "Espanha" as "spanha".
+    assert _parse_country(["Espanha"]) == ""
+
+
 def test_derive_fulltext_id_matches_fi_admin_url():
     url = "https://fi-admin.bvsalud.org/document/view/cfpaj"
     assert _derive_fulltext_id(url) == "cfpaj"
