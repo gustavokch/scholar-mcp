@@ -837,3 +837,29 @@ def test_serve_full_text_clamps_max_chars_to_module_ceiling():
     assert served["truncated"] is True
     assert served["content"].startswith("x" * MAX_FULL_TEXT_CHARS)
     assert served["content"][MAX_FULL_TEXT_CHARS:].lstrip().startswith("[... Truncated")
+
+
+@respx.mock
+async def test_get_full_text_caps_cached_content_at_ceiling(tmp_path: Path, monkeypatch):
+    oversized = "x" * (MAX_FULL_TEXT_CHARS + 1000)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: oversized
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        await engine.get_full_text("biblio-1")
+        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
+    finally:
+        await cache.close()
+        await http_client.aclose()

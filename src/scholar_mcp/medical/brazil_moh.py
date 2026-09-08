@@ -368,7 +368,9 @@ class BrazilMoHEngine:
             )
             return "", True
         try:
-            return pdf_bytes_to_text(resp.content), False
+            # Bounded before it is cached: an unbounded extraction would write
+            # a multi-megabyte row into the shared cache for a long manual.
+            return pdf_bytes_to_text(resp.content)[:MAX_FULL_TEXT_CHARS], False
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
             return "", True
