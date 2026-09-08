@@ -35,8 +35,13 @@ MAX_RETRY_AFTER = 60.0
 
 
 def _host_key(host: str) -> str:
-    """Normalize and group hostnames for rate limiting."""
-    hostname = host.lower().split(":")[0].strip()
+    """Group a bare hostname into its rate-limiting bucket.
+
+    Takes a hostname with no port and no userinfo -- use ``_limiter_for_url`` to
+    get one out of a URL. Splitting a port off here would corrupt a bare IPv6
+    literal, and splitting userinfo off would key the bucket on the username.
+    """
+    hostname = host.lower().strip()
     if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
         return "ncbi.nlm.nih.gov"
     if hostname == "arxiv.org" or hostname.endswith(".arxiv.org"):
@@ -129,6 +134,11 @@ class AsyncHttpClient:
         self._limiters: dict[str, AsyncRateLimiter] = {}
         self._limiters_lock = threading.Lock()
 
+    def _limiter_for_url(self, url: str) -> AsyncRateLimiter:
+        """Limiter for ``url``'s host, with the port and any userinfo stripped."""
+        parsed = urllib.parse.urlparse(url)
+        return self._limiter_for(parsed.hostname or parsed.netloc)
+
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
         key = _host_key(host)
         with self._limiters_lock:
@@ -216,8 +226,7 @@ class AsyncHttpClient:
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
-        parsed = urllib.parse.urlparse(target_url)
-        limiter = self._limiter_for(parsed.netloc)
+        limiter = self._limiter_for_url(target_url)
 
         for attempt in range(self.max_retries):
             await limiter.acquire()

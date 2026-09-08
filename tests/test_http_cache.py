@@ -299,7 +299,8 @@ def test_host_key_normalization():
     from scholar_mcp.utils.http import _host_key
 
     assert _host_key("eutils.ncbi.nlm.nih.gov") == "ncbi.nlm.nih.gov"
-    assert _host_key("www.ncbi.nlm.nih.gov:443") == "ncbi.nlm.nih.gov"
+    # Ports are stripped by _limiter_for_url, not by _host_key.
+    assert _host_key("www.ncbi.nlm.nih.gov") == "ncbi.nlm.nih.gov"
     assert _host_key("export.arxiv.org") == "arxiv.org"
     assert _host_key("api.fda.gov") == "api.fda.gov"
 
@@ -361,3 +362,25 @@ def test_parse_retry_after_clamps_to_max():
         429, headers={"Retry-After": far.strftime("%a, %d %b %Y %H:%M:%S GMT")}
     )
     assert _parse_retry_after(resp_date) == MAX_RETRY_AFTER
+
+
+def test_host_key_ignores_userinfo_and_ipv6_brackets():
+    from scholar_mcp.utils.http import _host_key
+
+    assert _host_key("a.example.com") == "a.example.com"
+    assert _host_key("A.Example.COM") == "a.example.com"
+    assert _host_key("2001:db8::1") == "2001:db8::1"
+
+
+async def test_limiter_key_uses_hostname_not_netloc():
+    """A userinfo-bearing URL must share the bucket of the bare host, not key on the username."""
+    client = AsyncHttpClient(settings=Settings(pubmed_api_key=None))
+    plain = client._limiter_for_url("https://api.crossref.org/works")
+    with_userinfo = client._limiter_for_url("https://user:pw@api.crossref.org/works")
+    assert plain is with_userinfo
+    assert plain.rate_per_sec == 10.0
+
+    ipv6_a = client._limiter_for_url("https://[2001:db8::1]:8443/x")
+    ipv6_b = client._limiter_for_url("https://[2001:db8::2]:8443/x")
+    assert ipv6_a is not ipv6_b
+    await client.aclose()
