@@ -464,6 +464,8 @@ FI_ADMIN_URL = "https://fi-admin.bvsalud.org/document/view/cfpaj"
 def test_is_allowed_host_accepts_bvs_hosts_only():
     assert _is_allowed_host(FI_ADMIN_URL) is True
     assert _is_allowed_host(PDF_URL) is True
+    assert _is_allowed_host("https://fi-admin.bvsalud.org:443/document/view/123") is True
+    assert _is_allowed_host("https://user:pass@docs.bvsalud.org/file.pdf") is True
     assert _is_allowed_host("https://www.sciencedirect.com/x") is False
     assert _is_allowed_host("https://evil.example.com/fi-admin.bvsalud.org") is False
     assert _is_allowed_host("") is False

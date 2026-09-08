@@ -197,7 +197,7 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
 def _is_allowed_host(url: str) -> bool:
     """True only for the BVS hosts this module is permitted to fetch."""
     try:
-        host = urllib.parse.urlparse(url or "").netloc.lower()
+        host = (urllib.parse.urlparse(url or "").hostname or "").lower()
     except ValueError:
         return False
     return host in FULLTEXT_ALLOWED_HOSTS
