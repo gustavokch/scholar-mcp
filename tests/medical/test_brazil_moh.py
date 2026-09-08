@@ -900,3 +900,20 @@ async def test_search_still_browses_on_a_blank_query(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_cache_key_ignores_query_whitespace(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        first, _ = await engine.search_guidelines("dengue")
+        second, meta = await engine.search_guidelines("  dengue  ")
+        assert route.call_count == 1
+        assert meta.cached is True
+        assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()

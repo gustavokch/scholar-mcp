@@ -298,7 +298,10 @@ class BrazilMoHEngine:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{query}"
+        # Keyed on the composed query, not the raw one: "dengue" and
+        # "  dengue  " compose identically and must share one cache row.
+        composed = _build_query(query, norm_collection)
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -308,7 +311,7 @@ class BrazilMoHEngine:
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
             params={
-                "q": _build_query(query, norm_collection),
+                "q": composed,
                 "output": "json",
                 "count": count,
             },
