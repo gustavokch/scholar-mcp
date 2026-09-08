@@ -194,6 +194,22 @@ def test_build_record_offsite_url_has_no_fulltext_id():
     assert record.fulltext_id == ""
 
 
+def test_build_record_prioritizes_allowed_document_url():
+    from scholar_mcp.medical.brazil_moh import _build_record
+
+    doc = {
+        "id": "biblio-1",
+        "ti": ["Artigo"],
+        "ur": [
+            "https://pesquisa.bvsalud.org/portal/resource/pt/biblio-1",
+            "https://fi-admin.bvsalud.org/document/view/cfpaj",
+        ],
+    }
+    record = _build_record(doc)
+    assert record.document_url == "https://fi-admin.bvsalud.org/document/view/cfpaj"
+    assert record.fulltext_id == "cfpaj"
+
+
 def test_build_record_tolerates_missing_fields():
     from scholar_mcp.medical.brazil_moh import _build_record
 

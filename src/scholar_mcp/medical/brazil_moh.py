@@ -163,9 +163,27 @@ def _extract_docs(data: Any) -> list[dict[str, Any]]:
     return [doc for doc in docs if isinstance(doc, dict)]
 
 
+def _select_document_url(doc: dict[str, Any]) -> str:
+    """Select the best candidate document URL from multi-valued Solr ``ur``.
+
+    Prioritizes fi-admin document view URLs and allowed repository hosts over
+    generic portal links or off-site resources.
+    """
+    urls = _as_list(doc.get("ur"))
+    if not urls:
+        return ""
+    for u in urls:
+        if _derive_fulltext_id(u):
+            return u
+    for u in urls:
+        if _is_allowed_host(u):
+            return u
+    return urls[0]
+
+
 def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
     """Map one Solr document onto a BrazilGuideline."""
-    document_url = _first(doc.get("ur"))
+    document_url = _select_document_url(doc)
     year, issued = _parse_issued(doc.get("da"))
     return BrazilGuideline(
         title=_first(doc.get("ti")),
