@@ -575,6 +575,21 @@ async def test_get_full_text_unknown_record_is_not_found(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_get_full_text_escapes_record_id_in_lookup(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        payload, _ = await engine.get_full_text('bi"blio\\1')
+        assert payload["status"] == "not_found"
+        assert route.calls[0].request.url.params["q"] == 'id:"bi\\"blio\\\\1"'
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_get_full_text_requires_record_id(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:

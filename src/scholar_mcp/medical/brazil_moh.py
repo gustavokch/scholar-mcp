@@ -283,10 +283,13 @@ class BrazilMoHEngine:
 
     async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
         """Resolve one record by its Solr id. Returns (record, errored)."""
+        # The id is caller-controlled; escape it so a quote or backslash
+        # cannot terminate the id:"..." phrase and rewrite the query.
+        escaped = record_id.replace("\\", "\\\\").replace('"', '\\"')
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
-            params={"q": f'id:"{record_id}"', "output": "json", "count": 5},
+            params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
         )
         if resp is None:
             return None, True
