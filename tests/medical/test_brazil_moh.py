@@ -726,6 +726,16 @@ async def test_get_full_text_caches_success(tmp_path: Path, monkeypatch):
         await http_client.aclose()
 
 
+def test_serve_full_text_clamps_zero_and_negative_max_chars():
+    payload = {"content": "abcdef"}
+    for bad_limit in (0, -3):
+        served = BrazilMoHEngine._serve_full_text(dict(payload), bad_limit)
+        # max_chars is clamped to 1: one source char survives plus the
+        # truncation marker appended by truncate_content.
+        assert served["content"].startswith("a\n\n[... Truncated")
+        assert served["truncated"] is True
+
+
 @respx.mock
 async def test_get_full_text_truncates_served_not_cached(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
