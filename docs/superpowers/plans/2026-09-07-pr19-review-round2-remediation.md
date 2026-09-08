@@ -33,7 +33,7 @@ Review comment round 2 on PR #19 (2026-09-07).
 **Produces:** Host extracted via `urlparse(url).hostname` so ports and userinfo do not cause allowlist false-negatives.
 
 - Step 1: Failing test — assert `_is_allowed_host("https://fi-admin.bvsalud.org:443/document/view/123")` and `_is_allowed_host("https://user:pass@docs.bvsalud.org/file.pdf")` return True.
-- Step 2: `PYTHONPATH=src /Users/gus/Git/scholar-mcp/.venv/bin/pytest tests/medical/test_brazil_moh.py -k is_allowed_host` — expect fail.
+- Step 2: `PYTHONPATH=src .venv/bin/pytest tests/medical/test_brazil_moh.py -k is_allowed_host` — expect fail.
 - Step 3: Use `hostname = (urllib.parse.urlparse(url or "").hostname or "").lower()`, return `hostname in FULLTEXT_ALLOWED_HOSTS`.
 - Step 4: Re-run — pass.
 - Step 5: `git commit -m "fix(brazil-moh): use url hostname for allowlist verification"`
@@ -107,5 +107,5 @@ Review comment round 2 on PR #19 (2026-09-07).
 
 ## Verification
 
-1. `PYTHONPATH=src /Users/gus/Git/scholar-mcp/.venv/bin/pytest tests` — 100% green gate before push.
+1. `PYTHONPATH=src .venv/bin/pytest tests` — 100% green gate before push.
 2. `git push origin worktree-feat+brazil-moh-guidelines`.
