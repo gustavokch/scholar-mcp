@@ -3,7 +3,6 @@
 Unified academic paper discovery and multi-tier waterfall full-text retrieval MCP server for AI assistants, research agents, and Claude Desktop.
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/github/license/w8s/scholar-mcp)
 
 ---
 
