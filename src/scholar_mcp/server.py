@@ -622,7 +622,7 @@ if settings.enable_medical_tools:
             record_id: The `record_id` field returned by
                 search_brazil_moh_guidelines (e.g. 'biblio-1701387').
             max_chars: Maximum character limit for the returned text
-                (defaults to 50,000).
+                (defaults to 50,000, which is also the ceiling).
         """
         try:
             payload, meta = await brazil_moh_engine.get_full_text(
