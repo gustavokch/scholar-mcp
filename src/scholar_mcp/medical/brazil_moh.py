@@ -308,11 +308,21 @@ class BrazilMoHEngine:
         Gates on content-type explicitly. ``get_bytes`` is not used here:
         its HTML guard only catches Cloudflare-style challenge pages, so a
         plain "Estamos em manutenção" WAF page would reach the PDF parser.
+
+        Redirects are followed (the BVS hosts hand off between themselves),
+        but the response's final URL is re-checked against the allowlist so
+        a redirect cannot carry the fetch off-host.
         """
         if not _is_allowed_host(document_url):
             return "", False
         resp = await self.http_client.get(document_url, headers=BVS_HEADERS)
         if resp is None:
+            return "", True
+        if not _is_allowed_host(str(resp.url)):
+            logger.info(
+                "brazil_moh full text redirected off the allowed hosts (%s)",
+                str(resp.url),
+            )
             return "", True
         content_type = resp.headers.get("content-type", "").lower()
         if "application/pdf" not in content_type:

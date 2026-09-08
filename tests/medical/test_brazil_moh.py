@@ -602,6 +602,66 @@ async def test_get_full_text_requires_record_id(tmp_path: Path):
 
 
 @respx.mock
+async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                302, headers={"location": "https://evil.example.com/x.pdf"}
+            )
+        )
+        respx.get(url__startswith="https://evil.example.com").mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["content_type"] == "abstract"
+        assert payload["content"] == "Resumo."
+        assert meta.error is True
+        _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_follows_redirect_within_allowed_hosts(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: "Conteúdo."
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(302, headers={"location": PDF_URL})
+        )
+        respx.get(PDF_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "pdf"
+        assert payload["content"] == "Conteúdo."
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
