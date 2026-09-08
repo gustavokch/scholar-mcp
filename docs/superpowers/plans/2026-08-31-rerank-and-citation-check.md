@@ -74,9 +74,9 @@ def test_text_coverage_title_weighted_double_abstract():
     assert math.isclose(
         ScoringEngine.text_coverage(terms, "Metformin for Diabetes", ""), 1.0
     )
-    # Both terms in abstract only -> half weight per term -> 1.0 total (capped)
+    # Both terms in abstract only -> abstract counts half, so max 0.5
     assert math.isclose(
-        ScoringEngine.text_coverage(terms, "", "Metformin and diabetes outcomes"), 1.0
+        ScoringEngine.text_coverage(terms, "", "Metformin and diabetes outcomes"), 0.5
     )
     # No terms anywhere -> 0
     assert ScoringEngine.text_coverage(terms, "Unrelated title", "Unrelated abstract") == 0.0
@@ -1568,121 +1568,7 @@ git commit -m "feat: blend evidence grade, journal impact, and author authority 
 
 ---
 
-### Task 8: Thread `query` through `RankingPipeline.rank_papers` and `WaterfallResolver.search`
-
-**Files:**
-- Modify: `src/scholar_mcp/ranking.py` (`RankingPipeline.rank_papers`)
-- Modify: `src/scholar_mcp/resolver.py:479-484`
-- Test: `tests/test_ranking.py`
-- Test: `tests/test_waterfall_resolver.py`
-
-**Interfaces:**
-- Consumes: `ScoringEngine.score_candidates(papers, weights, query, current_year=None)` from Task 7.
-- Produces: `RankingPipeline.rank_papers(papers, query, weights=None, top_n=10)`.
-
-- [ ] **Step 1: Update the existing pipeline test call site**
-
-In `tests/test_ranking.py`, change:
-
-```python
-    ranked = await pipeline.rank_papers(candidates, top_n=2)
-```
-
-to:
-
-```python
-    ranked = await pipeline.rank_papers(candidates, query="", top_n=2)
-```
-
-- [ ] **Step 2: Run test to verify it now fails on the right thing**
-
-Run: `pytest tests/test_ranking.py::test_ranking_pipeline_enrich_and_rank -v`
-Expected: FAIL — `TypeError: rank_papers() missing 1 required positional argument: 'query'`
-
-- [ ] **Step 3: Implement in `ranking.py`**
-
-Replace `RankingPipeline.rank_papers`:
-
-```python
-    async def rank_papers(
-        self,
-        papers: list[PaperMetadata],
-        query: str,
-        weights: RankingWeights | None = None,
-        top_n: int = 10,
-    ) -> list[PaperMetadata]:
-        if not papers:
-            return []
-
-        w = weights or RankingWeights(
-            relevance=self.settings.ranking_weight_relevance,
-            citations=self.settings.ranking_weight_citations,
-            recency=self.settings.ranking_weight_recency,
-            evidence_grade=self.settings.ranking_weight_evidence_grade,
-            journal_impact=self.settings.ranking_weight_journal_impact,
-            author_authority=self.settings.ranking_weight_author_authority,
-            recency_half_life_years=self.settings.ranking_recency_half_life_years,
-            position_weight=self.settings.ranking_position_weight,
-        )
-
-        try:
-            # Enrich citations with timeout protection
-            enriched = await asyncio.wait_for(
-                self.enrich_citations(papers),
-                timeout=self.settings.ranking_enrichment_timeout,
-            )
-        except Exception:
-            for p in papers:
-                if p.citation_count is None:
-                    p.citation_count = 0
-            enriched = papers
-
-        scored = ScoringEngine.score_candidates(enriched, weights=w, query=query)
-        return scored[:top_n]
-```
-
-(This task assumes `Settings` already has `ranking_weight_evidence_grade`, `ranking_weight_journal_impact`, `ranking_weight_author_authority`, `ranking_position_weight` — those are added in Task 9, which must land before this code runs. If executing tasks out of order, do Task 9 first or expect an `AttributeError` on `self.settings.ranking_weight_evidence_grade` until it does.)
-
-In `src/scholar_mcp/resolver.py`, inside `WaterfallResolver.search`, replace:
-
-```python
-        # Re-rank if requested and candidates present
-        if should_rerank and papers:
-            papers = await self.ranking_pipeline.rank_papers(papers, top_n=limit)
-        else:
-            papers = papers[:limit]
-```
-
-with:
-
-```python
-        # Re-rank if requested and candidates present
-        if should_rerank and papers:
-            papers = await self.ranking_pipeline.rank_papers(papers, query, top_n=limit)
-        else:
-            papers = papers[:limit]
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/test_ranking.py -v`
-Expected: PASS
-
-- [ ] **Step 5: Run the full resolver test suite**
-
-Run: `pytest tests/test_waterfall_resolver.py -v`
-Expected: PASS (no call-site changes needed there — `search()`'s public signature is unchanged, only its internal call to `rank_papers` changed).
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/scholar_mcp/ranking.py src/scholar_mcp/resolver.py tests/test_ranking.py
-git commit -m "feat: thread search query through to the ranking pipeline"
-```
-
----
-
-### Task 9: `Settings` — new ranking fields and rebalanced defaults
+### Task 8: `Settings` — new ranking fields and rebalanced defaults
 
 **Files:**
 - Modify: `src/scholar_mcp/config.py`
@@ -1710,6 +1596,8 @@ def test_settings_ranking_defaults(monkeypatch):
     monkeypatch.delenv("RANKING_MIN_CANDIDATES", raising=False)
     monkeypatch.delenv("RANKING_MAX_CANDIDATES", raising=False)
     monkeypatch.delenv("RANKING_ENRICHMENT_TIMEOUT", raising=False)
+    monkeypatch.delenv("CITATION_CHECK_SUPPORTED_THRESHOLD", raising=False)
+    monkeypatch.delenv("CITATION_CHECK_WEAK_THRESHOLD", raising=False)
 
     s = Settings.load()
     assert s.ranking_enabled is True
@@ -1725,6 +1613,8 @@ def test_settings_ranking_defaults(monkeypatch):
     assert s.ranking_min_candidates == 20
     assert s.ranking_max_candidates == 50
     assert s.ranking_enrichment_timeout == 1.5
+    assert s.citation_check_supported_threshold == 0.5
+    assert s.citation_check_weak_threshold == 0.15
 ```
 
 Also add to `test_settings_ranking_custom_env`, right after the existing `monkeypatch.setenv("RANKING_WEIGHT_RECENCY", "0.3")` line:
@@ -1833,16 +1723,130 @@ and in `Settings.load()`, right after the `ranking_enrichment_timeout=...` line:
 Run: `pytest tests/test_config_models.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full ranking suite once more now that `Settings` has all required fields**
+- [ ] **Step 5: Regression check — full config suite plus ranking suite**
 
-Run: `pytest tests/test_ranking.py -v`
-Expected: PASS
+Run: `pytest tests/test_config_models.py tests/test_ranking.py -v`
+Expected: PASS (the ranking suite is unaffected by the new fields at this point; the query-threading task comes next).
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/scholar_mcp/config.py tests/test_config_models.py
 git commit -m "feat: add ranking settings for evidence grade, journal impact, author authority, and citation-check thresholds"
+```
+
+---
+
+### Task 9: Thread `query` through `RankingPipeline.rank_papers` and `WaterfallResolver.search`
+
+**Files:**
+- Modify: `src/scholar_mcp/ranking.py` (`RankingPipeline.rank_papers`)
+- Modify: `src/scholar_mcp/resolver.py:479-484`
+- Test: `tests/test_ranking.py`
+- Test: `tests/test_waterfall_resolver.py`
+
+**Interfaces:**
+- Consumes: `ScoringEngine.score_candidates(papers, weights, query, current_year=None)` from Task 7.
+- Produces: `RankingPipeline.rank_papers(papers, query, weights=None, top_n=10)`.
+
+- [ ] **Step 1: Update the existing pipeline test call site**
+
+In `tests/test_ranking.py`, change:
+
+```python
+    ranked = await pipeline.rank_papers(candidates, top_n=2)
+```
+
+to:
+
+```python
+    ranked = await pipeline.rank_papers(candidates, query="", top_n=2)
+```
+
+- [ ] **Step 2: Run test to verify it now fails on the right thing**
+
+Run: `pytest tests/test_ranking.py::test_ranking_pipeline_enrich_and_rank -v`
+Expected: FAIL — `TypeError: rank_papers() missing 1 required positional argument: 'query'`
+
+- [ ] **Step 3: Implement in `ranking.py`**
+
+Replace `RankingPipeline.rank_papers`:
+
+```python
+    async def rank_papers(
+        self,
+        papers: list[PaperMetadata],
+        query: str,
+        weights: RankingWeights | None = None,
+        top_n: int = 10,
+    ) -> list[PaperMetadata]:
+        if not papers:
+            return []
+
+        w = weights or RankingWeights(
+            relevance=self.settings.ranking_weight_relevance,
+            citations=self.settings.ranking_weight_citations,
+            recency=self.settings.ranking_weight_recency,
+            evidence_grade=self.settings.ranking_weight_evidence_grade,
+            journal_impact=self.settings.ranking_weight_journal_impact,
+            author_authority=self.settings.ranking_weight_author_authority,
+            recency_half_life_years=self.settings.ranking_recency_half_life_years,
+            position_weight=self.settings.ranking_position_weight,
+        )
+
+        try:
+            # Enrich citations with timeout protection
+            enriched = await asyncio.wait_for(
+                self.enrich_citations(papers),
+                timeout=self.settings.ranking_enrichment_timeout,
+            )
+        except Exception:
+            for p in papers:
+                if p.citation_count is None:
+                    p.citation_count = 0
+            enriched = papers
+
+        scored = ScoringEngine.score_candidates(enriched, weights=w, query=query)
+        return scored[:top_n]
+```
+
+(The `Settings.ranking_*` fields referenced here were added in Task 8, which lands immediately before this task.)
+
+In `src/scholar_mcp/resolver.py`, inside `WaterfallResolver.search`, replace:
+
+```python
+        # Re-rank if requested and candidates present
+        if should_rerank and papers:
+            papers = await self.ranking_pipeline.rank_papers(papers, top_n=limit)
+        else:
+            papers = papers[:limit]
+```
+
+with:
+
+```python
+        # Re-rank if requested and candidates present
+        if should_rerank and papers:
+            papers = await self.ranking_pipeline.rank_papers(papers, query, top_n=limit)
+        else:
+            papers = papers[:limit]
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_ranking.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Run the full resolver test suite**
+
+Run: `pytest tests/test_waterfall_resolver.py -v`
+Expected: PASS (no call-site changes needed there — `search()`'s public signature is unchanged, only its internal call to `rank_papers` changed).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/scholar_mcp/ranking.py src/scholar_mcp/resolver.py tests/test_ranking.py
+git commit -m "feat: thread search query through to the ranking pipeline"
 ```
 
 ---
@@ -1854,7 +1858,7 @@ git commit -m "feat: add ranking settings for evidence grade, journal impact, au
 - Test: `tests/test_citation_check.py`
 
 **Interfaces:**
-- Consumes: `ScoringEngine.tokenize`/`text_coverage`/`best_matching_sentence` (Task 1), `WaterfallResolver.get_metadata`/`resolve_full_text` (existing), `Settings.citation_check_supported_threshold`/`citation_check_weak_threshold` (Task 9).
+- Consumes: `ScoringEngine.tokenize`/`text_coverage`/`best_matching_sentence` (Task 1), `WaterfallResolver.get_metadata`/`resolve_full_text` (existing), `Settings.citation_check_supported_threshold`/`citation_check_weak_threshold` (Task 8).
 - Produces: `async def check_citations(resolver: WaterfallResolver, claims: list[dict[str, str]], deep: bool = False) -> list[dict[str, Any]]`. `MAX_CLAIMS = 25`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -2153,7 +2157,14 @@ Add to `tests/test_server_tools.py` (check the existing fixture setup at the top
 ```python
 async def test_check_citations_tool_supported(resolver, monkeypatch):
     import scholar_mcp.server as srv
+    from scholar_mcp.config import Settings
     from scholar_mcp.models import PaperMetadata
+
+    # The `resolver` fixture is an AsyncMock; check_citations reads
+    # resolver.settings.max_concurrency and the threshold floats, which blow up
+    # on auto-created AsyncMock children (TypeError in Semaphore/threshold
+    # comparison). Give it a real Settings.
+    resolver.settings = Settings()
 
     async def fake_get_metadata(identifier):
         return PaperMetadata(
