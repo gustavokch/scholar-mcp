@@ -13,10 +13,13 @@ from scholar_mcp.models import (
 from scholar_mcp.resolver import WaterfallResolver
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.medical.brazil_moh import VALID_COLLECTIONS as BRAZIL_VALID_COLLECTIONS
+from scholar_mcp.medical.brazil_moh import BrazilMoHEngine
 from scholar_mcp.medical.clinical_trials import ClinicalTrialsClient
 from scholar_mcp.medical.databases import MedicalDatabasesEngine
 from scholar_mcp.medical.fda import FDAClient
 from scholar_mcp.medical.formatters import (
+    format_brazil_moh_guidelines,
     format_drug_details,
     format_drug_search_results,
     format_guidelines,
@@ -26,9 +29,6 @@ from scholar_mcp.medical.formatters import (
     format_rxnorm_drugs,
     format_who_iris_guidelines,
 )
-from scholar_mcp.medical.brazil_moh import VALID_COLLECTIONS as BRAZIL_VALID_COLLECTIONS
-from scholar_mcp.medical.brazil_moh import BrazilMoHEngine
-from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
 from scholar_mcp.medical.guidelines import GuidelinesEngine
 from scholar_mcp.medical.pediatrics import PediatricsEngine
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
