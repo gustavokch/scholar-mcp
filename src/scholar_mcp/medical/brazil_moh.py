@@ -73,8 +73,11 @@ def _first(value: Any) -> str:
 def _as_list(value: Any) -> list[str]:
     """Every non-empty value of a Solr field as a list of strings."""
     if isinstance(value, list):
-        return [str(v) for v in value if v]
-    return [str(value)] if value else []
+        return [s for v in value if v and (s := str(v).strip())]
+    if value:
+        s = str(value).strip()
+        return [s] if s else []
+    return []
 
 
 def _parse_issued(value: Any) -> tuple[str, str]:
@@ -108,7 +111,7 @@ def _parse_country(value: Any) -> str:
 
 def _derive_fulltext_id(url: str) -> str:
     """Short slug of a fi-admin document view URL, or "" for any other URL."""
-    match = FI_ADMIN_DOC_RE.match(url or "")
+    match = FI_ADMIN_DOC_RE.match((url or "").strip())
     return match.group(1) if match else ""
 
 

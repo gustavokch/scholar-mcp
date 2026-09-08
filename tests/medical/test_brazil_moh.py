@@ -24,6 +24,8 @@ def test_first_returns_empty_string_for_empty_or_none():
 def test_as_list_wraps_scalar_and_drops_empties():
     assert _as_list("pt") == ["pt"]
     assert _as_list(["pt", "", "en"]) == ["pt", "en"]
+    assert _as_list(["   ", "pt", "  "]) == ["pt"]
+    assert _as_list("  ") == []
     assert _as_list(None) == []
 
 
@@ -65,6 +67,7 @@ def test_parse_country_handles_plain_string_without_subfields():
 def test_derive_fulltext_id_matches_fi_admin_url():
     url = "https://fi-admin.bvsalud.org/document/view/cfpaj"
     assert _derive_fulltext_id(url) == "cfpaj"
+    assert _derive_fulltext_id("  https://fi-admin.bvsalud.org/document/view/cfpaj  ") == "cfpaj"
     assert _derive_fulltext_id("https://fi-admin.bvsalud.org/document/view/cfpaj?lang=pt") == "cfpaj"
     assert _derive_fulltext_id("https://fi-admin.bvsalud.org/document/view/cfpaj#page=1") == "cfpaj"
 
