@@ -100,6 +100,9 @@ def _parse_country(value: Any) -> str:
         for part in raw.split("^"):
             if part[:1] == "e" and part[1:].strip():
                 return part[1:].strip()
+        cleaned = raw.strip()
+        if cleaned.lower() == BRAZIL_COUNTRY.lower():
+            return BRAZIL_COUNTRY
     return ""
 
 

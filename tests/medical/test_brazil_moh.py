@@ -56,6 +56,12 @@ def test_parse_country_returns_empty_when_absent():
     assert _parse_country(["no subfields here"]) == ""
 
 
+def test_parse_country_handles_plain_string_without_subfields():
+    assert _parse_country(["Brasil"]) == "Brasil"
+    assert _parse_country(" Brasil ") == "Brasil"
+    assert _parse_country(["brasil"]) == "Brasil"
+
+
 def test_derive_fulltext_id_matches_fi_admin_url():
     url = "https://fi-admin.bvsalud.org/document/view/cfpaj"
     assert _derive_fulltext_id(url) == "cfpaj"
