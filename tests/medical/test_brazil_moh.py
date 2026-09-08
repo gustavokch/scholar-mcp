@@ -306,9 +306,9 @@ async def test_search_requests_overfetched_count(tmp_path: Path):
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         await engine.search_guidelines("dengue", limit=10)
-        requested = str(route.calls[0].request.url)
-        assert "count=30" in requested
-        assert "output=json" in requested
+        requested = route.calls[0].request.url.params
+        assert requested["count"] == "30"
+        assert requested["output"] == "json"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -322,7 +322,7 @@ async def test_search_caps_requested_count_at_page_size(tmp_path: Path):
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         await engine.search_guidelines("dengue", limit=50)
-        assert "count=150" in str(route.calls[0].request.url)
+        assert route.calls[0].request.url.params["count"] == "150"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -414,7 +414,7 @@ async def test_search_clamps_limit_inside_engine(tmp_path: Path):
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         await engine.search_guidelines("dengue", limit=9999)
-        assert "count=150" in str(route.calls[0].request.url)
+        assert route.calls[0].request.url.params["count"] == "150"
     finally:
         await cache.close()
         await http_client.aclose()
