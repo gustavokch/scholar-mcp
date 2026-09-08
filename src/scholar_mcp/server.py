@@ -26,7 +26,6 @@ from scholar_mcp.medical.formatters import (
     format_rxnorm_drugs,
     format_who_iris_guidelines,
 )
-from scholar_mcp.medical.brazil_moh import MAX_RESULTS as BRAZIL_MAX_RESULTS
 from scholar_mcp.medical.brazil_moh import VALID_COLLECTIONS as BRAZIL_VALID_COLLECTIONS
 from scholar_mcp.medical.brazil_moh import BrazilMoHEngine
 from scholar_mcp.medical.formatters import format_brazil_moh_guidelines
@@ -592,7 +591,7 @@ if settings.enable_medical_tools:
             collection: 'all' (default, all Brazilian grey literature) or
                 'brisa' (health-technology assessments and PCDT only).
         """
-        clamped = min(max(1, limit), BRAZIL_MAX_RESULTS)
+        # The engine clamps limit; no server-side clamp.
         if collection not in BRAZIL_VALID_COLLECTIONS:
             return {
                 "status": "error",
@@ -601,7 +600,7 @@ if settings.enable_medical_tools:
             }
         try:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
-                query, limit=clamped, collection=collection
+                query, limit=limit, collection=collection
             )
             return format_brazil_moh_guidelines(guidelines, query, meta)
         except Exception as ex:

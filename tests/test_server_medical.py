@@ -81,11 +81,12 @@ async def test_search_brazil_moh_guidelines_tool(monkeypatch):
     assert mock.await_args.kwargs["limit"] == 5
 
 
-async def test_search_brazil_moh_guidelines_clamps_limit(monkeypatch):
+async def test_search_brazil_moh_guidelines_forwards_raw_limit(monkeypatch):
+    # The engine owns clamping; the tool passes the caller's limit through.
     mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
     monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
     await srv.search_brazil_moh_guidelines("x", limit=9999)
-    assert mock.await_args.kwargs["limit"] == 50
+    assert mock.await_args.kwargs["limit"] == 9999
 
 
 async def test_search_brazil_moh_guidelines_rejects_unknown_collection(monkeypatch):
