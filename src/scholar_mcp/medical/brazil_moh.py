@@ -41,7 +41,7 @@ BVS_HEADERS = {
 }
 
 FI_ADMIN_DOC_RE = re.compile(
-    r"^https?://fi-admin\.bvsalud\.org/document/view/([A-Za-z0-9._-]+)/?$"
+    r"^https?://fi-admin\.bvsalud\.org/document/view/([A-Za-z0-9._-]+)(?:[/?#]|$)"
 )
 
 # The full-text fetch follows a URL taken from record content while the

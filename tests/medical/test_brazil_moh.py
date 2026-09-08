@@ -59,6 +59,8 @@ def test_parse_country_returns_empty_when_absent():
 def test_derive_fulltext_id_matches_fi_admin_url():
     url = "https://fi-admin.bvsalud.org/document/view/cfpaj"
     assert _derive_fulltext_id(url) == "cfpaj"
+    assert _derive_fulltext_id("https://fi-admin.bvsalud.org/document/view/cfpaj?lang=pt") == "cfpaj"
+    assert _derive_fulltext_id("https://fi-admin.bvsalud.org/document/view/cfpaj#page=1") == "cfpaj"
 
 
 def test_derive_fulltext_id_is_empty_for_offsite_url():
