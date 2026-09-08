@@ -485,13 +485,20 @@ async def test_search_caches_success_and_serves_from_cache(tmp_path: Path):
         await http_client.aclose()
 
 
-from scholar_mcp.medical.brazil_moh import _is_allowed_host
+from scholar_mcp.medical.brazil_moh import (
+    _is_allowed_host,
+    is_allowed_bvs_host,
+    is_allowed_host,
+)
 
 PDF_URL = "https://docs.bvsalud.org/biblioref/2026/08/1708363/protocolo.pdf"
 FI_ADMIN_URL = "https://fi-admin.bvsalud.org/document/view/cfpaj"
 
 
 def test_is_allowed_host_accepts_bvs_hosts_only():
+    assert is_allowed_bvs_host(FI_ADMIN_URL) is True
+    assert is_allowed_bvs_host(PDF_URL) is True
+    assert is_allowed_host(FI_ADMIN_URL) is True
     assert _is_allowed_host(FI_ADMIN_URL) is True
     assert _is_allowed_host(PDF_URL) is True
     assert _is_allowed_host("https://fi-admin.bvsalud.org:443/document/view/123") is True

@@ -215,13 +215,17 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
     return record.country == BRAZIL_COUNTRY
 
 
-def _is_allowed_host(url: str) -> bool:
+def is_allowed_bvs_host(url: str) -> bool:
     """True only for the BVS hosts this module is permitted to fetch."""
     try:
         host = (urllib.parse.urlparse(url or "").hostname or "").lower()
     except ValueError:
         return False
     return host in FULLTEXT_ALLOWED_HOSTS
+
+
+is_allowed_host = is_allowed_bvs_host
+_is_allowed_host = is_allowed_bvs_host
 
 
 def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
