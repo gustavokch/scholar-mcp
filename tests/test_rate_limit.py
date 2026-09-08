@@ -64,3 +64,17 @@ def test_rate_limiter_rejects_invalid_rate():
     with pytest.raises(ValueError, match="positive and finite"):
         AsyncRateLimiter(rate_per_sec=float("nan"))
 
+
+def test_rate_limiter_throttle_sanitizes_non_finite():
+    limiter = AsyncRateLimiter(rate_per_sec=10.0)
+    baseline = limiter.throttled_until
+    limiter.throttle(float("nan"))
+    assert limiter.throttled_until == baseline
+
+    limiter.throttle(float("inf"))
+    assert limiter.throttled_until == baseline
+
+    limiter.throttle(-10.0)
+    assert limiter.throttled_until >= baseline
+
+

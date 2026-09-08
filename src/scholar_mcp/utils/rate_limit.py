@@ -36,8 +36,10 @@ class AsyncRateLimiter:
         request after the throttle still pays a full token interval instead of
         firing immediately into the host that just rejected us.
         """
+        if not math.isfinite(duration) or duration <= 0.0:
+            return
         now = time.monotonic()
-        self.throttled_until = max(self.throttled_until, now + max(0.0, duration))
+        self.throttled_until = max(self.throttled_until, now + duration)
         self.tokens = 0.0
         self.last_update = max(self.last_update, self.throttled_until)
 
