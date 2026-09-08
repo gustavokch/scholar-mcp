@@ -330,4 +330,3 @@ def format_brazil_moh_guidelines(
 
     markdown = append_cache_info("\n".join(lines).strip(), meta)
     return {"data": [g.to_dict() for g in guidelines], "markdown": markdown}
-

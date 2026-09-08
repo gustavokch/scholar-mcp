@@ -483,6 +483,3 @@ class BrazilMoHEngine:
         )
         content, truncated = truncate_content(payload.get("content", ""), limit)
         return {**payload, "content": content, "truncated": truncated}
-
-
-

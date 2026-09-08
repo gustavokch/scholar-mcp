@@ -271,4 +271,3 @@ class BrazilGuideline:
             return cls()
         fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**fields)
-
