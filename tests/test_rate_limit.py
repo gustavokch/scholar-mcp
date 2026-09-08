@@ -49,3 +49,18 @@ async def test_rate_limiter_concurrent_acquires():
     await asyncio.gather(*(limiter.acquire() for _ in range(5)))
     elapsed = time.monotonic() - start
     assert elapsed >= 0.15
+
+
+def test_rate_limiter_rejects_invalid_rate():
+    with pytest.raises(ValueError, match="positive and finite"):
+        AsyncRateLimiter(rate_per_sec=0.0)
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        AsyncRateLimiter(rate_per_sec=-5.0)
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        AsyncRateLimiter(rate_per_sec=float("inf"))
+
+    with pytest.raises(ValueError, match="positive and finite"):
+        AsyncRateLimiter(rate_per_sec=float("nan"))
+

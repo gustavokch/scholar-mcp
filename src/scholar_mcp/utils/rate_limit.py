@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 
 
@@ -6,7 +7,10 @@ class AsyncRateLimiter:
     """Async token bucket rate limiter with dynamic throttle and backoff."""
 
     def __init__(self, rate_per_sec: float, max_burst: float = 1.0) -> None:
-        self.rate_per_sec = float(rate_per_sec)
+        rate = float(rate_per_sec)
+        if not math.isfinite(rate) or rate <= 0:
+            raise ValueError(f"rate_per_sec must be positive and finite, got {rate_per_sec}")
+        self.rate_per_sec = rate
         self.capacity = float(max_burst)
         self.tokens = self.capacity
         self.last_update = time.monotonic()
