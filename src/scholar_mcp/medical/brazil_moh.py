@@ -134,6 +134,20 @@ _SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
 _SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
 
 
+def _usable_tokens(query: str) -> list[str]:
+    """User tokens that survive sanitization, in order.
+
+    A token reduced to nothing by ``_sanitize_token``, or reserved as a
+    boolean word, contributes no matching text and is dropped.
+    """
+    return [
+        cleaned
+        for token in (query or "").split()
+        if (cleaned := _sanitize_token(token))
+        and cleaned.lower() not in _SOLR_BOOLEAN_WORDS
+    ]
+
+
 def _build_query(query: str, collection: str) -> str:
     """Compose every filter into ``q``.
 
@@ -143,12 +157,7 @@ def _build_query(query: str, collection: str) -> str:
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
-    tokens = [
-        cleaned
-        for token in (query or "").split()
-        if (cleaned := _sanitize_token(token))
-        and cleaned.lower() not in _SOLR_BOOLEAN_WORDS
-    ]
+    tokens = _usable_tokens(query)
     if tokens:
         clauses.append("(" + " AND ".join(tokens) + ")")
     return " AND ".join(clauses)
@@ -276,6 +285,15 @@ class BrazilMoHEngine:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         clamped = min(max(1, limit), MAX_RESULTS)
+
+        # A blank query deliberately browses the collection. A query that
+        # carries text but sanitizes away to nothing is different: composing
+        # filters alone would return arbitrary top-of-index documents dressed
+        # as matches for terms that were never searched.
+        if (query or "").strip() and not _usable_tokens(query):
+            logger.info("brazil_moh query %r has no searchable tokens", query)
+            return [], CacheMetadata(cached=False, cache_age=0, error=False)
+
         cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:

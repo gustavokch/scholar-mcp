@@ -863,3 +863,35 @@ async def test_get_full_text_caps_cached_content_at_ceiling(tmp_path: Path, monk
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_returns_empty_for_query_with_no_usable_tokens(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        records, meta = await engine.search_guidelines("*** AND ~~~")
+        assert records == []
+        assert meta.error is False
+        assert route.call_count == 0
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_still_browses_on_a_blank_query(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        records, meta = await engine.search_guidelines("   ")
+        assert len(records) == 1
+        assert meta.error is False
+        assert route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
