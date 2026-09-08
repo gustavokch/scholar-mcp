@@ -72,8 +72,8 @@ class Settings:
 
     @property
     def ncbi_rate_limit(self) -> float:
-        """NCBI E-utilities requests per second: 10 with an API key, 3 without."""
-        return 10.0 if self.pubmed_api_key else 3.0
+        """NCBI E-utilities requests per second: 9.0 with an API key, 2.8 without."""
+        return 9.0 if self.pubmed_api_key else 2.8
 
     def scihub_tier_enabled(self) -> bool:
         """ENABLE_SCIHUB is the master switch; the preference flag cannot override it."""

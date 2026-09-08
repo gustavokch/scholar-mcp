@@ -121,12 +121,14 @@ async def test_returns_none_after_exhausting_retries():
 
 @respx.mock
 async def test_ncbi_requests_are_rate_limited(monkeypatch):
-    """Without an API key the NCBI host bucket must be 3 rps, not unlimited."""
+    """Without an API key the NCBI host bucket must be safe 2.8 rps, not unlimited."""
     respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
         return_value=httpx.Response(200, text="ok")
     )
     client = AsyncHttpClient(settings=Settings(pubmed_api_key=None))
-    assert client._limiter_for("eutils.ncbi.nlm.nih.gov").rate_per_sec == 3.0
+    assert client._limiter_for("eutils.ncbi.nlm.nih.gov").rate_per_sec == 2.8
+    # Host grouping: subdomains share the ncbi.nlm.nih.gov limiter bucket
+    assert client._limiter_for("www.ncbi.nlm.nih.gov") is client._limiter_for("eutils.ncbi.nlm.nih.gov")
     await client.aclose()
 
 
@@ -263,4 +265,180 @@ async def test_merge_params_skips_none_values():
     sent = str(route.calls[0].request.url)
     assert "unused" not in sent
     assert "email=" in sent
+    await client.aclose()
+
+
+def test_parse_retry_after_delta_seconds():
+    from scholar_mcp.utils.http import _parse_retry_after
+
+    resp = httpx.Response(429, headers={"Retry-After": "30"})
+    assert _parse_retry_after(resp) == 30.0
+
+    resp_float = httpx.Response(429, headers={"Retry-After": "2.5"})
+    assert _parse_retry_after(resp_float) == 2.5
+
+    resp_none = httpx.Response(429)
+    assert _parse_retry_after(resp_none) is None
+
+    resp_invalid = httpx.Response(429, headers={"Retry-After": "invalid"})
+    assert _parse_retry_after(resp_invalid) is None
+
+
+def test_parse_retry_after_http_date():
+    from scholar_mcp.utils.http import _parse_retry_after
+    from datetime import datetime, timezone, timedelta
+
+    future = datetime.now(timezone.utc) + timedelta(seconds=60)
+    date_str = future.strftime("%a, %d %b %Y %H:%M:%S GMT")
+    resp = httpx.Response(429, headers={"Retry-After": date_str})
+    val = _parse_retry_after(resp)
+    assert val is not None and 50.0 <= val <= 65.0
+
+    # Malformed or out-of-range dates must return None
+    assert _parse_retry_after(httpx.Response(429, headers={"Retry-After": "Sun, 99 Foo 99999 99:99:99 GMT"})) is None
+    assert _parse_retry_after(httpx.Response(429, headers={"Retry-After": "Wed, 00 Feb 2026"})) is None
+
+
+
+def test_host_key_normalization():
+    from scholar_mcp.utils.http import _host_key
+
+    assert _host_key("eutils.ncbi.nlm.nih.gov") == "ncbi.nlm.nih.gov"
+    # Ports are stripped by _limiter_for_url, not by _host_key.
+    assert _host_key("www.ncbi.nlm.nih.gov") == "ncbi.nlm.nih.gov"
+    assert _host_key("export.arxiv.org") == "arxiv.org"
+    assert _host_key("api.fda.gov") == "api.fda.gov"
+
+
+@respx.mock
+async def test_429_retries_and_throttles_limiter():
+    route = respx.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi").mock(
+        side_effect=[
+            httpx.Response(429, text='{"error":"API rate limit exceeded"}'),
+            httpx.Response(200, text="<eSummaryResult>ok</eSummaryResult>"),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0)
+    baseline = time.monotonic()
+    resp = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
+    assert resp is not None and "ok" in resp.text
+    assert route.call_count == 2
+    limiter = client._limiter_for("eutils.ncbi.nlm.nih.gov")
+    # The throttle must have moved the bucket forward, not merely been non-zero:
+    # time.monotonic() is always positive, so `> 0.0` alone proves nothing.
+    assert limiter.throttled_until >= baseline
+    await client.aclose()
+
+
+@respx.mock
+async def test_429_honors_retry_after_header():
+    route = respx.get("https://api.semanticscholar.org/graph/v1/paper/123").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0.05"}, text="Rate limit"),
+            httpx.Response(200, json={"title": "Paper"}),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0)
+    start = time.monotonic()
+    resp = await client.get("https://api.semanticscholar.org/graph/v1/paper/123")
+    elapsed = time.monotonic() - start
+    assert resp is not None
+    assert route.call_count == 2
+    assert elapsed >= 0.04
+    await client.aclose()
+
+
+def test_parse_retry_after_rejects_non_finite():
+    from scholar_mcp.utils.http import _parse_retry_after
+
+    for raw in ("inf", "+Inf", "-inf", "1e400", "NaN", "nan"):
+        resp = httpx.Response(429, headers={"Retry-After": raw})
+        assert _parse_retry_after(resp) is None, raw
+
+
+def test_parse_retry_after_clamps_to_max():
+    from scholar_mcp.utils.http import MAX_RETRY_AFTER, _parse_retry_after
+
+    resp = httpx.Response(429, headers={"Retry-After": "86400"})
+    assert _parse_retry_after(resp) == MAX_RETRY_AFTER
+
+    from datetime import datetime, timedelta, timezone
+
+    far = datetime.now(timezone.utc) + timedelta(days=1)
+    resp_date = httpx.Response(
+        429, headers={"Retry-After": far.strftime("%a, %d %b %Y %H:%M:%S GMT")}
+    )
+    assert _parse_retry_after(resp_date) == MAX_RETRY_AFTER
+
+
+def test_host_key_ignores_userinfo_and_ipv6_brackets():
+    from scholar_mcp.utils.http import _host_key
+
+    assert _host_key("a.example.com") == "a.example.com"
+    assert _host_key("A.Example.COM") == "a.example.com"
+    assert _host_key("2001:db8::1") == "2001:db8::1"
+    assert _host_key(None) == ""
+    assert _host_key("") == ""
+
+
+
+async def test_limiter_key_uses_hostname_not_netloc():
+    """A userinfo-bearing URL must share the bucket of the bare host, not key on the username."""
+    client = AsyncHttpClient(settings=Settings(pubmed_api_key=None))
+    plain = client._limiter_for_url("https://api.crossref.org/works")
+    with_userinfo = client._limiter_for_url("https://user:pw@api.crossref.org/works")
+    assert plain is with_userinfo
+    assert plain.rate_per_sec == 10.0
+
+    ipv6_a = client._limiter_for_url("https://[2001:db8::1]:8443/x")
+    ipv6_b = client._limiter_for_url("https://[2001:db8::2]:8443/x")
+    assert ipv6_a is not ipv6_b
+    await client.aclose()
+
+
+async def test_min_429_wait_is_explicit_not_derived_from_backoff_base():
+    """The 1s 429 floor must be its own knob, not a side effect of backoff_base."""
+    client = AsyncHttpClient()
+    assert client.min_429_wait == 1.0
+    await client.aclose()
+
+    fast = AsyncHttpClient(backoff_base=0.5, min_429_wait=0.0)
+    assert fast.min_429_wait == 0.0
+    await fast.aclose()
+
+
+@respx.mock
+async def test_429_floor_can_be_disabled_for_tests():
+    route = respx.get("https://api.crossref.org/works/10.1/x").mock(
+        side_effect=[httpx.Response(429, text="slow down"), httpx.Response(200, text="ok")]
+    )
+    client = AsyncHttpClient(backoff_base=0.5, min_429_wait=0.0)
+    start = time.monotonic()
+    resp = await client.get("https://api.crossref.org/works/10.1/x")
+    elapsed = time.monotonic() - start
+    assert resp is not None and route.call_count == 2
+    # backoff_base 0.5 alone would wait ~0.5s; the removed 1.0s floor must not apply.
+    assert elapsed < 1.0
+    await client.aclose()
+
+
+@respx.mock
+async def test_429_throttle_pushes_limiter_into_the_future():
+    """throttled_until must advance past the moment the 429 arrived, not merely be non-zero."""
+    respx.get("https://api.openalex.org/works/W1").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0.2"}, text="slow down"),
+            httpx.Response(200, json={"id": "W1"}),
+        ]
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0
+    )
+    limiter = client._limiter_for_url("https://api.openalex.org/works/W1")
+    assert limiter.throttled_until == 0.0
+    baseline = time.monotonic()
+    resp = await client.get("https://api.openalex.org/works/W1")
+    assert resp is not None
+    # Retry-After was 0.2s, so the pause must extend past the request start.
+    assert limiter.throttled_until >= baseline + 0.2
     await client.aclose()
