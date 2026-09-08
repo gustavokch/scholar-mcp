@@ -109,6 +109,25 @@ def _derive_fulltext_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+def _sanitize_token(token: str) -> str:
+    """Strip Solr query syntax from one user token.
+
+    The BVS endpoint receives every filter composed into ``q``, so a token
+    carrying Solr syntax (``"`` ``()[]`` ``^`` ``~`` ``*`` ``:`` ``\\`` ``/``
+    ``+`` ``!``) or a leading ``+``/``-`` operator would corrupt the query
+    rather than match text. Characters are removed, not escaped, because the
+    endpoint's escaping rules differ from Solr's own.
+    """
+    return _SOLR_SPECIALS_RE.sub("", token).lstrip("+-")
+
+
+_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!]')
+
+# Boolean words are composed by this module itself; a user token of "AND"
+# would otherwise surface as ``AND AND AND`` in the composed query.
+_SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
+
+
 def _build_query(query: str, collection: str) -> str:
     """Compose every filter into ``q``.
 
@@ -118,7 +137,12 @@ def _build_query(query: str, collection: str) -> str:
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
-    tokens = [token for token in (query or "").split() if token]
+    tokens = [
+        cleaned
+        for token in (query or "").split()
+        if (cleaned := _sanitize_token(token))
+        and cleaned.lower() not in _SOLR_BOOLEAN_WORDS
+    ]
     if tokens:
         clauses.append("(" + " AND ".join(tokens) + ")")
     return " AND ".join(clauses)

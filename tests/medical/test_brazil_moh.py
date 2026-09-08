@@ -110,6 +110,26 @@ def test_build_query_with_blank_query_is_filters_only():
     assert _build_query("   ", "all") == 'type:"non-conventional" AND la:"pt"'
 
 
+def test_build_query_strips_solr_special_characters():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    built = _build_query('a "quote" (b) [c]', "all")
+    assert built == 'type:"non-conventional" AND la:"pt" AND (a AND quote AND b AND c)'
+
+
+def test_build_query_drops_bare_boolean_words():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    built = _build_query("dengue AND zika", "all")
+    assert built == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+
+
+def test_build_query_all_tokens_reserved_yields_filters_only():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    assert _build_query("AND OR NOT", "all") == 'type:"non-conventional" AND la:"pt"'
+
+
 def test_extract_docs_reads_nested_envelope():
     from scholar_mcp.medical.brazil_moh import _extract_docs
 
