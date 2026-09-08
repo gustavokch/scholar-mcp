@@ -121,7 +121,7 @@ def _sanitize_token(token: str) -> str:
     return _SOLR_SPECIALS_RE.sub("", token).lstrip("+-")
 
 
-_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!]')
+_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
 
 # Boolean words are composed by this module itself; a user token of "AND"
 # would otherwise surface as ``AND AND AND`` in the composed query.

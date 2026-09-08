@@ -115,8 +115,8 @@ def test_build_query_with_blank_query_is_filters_only():
 def test_build_query_strips_solr_special_characters():
     from scholar_mcp.medical.brazil_moh import _build_query
 
-    built = _build_query('a "quote" (b) [c]', "all")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (a AND quote AND b AND c)'
+    built = _build_query('a "quote" (b) [c] && d || e', "all")
+    assert built == 'type:"non-conventional" AND la:"pt" AND (a AND quote AND b AND c AND d AND e)'
 
 
 def test_build_query_drops_bare_boolean_words():
