@@ -61,10 +61,12 @@ src/scholar_mcp/
 2. **6-Tier Waterfall Resolver** — The order is:
    - Tier 1: Europe PMC (JATS XML -> Markdown)
    - Tier 2: PMC (JATS XML -> Markdown)
-   - Tier 3: Unpaywall (Legal OA PDF -> Text)
-   - Tier 4: arXiv (Preprint PDF -> Text, automatic for arXiv DOIs `10.48550/arXiv.*` and arXiv IDs)
-   - Tier 5: Sci-Hub (Mirror-rotated PDF -> Text with Camoufox anti-detection fallback)
+   - Tier 3: Unpaywall (Legal OA PDF -> Text) — skipped when `PREFER_SCIHUB_OVER_UNPAYWALL` and `ENABLE_SCIHUB` are both set
+   - Tier 4: arXiv (Preprint PDF -> Text, automatic for arXiv DOIs `10.48550/arXiv.*` and arXiv IDs) — the provider self-skips when no arXiv ID is known
+   - Tier 5: Sci-Hub (Mirror-rotated PDF -> Text with Camoufox anti-detection fallback) — skipped when `ENABLE_SCIHUB` is false
    - Tier 6: Abstract Fallback (PubMed / CrossRef metadata)
+
+   Skipped tiers are still recorded in the response as `FetchAttempt(outcome="skipped")` with the reason, so the order above describes the plan, not a guarantee that every tier runs.
 3. **Caching Policy** — Identifier maps and paper metadata are cached in `TTLCache`. Full-text bodies and raw PDF bytes in the core waterfall are **never cached** to keep memory consumption bounded. The medical subsystem uses persistent `SQLiteCacheManager` with source-specific TTLs (FDA 24h, PubMed 1h, WHO GHO 7d, RxNorm 30d, Guidelines 7d, AAP Bright Futures 30d, AAP Policy 7d, Clinical Trials 24h, WHO IRIS 30d, Brazil MoH 30d).
 4. **Resilience and Error Boundaries** — Providers never raise on network failure or unexpected payloads; they report a miss/skip and allow the waterfall to degrade smoothly. The same boundary applies to the ranking enrichment stage (time-bounded by `RANKING_ENRICHMENT_TIMEOUT`) and to `check_citations` (per-claim failure isolation).
 5. **Download Sandbox** — `download_paper` enforces that paths resolve within `SCHOLAR_DOWNLOAD_DIR` and rejects path traversal.
