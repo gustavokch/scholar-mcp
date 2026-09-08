@@ -446,7 +446,14 @@ class BrazilMoHEngine:
 
     @staticmethod
     def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
-        limit = MAX_FULL_TEXT_CHARS if max_chars is None else max(1, max_chars)
+        # ``max_chars`` is caller-supplied and is bounded on both sides:
+        # MAX_FULL_TEXT_CHARS is the ceiling the tool documents, so a large
+        # value must not return an entire manual in one response.
+        limit = (
+            MAX_FULL_TEXT_CHARS
+            if max_chars is None
+            else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
+        )
         content, truncated = truncate_content(payload.get("content", ""), limit)
         return {**payload, "content": content, "truncated": truncated}
 

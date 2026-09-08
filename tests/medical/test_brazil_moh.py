@@ -248,6 +248,7 @@ import respx
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
+    MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
     _dedupe_by_id,
 )
@@ -828,3 +829,11 @@ async def test_get_full_text_ignores_non_matching_lookup_hit(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_serve_full_text_clamps_max_chars_to_module_ceiling():
+    payload = {"content": "x" * (MAX_FULL_TEXT_CHARS + 500)}
+    served = BrazilMoHEngine._serve_full_text(dict(payload), 10_000_000)
+    assert served["truncated"] is True
+    assert served["content"].startswith("x" * MAX_FULL_TEXT_CHARS)
+    assert served["content"][MAX_FULL_TEXT_CHARS:].lstrip().startswith("[... Truncated")
