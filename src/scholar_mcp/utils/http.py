@@ -120,10 +120,15 @@ class AsyncHttpClient:
         settings: Settings | None = None,
         max_retries: int = 4,
         backoff_base: float = 0.5,
+        min_429_wait: float = 1.0,
     ) -> None:
         self.settings = settings or Settings.load()
         self.max_retries = max_retries
         self.backoff_base = backoff_base
+        # Floor on the pause after a 429. NCBI counts requests in a 1.0s sliding
+        # window, so anything shorter can retry inside the window that rejected
+        # us. Tests set it to 0.0 to keep the suite fast.
+        self.min_429_wait = min_429_wait
         self.client = httpx.AsyncClient(
             timeout=float(self.settings.request_timeout),
             follow_redirects=True,
@@ -238,8 +243,9 @@ class AsyncHttpClient:
                         0, 0.1 * self.backoff_base
                     )
                     if resp.status_code == 429:
-                        min_wait = 1.0 if self.backoff_base >= 0.1 else calc_wait
-                        wait_time = max(retry_after or 0.0, calc_wait, min_wait)
+                        wait_time = max(
+                            retry_after or 0.0, calc_wait, self.min_429_wait
+                        )
                         limiter.throttle(wait_time)
                     else:
                         wait_time = max(retry_after or 0.0, calc_wait)

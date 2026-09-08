@@ -313,7 +313,7 @@ async def test_429_retries_and_throttles_limiter():
             httpx.Response(200, text="<eSummaryResult>ok</eSummaryResult>"),
         ]
     )
-    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0)
     resp = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
     assert resp is not None and "ok" in resp.text
     assert route.call_count == 2
@@ -331,7 +331,7 @@ async def test_429_honors_retry_after_header():
             httpx.Response(200, json={"title": "Paper"}),
         ]
     )
-    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0)
     start = time.monotonic()
     resp = await client.get("https://api.semanticscholar.org/graph/v1/paper/123")
     elapsed = time.monotonic() - start
@@ -383,4 +383,30 @@ async def test_limiter_key_uses_hostname_not_netloc():
     ipv6_a = client._limiter_for_url("https://[2001:db8::1]:8443/x")
     ipv6_b = client._limiter_for_url("https://[2001:db8::2]:8443/x")
     assert ipv6_a is not ipv6_b
+    await client.aclose()
+
+
+async def test_min_429_wait_is_explicit_not_derived_from_backoff_base():
+    """The 1s 429 floor must be its own knob, not a side effect of backoff_base."""
+    client = AsyncHttpClient()
+    assert client.min_429_wait == 1.0
+    await client.aclose()
+
+    fast = AsyncHttpClient(backoff_base=0.5, min_429_wait=0.0)
+    assert fast.min_429_wait == 0.0
+    await fast.aclose()
+
+
+@respx.mock
+async def test_429_floor_can_be_disabled_for_tests():
+    route = respx.get("https://api.crossref.org/works/10.1/x").mock(
+        side_effect=[httpx.Response(429, text="slow down"), httpx.Response(200, text="ok")]
+    )
+    client = AsyncHttpClient(backoff_base=0.5, min_429_wait=0.0)
+    start = time.monotonic()
+    resp = await client.get("https://api.crossref.org/works/10.1/x")
+    elapsed = time.monotonic() - start
+    assert resp is not None and route.call_count == 2
+    # backoff_base 0.5 alone would wait ~0.5s; the removed 1.0s floor must not apply.
+    assert elapsed < 1.0
     await client.aclose()
