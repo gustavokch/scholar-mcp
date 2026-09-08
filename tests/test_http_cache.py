@@ -372,6 +372,9 @@ def test_host_key_ignores_userinfo_and_ipv6_brackets():
     assert _host_key("a.example.com") == "a.example.com"
     assert _host_key("A.Example.COM") == "a.example.com"
     assert _host_key("2001:db8::1") == "2001:db8::1"
+    assert _host_key(None) == ""
+    assert _host_key("") == ""
+
 
 
 async def test_limiter_key_uses_hostname_not_netloc():

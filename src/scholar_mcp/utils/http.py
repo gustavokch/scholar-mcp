@@ -34,14 +34,14 @@ DEFAULT_FALLBACK_RATE = 5.0
 MAX_RETRY_AFTER = 60.0
 
 
-def _host_key(host: str) -> str:
+def _host_key(host: str | None) -> str:
     """Group a bare hostname into its rate-limiting bucket.
 
     Takes a hostname with no port and no userinfo -- use ``_limiter_for_url`` to
     get one out of a URL. Splitting a port off here would corrupt a bare IPv6
     literal, and splitting userinfo off would key the bucket on the username.
     """
-    hostname = host.lower().strip()
+    hostname = (host or "").lower().strip()
     if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
         return "ncbi.nlm.nih.gov"
     if hostname == "arxiv.org" or hostname.endswith(".arxiv.org"):
