@@ -314,12 +314,14 @@ async def test_429_retries_and_throttles_limiter():
         ]
     )
     client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0)
+    baseline = time.monotonic()
     resp = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi")
     assert resp is not None and "ok" in resp.text
     assert route.call_count == 2
     limiter = client._limiter_for("eutils.ncbi.nlm.nih.gov")
-    # Limiter throttled_until must have been set
-    assert limiter.throttled_until > 0.0
+    # The throttle must have moved the bucket forward, not merely been non-zero:
+    # time.monotonic() is always positive, so `> 0.0` alone proves nothing.
+    assert limiter.throttled_until >= baseline
     await client.aclose()
 
 
@@ -409,4 +411,26 @@ async def test_429_floor_can_be_disabled_for_tests():
     assert resp is not None and route.call_count == 2
     # backoff_base 0.5 alone would wait ~0.5s; the removed 1.0s floor must not apply.
     assert elapsed < 1.0
+    await client.aclose()
+
+
+@respx.mock
+async def test_429_throttle_pushes_limiter_into_the_future():
+    """throttled_until must advance past the moment the 429 arrived, not merely be non-zero."""
+    respx.get("https://api.openalex.org/works/W1").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": "0.2"}, text="slow down"),
+            httpx.Response(200, json={"id": "W1"}),
+        ]
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0
+    )
+    limiter = client._limiter_for_url("https://api.openalex.org/works/W1")
+    assert limiter.throttled_until == 0.0
+    baseline = time.monotonic()
+    resp = await client.get("https://api.openalex.org/works/W1")
+    assert resp is not None
+    # Retry-After was 0.2s, so the pause must extend past the request start.
+    assert limiter.throttled_until >= baseline + 0.2
     await client.aclose()

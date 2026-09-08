@@ -63,18 +63,14 @@ current request and calls `limiter.throttle(duration)` so sibling coroutines on 
 3. Run `pytest tests/test_rate_limit.py`.
 4. `git commit -m "docs(rate_limit): state throttle single-loop contract"`
 
-## Task 5 — Separate the arXiv PDF bucket (🟡)
+## Task 5 — Separate the arXiv PDF bucket (🟡) — DROPPED
 
-- Modify: `src/scholar_mcp/utils/http.py`
-- Test: `tests/test_http_cache.py`
-
-1. Write failing test: `export.arxiv.org` and `arxiv.org` resolve to different limiters, the API
-   bucket stays at 0.33 rps, and the PDF bucket runs faster.
-2. Run to confirm failure.
-3. Restrict the `_host_key` arXiv fold to the API hosts and give `export.arxiv.org` its own
-   `DEFAULT_HOST_RATES` entry.
-4. Re-run to confirm pass.
-5. `git commit -m "fix(http): split arxiv PDF host from the 0.33 rps API bucket"`
+Investigation invalidated the finding. `src/scholar_mcp/providers/arxiv.py:8-9` puts both the API
+(`export.arxiv.org/api/query`) and the PDF downloads (`export.arxiv.org/pdf`) on the *same*
+hostname, so no host-key split can separate them. arXiv's published policy asks for no more than
+one request every three seconds with a single connection at a time, and it applies to the whole
+host — so 0.33 rps is the correct shared rate, and raising it for PDFs would breach the policy.
+The slow bulk-PDF path is inherent, not a defect. No change made.
 
 ## Task 6 — Narrow the exception and tighten the throttle assertion (🔵)
 
