@@ -179,6 +179,28 @@ async def test_http_client_logs_warning_on_transport_error(caplog):
 
 
 @respx.mock
+async def test_http_client_sanitizes_html_error_body(caplog):
+    html_502 = (
+        "<html><head><title>502 Bad Gateway</title></head>"
+        "<body><center><h1>502 Bad Gateway</h1></center><hr><center>nginx</center></body>"
+        "</html>\n<!-- a padding to disable MSIE and Chrome friendly error page -->"
+    )
+    respx.get("https://example.org/badgateway").mock(
+        return_value=httpx.Response(502, text=html_502, headers={"Content-Type": "text/html"})
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=1)
+    with caplog.at_level(logging.WARNING):
+        resp = await client.get("https://example.org/badgateway")
+    assert resp is None
+    record = next(r for r in caplog.records if "failed with status 502" in r.message)
+    assert "502 Bad Gateway" in record.message
+    assert "<html>" not in record.message
+    assert "<!--" not in record.message
+    assert "padding to disable MSIE" not in record.message
+    await client.aclose()
+
+
+@respx.mock
 async def test_http_logs_never_leak_credentials(caplog):
     """Injected api_key/email must not reach the log stream on failure paths."""
     respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(

@@ -596,7 +596,7 @@ if settings.enable_medical_tools:
         if norm_collection not in BRAZIL_VALID_COLLECTIONS:
             return {
                 "status": "error",
-                "error": f"unknown collection {collection!r}; expected 'all' or 'brisa'",
+                "error": f"unknown collection {collection!r}; expected 'all', 'brisa', or 'pcdt'",
                 "source": "brazil-moh",
             }
         try:

@@ -90,34 +90,47 @@ def _install_fake_playwright(monkeypatch):
 
 
 @respx.mock
-async def test_search_bright_futures_html(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
-    respx.get(BF_URL).respond(
-        html="""
-    <html><body>
-      <div class="search-result">
-        <h3 class="title"><a href="/guidelines/infant-nutrition">
-          Infant Nutrition Guidelines (0-12 months)</a></h3>
-        <p class="description">Recommendations on breastfeeding and complementary feeding.</p>
-      </div>
-      <div class="search-result">
-        <h3 class="title"><a href="/x">No</a></h3>
-      </div>
-    </body></html>
-    """
-    )
+async def test_search_bright_futures_uses_pubmed_not_dead_endpoint(tmp_path: Path):
+    """The BF ?q= endpoint ignores the query and returns static nav HTML, so
+    the direct bright-futures route goes straight to the PubMed
+    organization=AAP search without touching the dead endpoint."""
+    from unittest.mock import AsyncMock
 
-    guidelines, meta = await engine.search_bright_futures("nutrition")
-    assert len(guidelines) == 1  # short-title item dropped
-    assert "Infant Nutrition" in guidelines[0].title
-    assert guidelines[0].source == "bright-futures"
-    assert guidelines[0].organization == "American Academy of Pediatrics"
-    assert guidelines[0].category == "Preventive Care"
-    assert "0-12 months" in guidelines[0].age_group
-    assert guidelines[0].url.startswith("https://brightfutures.aap.org/")
-    assert len(guidelines[0].description) <= 300
-    await cache.close()
-    await http_client.aclose()
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    route = respx.get(BF_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=(
+                    "American Academy of Pediatrics guideline: "
+                    "ibuprofen use in infants under 6 months"
+                ),
+                abstract=(
+                    "Recommendations and best practice for ibuprofen dosing "
+                    "and contraindications in children under 6 months."
+                ),
+                pmid="12345",
+                year="2024",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    try:
+        guidelines, meta = await engine.search_bright_futures("ibuprofen children")
+        assert len(guidelines) == 1
+        assert guidelines[0].source == "pubmed-aap"
+        assert meta.error is False
+        assert route.call_count == 0
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
@@ -145,12 +158,34 @@ async def test_search_aap_policy_html(tmp_path: Path):
 
 @respx.mock
 async def test_search_aap_guidelines_combines_and_dedups(tmp_path: Path):
+    """Combined search merges the PubMed-backed bright-futures route with the
+    AAP scrape and dedups identical normalized titles."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
     engine, cache, http_client = await _engine(tmp_path)
-    shared = "<h3><a href='/a'>Guideline on Nutrition 2023</a></h3><p>Different text.</p>"
-    respx.get(BF_URL).respond(html=f"<div class='search-result'>{shared}</div>")
+    engine.settings.enable_browser_fallback = False
     respx.get(AAP_URL).respond(
-        html=f"<div class='search-result'>{shared}</div>"  # identical normalized title
+        html="<div class='search-result'>"
+        "<h3><a href='/a'>Guideline on Nutrition 2023</a></h3><p>Different text.</p>"
+        "</div>"
     )
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title="Guideline on Nutrition 2023",
+                abstract="Nutrition guideline recommendations and best practice.",
+                pmid="999",
+                year="2023",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
 
     guidelines, meta = await engine.search_aap_guidelines("nutrition")
     assert len(guidelines) == 1  # exact normalized-title dedup
@@ -180,18 +215,25 @@ async def test_search_pediatric_literature_composes_journal_query(tmp_path: Path
 
 
 @respx.mock
-async def test_search_bright_futures_marks_error_and_skips_cache_on_failure(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
-    try:
-        route = respx.get(BF_URL).mock(side_effect=httpx.ConnectError("boom"))
+async def test_search_bright_futures_pubmed_failure_marks_error(tmp_path: Path):
+    """PubMed transport failure on the bright-futures route reports error and
+    caches nothing, so a retry hits the network again."""
+    from unittest.mock import AsyncMock
 
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    route = respx.get(BF_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.side_effect = RuntimeError("boom")
+    engine.pubmed = mock_pubmed
+
+    try:
         guidelines, meta = await engine.search_bright_futures("nutrition")
         assert guidelines == []
         assert meta.error is True
-
-        after_first = route.call_count
-        await engine.search_bright_futures("nutrition")
-        assert route.call_count > after_first
+        assert route.call_count == 0
     finally:
         await cache.close()
         await http_client.aclose()
@@ -212,26 +254,69 @@ async def test_search_aap_policy_marks_error_on_failure(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_aap_guidelines_marks_error_when_one_source_fails(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
-    try:
-        respx.get(BF_URL).respond(
-            html="""
-        <html><body>
-          <div class="search-result">
-            <h3 class="title"><a href="/guidelines/infant-nutrition">
-              Infant Nutrition Guidelines (0-12 months)</a></h3>
-            <p class="description">Recommendations on complementary feeding.</p>
-          </div>
-        </body></html>
-        """
-        )
-        respx.get(AAP_URL).mock(side_effect=httpx.ConnectError("boom"))
+async def test_search_aap_guidelines_pubmed_results_clear_scrape_error(tmp_path: Path):
+    """AAP scrape failing while the PubMed-backed bright-futures route yields
+    results returns them clean: PubMed never touches the Cloudflare-walled
+    AAP host, so the scrape error is stale, not an incomplete result."""
+    from unittest.mock import AsyncMock
 
+    from scholar_mcp.medical.models import MedicalArticle
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    respx.get(AAP_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=(
+                    "American Academy of Pediatrics guideline: "
+                    "infant nutrition recommendations"
+                ),
+                abstract=(
+                    "Recommendations and best practice for complementary feeding."
+                ),
+                pmid="12345",
+                year="2024",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+    try:
         guidelines, meta = await engine.search_aap_guidelines("nutrition")
-        # Partial results are still returned, but flagged as incomplete.
         assert guidelines
-        assert meta.error is True
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_bright_futures_pubmed_empty_returns_empty_no_error(tmp_path: Path):
+    """Empty PubMed result on the bright-futures route is a genuine empty, not
+    an error — nothing left to query."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    route = respx.get(BF_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    try:
+        guidelines, meta = await engine.search_bright_futures("nutrition")
+        assert guidelines == []
+        assert meta.error is False
+        assert route.call_count == 0
     finally:
         await cache.close()
         await http_client.aclose()
@@ -239,24 +324,18 @@ async def test_search_aap_guidelines_marks_error_when_one_source_fails(tmp_path:
 
 @respx.mock
 async def test_direct_scrapes_drop_items_unrelated_to_query(tmp_path: Path):
-    """server.py routes to search_bright_futures / search_aap_policy directly;
-    those paths must apply the same query-overlap filter as the combined
-    search so SPA navigation junk cannot reach callers."""
+    """server.py routes to search_aap_policy directly; that path must apply
+    the query-overlap filter so SPA navigation junk cannot reach callers."""
     engine, cache, http_client = await _engine(tmp_path)
     junk_html = """
     <html><body>
       <div class="search-result">
-        <h3 class="title"><a href="/practice-management/bright-futures/quality">Quality Improvement</a></h3>
+        <h3 class="title"><a href="/practice-management/aap-policy/quality">Quality Improvement</a></h3>
         <p>Site navigation.</p>
       </div>
     </body></html>
     """
-    respx.get(BF_URL).respond(html=junk_html)
     respx.get(AAP_URL).respond(html=junk_html)
-
-    bf, bf_meta = await engine.search_bright_futures("nutrition")
-    assert bf == []
-    assert bf_meta.error is False
 
     aap, aap_meta = await engine.search_aap_policy("nutrition")
     assert aap == []
@@ -277,7 +356,6 @@ async def test_search_aap_guidelines_falls_back_to_pubmed_on_scrape_failure(tmp_
 
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.enable_browser_fallback = False
-    respx.get(BF_URL).respond(status_code=403)
     respx.get(AAP_URL).respond(status_code=403)
 
     mock_pubmed = AsyncMock()
@@ -313,9 +391,9 @@ async def test_search_aap_guidelines_falls_back_to_pubmed_on_scrape_failure(tmp_
 
 @respx.mock
 async def test_search_aap_guidelines_ignores_scrape_items_unrelated_to_query(tmp_path: Path):
-    """BF/AAP search pages are SPAs that render static nav items regardless of
-    the query. Items whose title shares no word with the query are junk and
-    must not block the PubMed fallback."""
+    """The AAP search page is a SPA that renders static nav items regardless
+    of the query. Items whose title shares no word with the query are junk
+    and must not block the PubMed fallback."""
     from unittest.mock import AsyncMock
 
     from scholar_mcp.medical.models import MedicalArticle
@@ -323,21 +401,20 @@ async def test_search_aap_guidelines_ignores_scrape_items_unrelated_to_query(tmp
 
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.enable_browser_fallback = False
-    respx.get(BF_URL).respond(
+    respx.get(AAP_URL).respond(
         html="""
     <html><body>
       <div class="search-result">
-        <h3 class="title"><a href="/practice-management/bright-futures/quality">Quality Improvement</a></h3>
+        <h3 class="title"><a href="/practice-management/aap-policy/quality">Quality Improvement</a></h3>
         <p>Site navigation.</p>
       </div>
       <div class="search-result">
-        <h3 class="title"><a href="/practice-management/bright-futures/stories">Implementation Stories</a></h3>
+        <h3 class="title"><a href="/practice-management/aap-policy/stories">Implementation Stories</a></h3>
         <p>Site news.</p>
       </div>
     </body></html>
     """
     )
-    respx.get(AAP_URL).respond(status_code=403)
 
     mock_pubmed = AsyncMock()
     mock_pubmed.search_articles.return_value = (
@@ -379,7 +456,6 @@ async def test_search_aap_guidelines_browser_is_last_resort(tmp_path: Path, monk
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
     engine, cache, http_client = await _engine(tmp_path)
-    respx.get(BF_URL).respond(status_code=403)
     respx.get(AAP_URL).respond(status_code=403)
 
     mock_pubmed = AsyncMock()
@@ -428,7 +504,6 @@ async def test_last_resort_browser_scrape_uses_camoufox_and_encodes_query(
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
     engine, cache, http_client = await _engine(tmp_path)
-    respx.get(BF_URL).respond(status_code=403)
     respx.get(AAP_URL).respond(status_code=403)
 
     mock_pubmed = AsyncMock()
@@ -461,7 +536,6 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
     engine, cache, http_client = await _engine(tmp_path)
-    respx.get(BF_URL).respond(status_code=403)
     respx.get(AAP_URL).respond(status_code=403)
 
     mock_pubmed = AsyncMock()
