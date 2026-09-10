@@ -316,4 +316,29 @@ async def test_europe_pmc_references_and_citations_doi_fallback(client):
     assert cits[0].title == "DOI Resolved Citation"
 
 
+@respx.mock
+async def test_crossref_fetch_metadata_404_no_warning(client, caplog):
+    respx.get("https://api.crossref.org/works/10.1093/humupd/dmab061").mock(
+        return_value=httpx.Response(404, text="Resource not found.")
+    )
+    provider = CrossRefProvider(client)
+    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
+        meta = await provider.fetch_metadata("10.1093/humupd/dmab061")
+    assert meta is None
+    assert len(caplog.records) == 0
+
+
+@respx.mock
+async def test_crossref_fetch_references_404_no_warning(client, caplog):
+    respx.get("https://api.crossref.org/works/10.1093/humupd/dmab061").mock(
+        return_value=httpx.Response(404, text="Resource not found.")
+    )
+    provider = CrossRefProvider(client)
+    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
+        refs = await provider.fetch_references("10.1093/humupd/dmab061")
+    assert refs == []
+    assert len(caplog.records) == 0
+
+
+
 

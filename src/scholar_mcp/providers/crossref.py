@@ -109,7 +109,7 @@ class CrossRefProvider:
         clean_doi = doi.strip()
         url = f"{CROSSREF_BASE}/{clean_doi}"
         try:
-            resp = await self.http_client.get(url)
+            resp = await self.http_client.get(url, ok_statuses={404})
             if resp is None or resp.status_code != 200:
                 return None
 
@@ -161,7 +161,7 @@ class CrossRefProvider:
         clean_doi = doi.strip()
         url = f"{CROSSREF_BASE}/{clean_doi}"
         try:
-            resp = await self.http_client.get(url)
+            resp = await self.http_client.get(url, ok_statuses={404})
             if resp is None or resp.status_code != 200:
                 return []
 
