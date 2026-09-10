@@ -261,3 +261,13 @@ async def test_brazil_moh_engine_pcdt_integration(tmp_path, monkeypatch):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_score_item_prefix_match_scores_substring_tier():
+    """Prefix match is a subset of substring match, so it scores 0.90."""
+    from scholar_mcp.medical.govbr_pcdt import _score_item, normalize_text, tokenize_portuguese
+
+    item = {"title": "Acromegalia", "slug": "acromegalia"}
+    query = "acromeg"
+    score = _score_item(tokenize_portuguese(query), normalize_text(query), item)
+    assert score == 0.90

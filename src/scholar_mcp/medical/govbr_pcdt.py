@@ -171,13 +171,10 @@ def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) 
     if query_norm == title_norm or query_norm == slug_norm:
         return 1.0
 
-    # Substring match
+    # Substring match (prefix matches are a subset of substring matches,
+    # so a separate startswith tier would be unreachable).
     if query_norm in title_norm or query_norm in slug_norm:
         return 0.90
-
-    # Title or slug starts with query
-    if title_norm.startswith(query_norm) or slug_norm.startswith(query_norm):
-        return 0.85
 
     title_tokens = set(tokenize_portuguese(item.get("title", "")))
     slug_tokens = set(tokenize_portuguese(item.get("slug", "").replace("-", " ")))
