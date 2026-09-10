@@ -4,27 +4,46 @@ Discovery uses the BVS portal search API. Several of its behaviours are
 counter-intuitive and are load-bearing for this module:
 
 * ``fq`` is silently ignored, so every filter is composed into ``q``.
-* The default boolean operator is OR, so user tokens are joined with AND.
+* The default boolean operator is OR, so user tokens carry an explicit
+  operator inside their own group.
 * ``pais_publicacao`` is subfield-encoded and is neither exact-matchable
   nor wildcard-searchable, so Brazil scoping is ``la:"pt"`` server-side
   plus a client-side assertion on the parsed country.
 * Records are duplicated across indexing collections at roughly 2.1-2.3x,
   so the engine over-fetches and trims after deduplication.
+* The index does not strip Portuguese stopwords, so ``_usable_tokens``
+  does. Measured, ``(da)`` alone matches 25,635 records.
+* ``count=0`` returns HTTP 500 rather than a count-only response, and the
+  host is unreliable enough that the error paths here are live.
 
-Results are served in the order BVS returns them. No re-ranking is applied:
-``ScoringEngine`` does not fold accents or strip Portuguese stopwords, so
-blending it against a Solr ordering tuned for this corpus would degrade it.
-``BrazilGuideline.score`` is the seam for adding that later.
+Search runs in two stages. The strict stage ANDs the user tokens; if it
+yields no Brazilian records and two or more substantive tokens remain,
+the same tokens are retried ORed. Relaxation loosens the operator and
+nothing else -- both stages compose from one stopword-stripped token
+list, so a relaxed hit is never one the strict stage structurally could
+not have matched.
+
+Results are then re-ranked by ``rank_brazil_guidelines``. Accent folding
+and Portuguese stopword stripping are what made that viable: without
+them, blending a generic scorer against a Solr ordering tuned for this
+corpus degraded it. The BVS ordering is not discarded but retained as a
+weighted position prior, because a relaxed ``OR`` pool is far larger than
+the over-fetch window and the server still chooses which slice we see.
 """
 
 import logging
 import re
 import urllib.parse
-from typing import Any
+from typing import Any, Literal
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
 from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.medical.ranking import (
+    PORTUGUESE_STOPWORDS,
+    normalize_portuguese,
+    rank_brazil_guidelines,
+)
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -144,29 +163,63 @@ _SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
 def _usable_tokens(query: str) -> list[str]:
     """User tokens that survive sanitization, in order.
 
-    A token reduced to nothing by ``_sanitize_token``, or reserved as a
-    boolean word, contributes no matching text and is dropped.
+    A token reduced to nothing by ``_sanitize_token``, reserved as a boolean
+    word, or serving only as a Portuguese function word contributes no useful
+    matching text and is dropped.
+
+    Portuguese stopwords are stripped because this index does not strip them
+    itself: measured against the live endpoint, ``(da)`` alone matches 25,635
+    records and ``(a)`` 24,779. Left in, a stopword inflates a relaxed ``OR``
+    pool by roughly 10x (2,538 -> 25,759 for one added token) against an
+    over-fetch of at most ``MAX_PAGE_SIZE`` documents, so the topical matches
+    never get retrieved. In the strict ``AND`` path the effect is narrower --
+    the token is near-universal in Portuguese prose, so it usually changes
+    nothing -- but it still discards short-title records carrying no abstract,
+    which is the class this module most wants to surface.
+
+    Stripping happens here rather than in ``_build_query`` so that both
+    operators and the relaxation gate see one identical token list. Stripping
+    in only one stage would let the relaxed query match records the strict
+    query never could, for a reason unrelated to the operator.
+
+    Membership is tested on the accent-folded form while the original token is
+    emitted: ``PORTUGUESE_STOPWORDS`` is stored folded, so the raw token "à"
+    would otherwise escape the set, and BVS handles Portuguese diacritics
+    natively so there is no reason to strip them from the query.
+
+    The ``len >= 2`` floor used by ``tokenize_portuguese`` is deliberately not
+    applied. A single character that is not a Portuguese word is selective
+    here -- ``hepatite AND b`` retains 71% of bare ``hepatite`` -- while the
+    single-character function words are already covered by the stopword set.
     """
-    return [
-        cleaned
-        for token in (query or "").split()
-        if (cleaned := _sanitize_token(token))
-        and cleaned.lower() not in _SOLR_BOOLEAN_WORDS
-    ]
+    tokens: list[str] = []
+    for token in (query or "").split():
+        cleaned = _sanitize_token(token)
+        if not cleaned:
+            continue
+        folded = normalize_portuguese(cleaned)
+        if folded in _SOLR_BOOLEAN_WORDS or folded in PORTUGUESE_STOPWORDS:
+            continue
+        tokens.append(cleaned)
+    return tokens
 
 
-def _build_query(query: str, collection: str) -> str:
+def _build_query(query: str, collection: str, operator: Literal["AND", "OR"] = "AND") -> str:
     """Compose every filter into ``q``.
 
-    ``fq`` is silently ignored by this API, and the default operator is OR,
-    so user tokens are explicitly ANDed inside their own group.
+    ``fq`` is silently ignored by this API, and the default operator is OR, so
+    the user tokens get an explicit operator inside their own group.
+
+    ``operator`` relaxes only that group. ``BASE_FILTER`` and ``BRISA_FILTER``
+    stay conjunctive regardless: an ``OR`` across them would match
+    conventional and non-Portuguese literature.
     """
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
     tokens = _usable_tokens(query)
     if tokens:
-        clauses.append("(" + " AND ".join(tokens) + ")")
+        clauses.append("(" + f" {operator} ".join(tokens) + ")")
     return " AND ".join(clauses)
 
 
@@ -291,6 +344,37 @@ class BrazilMoHEngine:
         self.settings = settings
         self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
 
+    async def _fetch_records(
+        self,
+        composed: str,
+        count: int,
+    ) -> tuple[list[BrazilGuideline], bool]:
+        """One BVS search request, parsed, deduplicated and Brazil-filtered.
+
+        Returns ``(records, errored)``. Extracted so the strict and relaxed
+        stages cannot drift apart in how they parse or filter.
+        """
+        resp = await self.http_client.get(
+            BVS_SEARCH_URL,
+            headers=BVS_HEADERS,
+            params={
+                "q": composed,
+                "output": "json",
+                "count": count,
+            },
+        )
+        if resp is None:
+            return [], True
+
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning("brazil_moh search returned non-JSON payload")
+            return [], True
+
+        records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
+        return [record for record in records if _is_brazilian(record)], False
+
     async def search_guidelines(
         self,
         query: str,
@@ -310,15 +394,19 @@ class BrazilMoHEngine:
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
         # filters alone would return arbitrary top-of-index documents dressed
-        # as matches for terms that were never searched.
-        if (query or "").strip() and not _usable_tokens(query):
+        # as matches for terms that were never searched. Stopword stripping
+        # widens this: "sobre a" now lands here rather than being searched.
+        tokens = _usable_tokens(query)
+        if (query or "").strip() and not tokens:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        # Keyed on the composed query, not the raw one: "dengue" and
-        # "  dengue  " compose identically and must share one cache row.
-        composed = _build_query(query, norm_collection)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed}"
+        # Keyed on the composed strict query, not the raw one: "dengue" and
+        # "  dengue  " compose identically and must share one cache row. The
+        # relaxed query never enters the key -- it derives from the same user
+        # query, so one user query keeps one row.
+        composed_strict = _build_query(query, norm_collection)
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed_strict}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -327,42 +415,39 @@ class BrazilMoHEngine:
         pcdt_records, pcdt_meta = await self.pcdt_engine.search(query, limit=clamped)
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        resp = await self.http_client.get(
-            BVS_SEARCH_URL,
-            headers=BVS_HEADERS,
-            params={
-                "q": composed,
-                "output": "json",
-                "count": count,
-            },
-        )
-        if resp is None:
+        records, errored = await self._fetch_records(composed_strict, count)
+        if errored:
             if pcdt_records:
                 return pcdt_records, pcdt_meta
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        try:
-            data = resp.json()
-        except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
-            if pcdt_records:
-                return pcdt_records, pcdt_meta
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
-
-        bvs_records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
-        bvs_records = [record for record in bvs_records if _is_brazilian(record)]
+        # The strict conjunction found nothing usable -- either no hits at all,
+        # or only records the Brazil assertion dropped. Retry the same tokens
+        # ORed. A single substantive token is skipped: the two groups would be
+        # byte-identical, so the request would be pure waste.
+        if not records and len(tokens) >= 2:
+            composed_relaxed = _build_query(query, norm_collection, operator="OR")
+            records, errored = await self._fetch_records(composed_relaxed, count)
+            if errored:
+                logger.warning("brazil_moh relaxed search failed for query %r", query)
+                if pcdt_records:
+                    return pcdt_records, pcdt_meta
+                return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Merge PCDT records (first) and BVS records, deduplicating by record_id
         seen_ids: set[str] = set()
         merged_records: list[BrazilGuideline] = []
-        for r in pcdt_records + bvs_records:
+        for r in pcdt_records + records:
             if r.record_id and r.record_id in seen_ids:
                 continue
             if r.record_id:
                 seen_ids.add(r.record_id)
             merged_records.append(r)
 
-        records = merged_records[:clamped]
+        # Rank, then slice. Slicing first would hand the ranker only `clamped`
+        # of the `count` over-fetched candidates and discard the rest in BVS
+        # order, defeating the over-fetch.
+        records = rank_brazil_guidelines(merged_records, query)[:clamped]
 
         await self.cache.set(
             cache_key,
