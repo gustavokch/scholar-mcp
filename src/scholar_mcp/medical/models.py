@@ -243,7 +243,9 @@ class BrazilGuideline:
 
     ``fulltext_id`` is set only when ``document_url`` points at a
     fi-admin document view; it is empty when the record links off-site.
-    ``score`` is reserved for a future ranking pass and is unset in v1.
+    ``score`` is populated by ``rank_brazil_guidelines`` on the search path.
+    It stays ``None`` when the query tokenizes to nothing, and on rows cached
+    before ranking existed.
     """
 
     title: str = ""

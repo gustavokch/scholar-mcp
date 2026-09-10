@@ -1,9 +1,10 @@
 import pytest
 
-from scholar_mcp.medical.models import MedicalArticle
+from scholar_mcp.medical.models import BrazilGuideline, MedicalArticle
 from scholar_mcp.medical.ranking import (
     PORTUGUESE_STOPWORDS,
     normalize_portuguese,
+    rank_brazil_guidelines,
     rank_medical_articles,
     tokenize_portuguese,
 )
@@ -211,3 +212,114 @@ def test_stopword_only_query_returns_new_list():
     ranked = rank_medical_articles(articles, "in the of and")
     assert ranked is not articles
     assert [a.title for a in ranked] == ["Second paper", "First paper"]
+
+
+def _guideline(title: str, abstract: str = "", year: str = "", **kwargs) -> BrazilGuideline:
+    return BrazilGuideline(title=title, abstract=abstract, year=year, **kwargs)
+
+
+def test_rank_brazil_guidelines_folds_accents():
+    # The query is unaccented; the title is not. They must still match.
+    guidelines = [
+        _guideline("Protocolo de rotina", year="2020"),
+        _guideline("Câncer de mama", year="2020"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "cancer", current_year=2026)
+    assert ranked[0].title == "Câncer de mama"
+
+
+def test_rank_brazil_guidelines_title_outranks_abstract_only():
+    guidelines = [
+        _guideline("Documento geral", abstract="Trata da dengue no Brasil.", year="2020"),
+        _guideline("Manejo da dengue", year="2020"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert ranked[0].title == "Manejo da dengue"
+
+
+def test_rank_brazil_guidelines_newer_year_wins():
+    guidelines = [
+        _guideline("Manejo da dengue", year="2005"),
+        _guideline("Manejo da dengue", year="2024"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert ranked[0].year == "2024"
+
+
+def test_rank_brazil_guidelines_uses_title_en():
+    # Second position, so the source-position prior works against it; it must
+    # still win on the strength of the English title alone.
+    guidelines = [
+        _guideline("Tratamento da dengue ", year="2020"),
+        _guideline("Tratamento da dengue", title_en="Dengue treatment", year="2020"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue treatment", current_year=2026)
+    assert ranked[0].title_en == "Dengue treatment"
+
+
+def test_rank_brazil_guidelines_uses_mesh_subjects():
+    # An abstract-less record rescued by its DeCS descriptors, again from
+    # second position so the position prior does not carry it.
+    guidelines = [
+        _guideline("Caderno de Atenção", year="2020"),
+        _guideline(
+            "Caderno de Atenção",
+            year="2020",
+            mesh_subjects=["Atenção Primária à Saúde"],
+        ),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "atencao primaria", current_year=2026)
+    assert ranked[0].mesh_subjects == ["Atenção Primária à Saúde"]
+
+
+def test_rank_brazil_guidelines_stable_on_ties():
+    # Identical records must keep BVS order.
+    guidelines = [
+        _guideline("Manejo da dengue", record_id="first", year="2020"),
+        _guideline("Manejo da dengue", record_id="second", year="2020"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert [g.record_id for g in ranked] == ["first", "second"]
+
+
+def test_rank_brazil_guidelines_populates_score():
+    guidelines = [_guideline("Manejo da dengue", year="2020")]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert ranked[0].score is not None
+    assert 0.0 <= ranked[0].score <= 1.0
+
+
+def test_rank_brazil_guidelines_stopword_only_query_leaves_score_unset():
+    # "sobre a" tokenizes to nothing, so there is no basis for a score.
+    guidelines = [_guideline("B documento"), _guideline("A documento")]
+    ranked = rank_brazil_guidelines(guidelines, "sobre a")
+    assert [g.title for g in ranked] == ["B documento", "A documento"]
+    assert all(g.score is None for g in ranked)
+
+
+def test_rank_brazil_guidelines_empty_returns_empty():
+    assert rank_brazil_guidelines([], "dengue") == []
+
+
+def test_rank_brazil_guidelines_missing_year_uses_default_age():
+    # An unparseable or absent year must not raise; it falls back to the
+    # 10-year default age, so it scores below an otherwise identical record
+    # that carries a recent year.
+    guidelines = [
+        _guideline("Manejo da dengue", year=""),
+        _guideline("Manejo da dengue", year="2026"),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert ranked[0].year == "2026"
+    assert all(g.score is not None for g in ranked)
+
+    garbage = [_guideline("Manejo da dengue", year="n/a")]
+    assert rank_brazil_guidelines(garbage, "dengue", current_year=2026)[0].score is not None
+
+
+def test_rank_brazil_guidelines_none_text_does_not_raise():
+    g = BrazilGuideline(title="Manejo da dengue", year="2020")
+    g.abstract = None  # type: ignore[assignment]
+    g.title_en = None  # type: ignore[assignment]
+    ranked = rank_brazil_guidelines([g], "dengue", current_year=2026)
+    assert ranked[0].score is not None
