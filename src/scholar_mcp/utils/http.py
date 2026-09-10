@@ -105,6 +105,20 @@ def _sanitize_error_body(content: bytes, content_type: str = "") -> str:
     cleaned = _WHITESPACE_RE.sub(" ", sample).strip()
     return cleaned[:ERROR_BODY_LOG_CHARS]
 
+def _log_expected_status(log_url: str, resp: httpx.Response) -> None:
+    """Record an error status the caller declared expected.
+
+    A registry answering 404 for a DOI it does not hold is routine, but so is a
+    404 caused by broken URL quoting or a wrong base path. Dropping the record
+    entirely makes the two indistinguishable, so the miss is kept at DEBUG.
+    """
+    logger.debug(
+        "HTTP GET %s returned expected status %d: %s",
+        log_url,
+        resp.status_code,
+        _sanitize_error_body(resp.content, resp.headers.get("content-type", "")),
+    )
+
 # Query parameters whose values must never reach the log stream. Kept narrow:
 # only credential-bearing keys. `email` is here because NCBI's contact
 # address identifies the operator, not because it is a key.
@@ -247,13 +261,24 @@ class AsyncHttpClient:
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         ok_statuses: frozenset[int] | set[int] | None = None,
+        quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
-        Non-retryable failures report as ``None``. Statuses listed in
-        ``ok_statuses`` are returned as-is instead, for callers that must
-        distinguish them (e.g. api.fda.gov uses 404 for "no matches found",
+        Non-retryable failures report as ``None``.
+
+        ``ok_statuses`` lists statuses the caller must inspect itself, so they are
+        returned as-is instead (e.g. api.fda.gov uses 404 for "no matches found",
         a valid answer rather than a fetch failure).
+
+        ``quiet_statuses`` lists statuses that are an expected miss rather than a
+        defect, so they report as ``None`` like any other failure but without the
+        warning (e.g. a scholarly registry answering 404 for a DOI it does not
+        hold). Callers needing the response object want ``ok_statuses`` instead.
+
+        A status in either set is still logged at DEBUG when it is ``>= 400``, so
+        a 404 caused by a bad URL or a misconfigured parameter stays recoverable
+        at ``LOG_LEVEL=DEBUG`` rather than vanishing.
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
@@ -290,8 +315,13 @@ class AsyncHttpClient:
                     await asyncio.sleep(wait_time)
                     continue
                 if ok_statuses and resp.status_code in ok_statuses:
+                    if resp.status_code >= 400:
+                        _log_expected_status(log_url, resp)
                     return resp
                 if resp.status_code >= 400:
+                    if quiet_statuses and resp.status_code in quiet_statuses:
+                        _log_expected_status(log_url, resp)
+                        return None
                     logger.warning(
                         "HTTP GET %s failed with status %d: %s",
                         log_url,
