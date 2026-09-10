@@ -1,7 +1,7 @@
 # Brazilian Ministry of Health Retrieval Improvements — Design
 
 Date: 2026-09-09
-Status: In review (revision 3)
+Status: In review (revision 4)
 
 ## Purpose
 
@@ -133,19 +133,55 @@ Two public wrappers:
 
 #### Stopword stripping in `_usable_tokens`
 
-`_usable_tokens` (`brazil_moh.py:141`) currently drops only tokens that sanitize away to nothing and tokens reserved as Solr boolean words. Portuguese stopwords pass straight through into the composed query, and they damage **both** stages:
+`_usable_tokens` (`brazil_moh.py:141`) currently drops only tokens that sanitize away to nothing and tokens reserved as Solr boolean words. Portuguese stopwords pass straight through into the composed query.
 
-- Strict. `manejo da dengue` composes to `(manejo AND da AND dengue)`. A record titled "Manejo clínico **da** dengue" matches; a record titled "Manejo **de** dengue" does not. The `AND da` clause silently discards correct records. This is a pre-existing recall bug, independent of relaxation.
-- Relaxed. The same `da` as an `OR` clause matches a large share of the Portuguese corpus, flooding the over-fetch pool with records that carry no substantive term and pushing topical matches past `count`.
+The iAHx Solr analyzer **does not** strip them. Measured against the live endpoint (see Evidence below): the group `(da)` alone matches 25,635 records and `(a)` alone matches 24,779 — these are live, indexed clauses covering essentially the whole Portuguese corpus, not no-ops. Client-side stripping is therefore the only place this can be fixed.
+
+**The relaxed path is the load-bearing case.** Adding one stopword to an OR group takes the candidate pool from 2,538 to 25,759 records — a **10.2x** inflation. The over-fetch caps at `clamped * OVERFETCH_FACTOR` ≤ 150 documents, so a single stopword means the 150 documents we retrieve are drawn from a 25.7k pool whose Solr ordering, for a one-term hit on a near-universal token, is effectively arbitrary. Coverage-first re-ranking (§3) cannot rescue documents that were never fetched. Without stripping, relaxation would reliably return noise.
+
+**The strict path is a narrow secondary effect.** `(manejo AND dengue)` and `(manejo AND da AND dengue)` both match 39 records: `da` is near-universal in Portuguese prose, so ANDing it usually changes nothing. But the clause is live, so a record whose indexed text genuinely lacks the token *is* dropped — and that means short-title records with no abstract, precisely the PCDT and Cadernos de Atenção Básica class that the `mesh_subjects` change in §3 exists to rescue. The bug is narrow and correlated with the records this design most wants to surface.
 
 Change: `_usable_tokens` additionally drops a token whose accent-folded form is in `PORTUGUESE_STOPWORDS`.
 
 Two details are load-bearing:
 
-- **Fold to test, emit unfolded.** `_usable_tokens` does not accent-fold, and `PORTUGUESE_STOPWORDS` is stored folded, so the raw token `à` is absent from the set while folding to `a`, which is present. Membership is therefore tested against `normalize_portuguese(cleaned)`, while the **original** `cleaned` token is what enters the query — the design keeps diacritics outbound because BVS handles Portuguese natively. Only stopword membership is folded; the `len(token) >= 2` floor from `tokenize_portuguese` is *not* applied here, since dropping a short token from the outbound query is a separate decision this design does not take.
+- **Fold to test, emit unfolded.** `_usable_tokens` does not accent-fold, and `PORTUGUESE_STOPWORDS` is stored folded, so the raw token `à` is absent from the set while folding to `a`, which is present. Membership is therefore tested against `normalize_portuguese(cleaned)`, while the **original** `cleaned` token is what enters the query — the design keeps diacritics outbound because BVS handles Portuguese natively.
 - **Applies to both operators, never one.** Stripping only in the relaxed path would make the two stages search different term sets, so the relaxed stage could return records the strict stage could never have matched for a reason unrelated to the operator. That breaks the invariant the two-stage design rests on: relaxation loosens the *operator* and nothing else. Because the strip lives in `_usable_tokens`, both `_build_query` calls and the relaxation gate see the same tokens by construction.
 
-Consequences, both accepted:
+The `len(token) >= 2` floor from `tokenize_portuguese` is deliberately **not** applied here. Membership in `PORTUGUESE_STOPWORDS` already removes the single-character function words `a`, `e`, and `o`, while a single-character token that is not a Portuguese word — `b`, `c`, `d` — survives into the query. That asymmetry is correct, and the evidence closes a question that looks open on first reading.
+
+#### Evidence: single-character tokens are not type designators
+
+A reviewer will ask whether stripping `a` breaks queries for postfixed medical type designators — "hepatite A", "vitamina A", "influenza A" — given that `b` and `c` are not Portuguese words and survive. Measured, it does not. `a` does not select for the designator:
+
+| Token group | `numFound` | Retained vs. bare term |
+|---|---|---|
+| `hepatite` | 242 | — |
+| `hepatite AND a` | 219 | 90% |
+| `hepatite AND b` | 172 | 71% |
+| `vitamina` | 162 | — |
+| `vitamina AND a` | 154 | 95% |
+
+`b` is genuinely selective; `a` is not. The 219 hits are not Hepatitis A documents — they are hepatitis documents that happen to contain the letter `a` somewhere in their indexed text. So `hepatite a` composing to `(hepatite)` returns 242 records, which is a *better* answer than 219 arbitrarily thinned ones. Nothing is lost by stripping it.
+
+A user wanting the A serotype specifically cannot express that through this token path, but could not before this change either, so there is no regression. **Do not add a single-character exception, a positional heuristic, or a designator whitelist.** They would cost precision, not buy it.
+
+#### Evidence: probe measurements
+
+All figures above come from read-only `GET` probes against `https://pesquisa.bvsalud.org/portal/` on 2026-09-10, each with `output=json`, `count=1`, and the token group composed inside `type:"non-conventional" AND la:"pt"`.
+
+| Token group | `numFound` |
+|---|---|
+| `manejo AND dengue` | 39 |
+| `manejo AND da AND dengue` | 39 |
+| `da` | 25,635 |
+| `a` | 24,779 |
+| `manejo OR dengue` | 2,538 |
+| `manejo OR da OR dengue` | 25,759 |
+| `hepatite` / `hepatite AND a` / `hepatite AND b` | 242 / 219 / 172 |
+| `vitamina` / `vitamina AND a` | 162 / 154 |
+
+Consequences of the change, all accepted:
 
 - The relaxation gate `len(_usable_tokens(query)) >= 2` now counts *substantive* tokens. `manejo da` yields one, so it must not relax. This follows automatically and is asserted in tests.
 - `_usable_tokens` also backs the existing "no searchable tokens" guard (`brazil_moh.py:297`), so a query composed entirely of stopwords ("sobre a") now returns empty with `error=False` instead of searching. Correct: those terms were never going to select on topic.
@@ -179,7 +215,14 @@ Import direction is safe. `scholar_mcp/medical/ranking.py` imports only `medical
 
 #### Why a bare `OR` and not minimum-should-match
 
-An N-token `OR` matches a record carrying only one token, which without ranking would be a clear precision loss. It is acceptable **only because step 6 now sorts by lexical coverage first**: a record matching one of four tokens sinks below one matching all four. Do not add a `mm` parameter (the endpoint's support is unverified, and it silently ignores `fq`) and do not implement progressive token-dropping — coverage-first ranking already recovers the precision, at a fraction of the complexity.
+An N-token `OR` matches a record carrying only one token. Two things keep that acceptable, and the first matters more than the second:
+
+1. **Stopwords are stripped first**, so every `OR` clause is a substantive clinical term. This is what bounds the pool: `(manejo OR dengue)` matches 2,538 records against `(manejo OR da OR dengue)`'s 25,759. Relaxation is only viable because of the §4 strip.
+2. **Solr's own ordering is retained as a weighted prior.** With 2,538 matches and at most 150 fetched, the server still decides which 150 we see. That is acceptable because Solr's relevance scoring for an `OR` query already favours records matching more of the terms, and §3 carries that ordering forward as `position_weight = 0.35` rather than discarding it. Client-side coverage then re-sorts within the fetched window.
+
+Note the limit of point 2 honestly: coverage-first ranking re-orders what was fetched, it cannot recover a well-matching record the server left outside the window. The strip is the mechanism that keeps the window meaningful; ranking is a refinement on top of it, not a substitute.
+
+Do not add a `mm` parameter (the endpoint's support is unverified, and it silently ignores `fq`) and do not implement progressive token-dropping. With the strip in place, the pool is bounded well enough that neither earns its complexity.
 
 Note the BVS default operator is OR, so the explicit `OR` group is equivalent to omitting the operator. It is written explicitly for symmetry with the strict path and to keep the composed query self-documenting.
 
@@ -196,7 +239,9 @@ Both of these currently document the absence of ranking as a considered decision
 - **Query with no usable tokens:** unchanged code path, wider trigger — a query of only stopwords ("sobre a") now reaches it and returns early with `error=False`, before any request.
 - **Strict request fails** (`resp is None`, or non-JSON): unchanged — early return, `error=True`, nothing cached.
 - **Relaxed request fails:** log a warning and return `([], CacheMetadata(cached=False, cache_age=0, error=True))`. Do not cache. Do not fall back to the strict result, which is empty by construction.
-- **Zero-hit latency:** a zero-hit multi-token query now costs two sequential BVS round trips. Accepted: the alternative is a speculative parallel `OR` request on every search, which would double load on a host that already 403s the default User-Agent.
+- **Zero-hit latency:** a zero-hit multi-token query now costs two sequential BVS round trips. Accepted: the alternative is a speculative parallel `OR` request on every search, which would double load on a host that already 403s the default User-Agent and, per the probe, is unreliable under even light sequential load.
+- **Host reliability, measured:** across roughly 20 probe requests on 2026-09-10, about a third returned HTTP 502 or read-timed-out, some needing up to five retries with backoff to succeed. The relaxed-request `error=True` path will therefore fire in normal operation, not only in theory — treat it as a live path in testing, not an unreachable branch. This also rules out speculative parallel requests: doubling request volume against this host doubles exposure to its flakiness.
+- **`count=0` returns HTTP 500:** the endpoint rejects a zero count rather than returning a count-only response. Current code cannot reach this — `clamped = min(max(1, limit), MAX_RESULTS)` is at least 1, so `count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)` is at least 3 — but the relaxed request must reuse that same computed `count` and must never be "optimized" into a count-only probe. Recorded because it cost a full probe run to discover.
 - **Empty result caching:** unchanged. A search where both stages return nothing caches `[]` for the TTL, as today.
 - **Missing or malformed year:** `ScoringEngine.parse_year` returns `None` and `calculate_recency_feature` applies `default_age=10.0`. `BrazilGuideline.year` is already normalized to a 4-digit string or `""` by `_parse_issued`.
 - **Diacritics in the outbound query:** `_sanitize_token` keeps them and BVS handles Portuguese natively, so the request is unchanged. Accent folding is client-side only, in re-ranking.
