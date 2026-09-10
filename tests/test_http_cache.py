@@ -144,7 +144,7 @@ async def test_limiters_concurrent_access():
     limiters = await asyncio.gather(
         *(asyncio.to_thread(client._limiter_for, "api.crossref.org") for _ in range(20))
     )
-    assert len(set(id(lim) for lim in limiters)) == 1
+    assert len({id(lim) for lim in limiters}) == 1
     await client.aclose()
 
 
@@ -370,8 +370,9 @@ def test_parse_retry_after_delta_seconds():
 
 
 def test_parse_retry_after_http_date():
+    from datetime import datetime, timedelta, timezone
+
     from scholar_mcp.utils.http import _parse_retry_after
-    from datetime import datetime, timezone, timedelta
 
     future = datetime.now(timezone.utc) + timedelta(seconds=60)
     date_str = future.strftime("%a, %d %b %Y %H:%M:%S GMT")

@@ -1,13 +1,13 @@
 import asyncio
-from datetime import datetime, timezone
 import email.utils
 import logging
 import math
 import random
 import re
 import threading
-from typing import Any
 import urllib.parse
+from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 
@@ -358,9 +358,8 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
     ) -> bytes | None:
         resp = await self.get(url, headers=headers, params=params)
-        if resp is not None and resp.status_code == 200:
-            if not self._is_unexpected_html(resp):
-                return resp.content
+        if resp is not None and resp.status_code == 200 and not self._is_unexpected_html(resp):
+            return resp.content
         return None
 
     async def aclose(self) -> None:
