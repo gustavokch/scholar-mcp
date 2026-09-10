@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 import datetime
 from functools import lru_cache
@@ -202,12 +203,26 @@ class ScoringEngine:
         ]
 
     @staticmethod
-    def text_coverage(query_terms: list[str], title: str | None, abstract: str | None) -> float:
+    def text_coverage(
+        query_terms: list[str],
+        title: str | None,
+        abstract: str | None,
+        tokenizer: Callable[[str | None], list[str]] | None = None,
+    ) -> float:
+        """Fraction of query terms present, title weighted 2x abstract.
+
+        ``tokenizer`` defaults to ``ScoringEngine.tokenize``. Pass an
+        alternative to score a corpus this module's English tokenizer would
+        mis-handle -- the Brazilian path injects a Portuguese tokenizer that
+        folds accents and strips Portuguese stopwords. The same tokenizer must
+        have produced ``query_terms``, or the two sides will not compare.
+        """
         if not query_terms:
             return 0.0
+        tokenize = tokenizer if tokenizer is not None else ScoringEngine.tokenize
         term_count = len(query_terms)
-        title_terms = set(ScoringEngine.tokenize(title))
-        abstract_terms = set(ScoringEngine.tokenize(abstract))
+        title_terms = set(tokenize(title))
+        abstract_terms = set(tokenize(abstract))
         title_coverage = sum(1 for t in query_terms if t in title_terms) / term_count
         abstract_coverage = sum(1 for t in query_terms if t in abstract_terms) / term_count
         abstract_ratio = _ABSTRACT_WEIGHT / _TITLE_WEIGHT
