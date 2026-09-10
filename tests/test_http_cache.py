@@ -259,6 +259,69 @@ async def test_retry_is_logged_below_warning(caplog):
     await client.aclose()
 
 
+async def test_bvsalud_bucket_rate_and_grouping():
+    """BVS sits behind a bot shield that reacts to request bursts, so its
+    bucket must default to a conservative 1 rps instead of the 5 rps
+    fallback, and every bvsalud.org host must share that one bucket."""
+    from scholar_mcp.utils.http import DEFAULT_HOST_RATES
+
+    assert DEFAULT_HOST_RATES["pesquisa.bvsalud.org"] == 1.0
+    client = AsyncHttpClient(settings=Settings())
+    search = client._limiter_for("pesquisa.bvsalud.org")
+    assert search.rate_per_sec == 1.0
+    # Host grouping: full-text hosts share the search bucket.
+    assert client._limiter_for("fi-admin.bvsalud.org") is search
+    assert client._limiter_for("docs.bvsalud.org") is search
+    await client.aclose()
+
+
+@respx.mock
+async def test_bvs_403_shield_retries_and_throttles():
+    """BVS's bot shield answers bursts with 403; for that host a 403 must
+    behave like a 429 — throttle the bucket and retry — not return None."""
+    route = respx.get("https://pesquisa.bvsalud.org/portal/").mock(
+        side_effect=[
+            httpx.Response(403, text="<html>Just a moment...</html>"),
+            httpx.Response(200, text="ok"),
+        ]
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0
+    )
+    baseline = time.monotonic()
+    resp = await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue")
+    assert resp is not None and resp.text == "ok"
+    assert route.call_count == 2
+    limiter = client._limiter_for("pesquisa.bvsalud.org")
+    assert limiter.throttled_until >= baseline
+    await client.aclose()
+
+
+@respx.mock
+async def test_403_stays_fatal_for_other_hosts():
+    """Only shielded hosts retry a 403; a real 403 elsewhere must fail fast
+    exactly as before."""
+    route = respx.get("https://example.org/gone").mock(return_value=httpx.Response(403))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    assert await client.get("https://example.org/gone") is None
+    assert route.call_count == 1
+    await client.aclose()
+
+
+@respx.mock
+async def test_bvs_403_shield_exhausts_to_none(caplog):
+    """A 403 that persists through every retry still returns None, with the
+    terminal warning the other 4xx paths emit."""
+    respx.get("https://pesquisa.bvsalud.org/portal/").mock(return_value=httpx.Response(403))
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    with caplog.at_level(logging.WARNING):
+        assert await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue") is None
+    assert any("failed with status 403" in rec.message for rec in caplog.records)
+    await client.aclose()
+
+
 def test_pypdf_sees_fonttools():
     """pypdf gates its fontTools code paths behind this flag at import time.
 
