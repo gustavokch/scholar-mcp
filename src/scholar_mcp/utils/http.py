@@ -1,13 +1,13 @@
 import asyncio
-from datetime import datetime, timezone
 import email.utils
 import logging
 import math
 import random
 import re
 import threading
-from typing import Any
 import urllib.parse
+from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 
@@ -26,8 +26,15 @@ DEFAULT_HOST_RATES: dict[str, float] = {
     "www.ebi.ac.uk": 10.0,
     "clinicaltrials.gov": 5.0,
     "rxnav.nlm.nih.gov": 5.0,
+    "pesquisa.bvsalud.org": 1.0,
 }
 DEFAULT_FALLBACK_RATE = 5.0
+
+# Hosts whose 403 is a bot shield reacting to bursts, not a real "forbidden".
+# pesquisa.bvsalud.org rejected ~30 requests during an eval run even under the
+# configured rate; for these hosts a 403 must back the whole host bucket off
+# and retry, like a 429. Elsewhere a 403 stays fatal.
+BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -47,6 +54,8 @@ def _host_key(host: str | None) -> str:
         return "ncbi.nlm.nih.gov"
     if hostname == "arxiv.org" or hostname.endswith(".arxiv.org"):
         return "arxiv.org"
+    if hostname == "pesquisa.bvsalud.org" or hostname.endswith(".bvsalud.org"):
+        return "pesquisa.bvsalud.org"
     return hostname
 
 
@@ -151,9 +160,10 @@ class AsyncHttpClient:
         self.settings = settings or Settings.load()
         self.max_retries = max_retries
         self.backoff_base = backoff_base
-        # Floor on the pause after a 429. NCBI counts requests in a 1.0s sliding
-        # window, so anything shorter can retry inside the window that rejected
-        # us. Tests set it to 0.0 to keep the suite fast.
+        # Floor on the pause after a 429, or after a bot-shield 403 (BVS).
+        # NCBI counts requests in a 1.0s sliding window, so anything shorter
+        # can retry inside the window that rejected us. Tests set it to 0.0
+        # to keep the suite fast.
         self.min_429_wait = min_429_wait
         self.client = httpx.AsyncClient(
             timeout=float(self.settings.request_timeout),
@@ -258,17 +268,25 @@ class AsyncHttpClient:
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
+        host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
 
         for attempt in range(self.max_retries):
             await limiter.acquire()
             try:
                 resp = await self.client.get(target_url, headers=headers)
-                if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries - 1:
+                # A bot-shield 403 must behave like a 429: throttle the whole
+                # host bucket and retry. A 403 from any other host stays fatal.
+                shielded_403 = (
+                    resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
+                )
+                if (
+                    resp.status_code in RETRYABLE_STATUS_CODES or shielded_403
+                ) and attempt < self.max_retries - 1:
                     retry_after = _parse_retry_after(resp)
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
-                    if resp.status_code == 429:
+                    if resp.status_code == 429 or shielded_403:
                         wait_time = max(
                             retry_after or 0.0, calc_wait, self.min_429_wait
                         )
@@ -340,9 +358,8 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
     ) -> bytes | None:
         resp = await self.get(url, headers=headers, params=params)
-        if resp is not None and resp.status_code == 200:
-            if not self._is_unexpected_html(resp):
-                return resp.content
+        if resp is not None and resp.status_code == 200 and not self._is_unexpected_html(resp):
+            return resp.content
         return None
 
     async def aclose(self) -> None:
