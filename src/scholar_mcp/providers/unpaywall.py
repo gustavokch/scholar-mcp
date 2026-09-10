@@ -29,7 +29,11 @@ class UnpaywallProvider(BaseProvider):
         url = f"{UNPAYWALL_BASE}/{clean_doi}"
 
         try:
-            resp = await self.http_client.get(url, params={"email": self.email})
+            resp = await self.http_client.get(
+                url,
+                params={"email": self.email},
+                ok_statuses={404},
+            )
             if resp is None or resp.status_code != 200:
                 return None
 
