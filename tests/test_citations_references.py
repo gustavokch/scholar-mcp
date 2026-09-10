@@ -338,7 +338,3 @@ async def test_crossref_fetch_references_404_no_warning(client, caplog):
         refs = await provider.fetch_references("10.1093/humupd/dmab061")
     assert refs == []
     assert len(caplog.records) == 0
-
-
-
-
