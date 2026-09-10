@@ -146,6 +146,38 @@ def test_build_query_all_tokens_reserved_yields_filters_only():
     assert _build_query("AND OR NOT", "all") == 'type:"non-conventional" AND la:"pt"'
 
 
+def test_build_query_title_scoped_prefixes_tokens_with_ti():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    built = _build_query("tratamento tuberculose", "all", title_scoped=True)
+    assert built == 'type:"non-conventional" AND la:"pt" AND (ti:tratamento AND ti:tuberculose)'
+
+
+def test_build_query_caller_supplied_ti_prefix_is_neutralized():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    # Caller cannot control field scoping or poison tokens into tidengue
+    scoped = _build_query("ti:dengue", "all", title_scoped=True)
+    assert scoped == 'type:"non-conventional" AND la:"pt" AND (ti:dengue)'
+
+    all_fields = _build_query("ti:dengue", "all", title_scoped=False)
+    assert all_fields == 'type:"non-conventional" AND la:"pt" AND (dengue)'
+
+    # Multi-token test
+    scoped_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=True)
+    assert scoped_multi == 'type:"non-conventional" AND la:"pt" AND (ti:dengue AND ti:zika)'
+
+    all_fields_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=False)
+    assert all_fields_multi == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+
+
+def test_build_query_title_scoped_blank_or_reserved_yields_filters_only():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    assert _build_query("   ", "all", title_scoped=True) == 'type:"non-conventional" AND la:"pt"'
+    assert _build_query("AND OR NOT", "all", title_scoped=True) == 'type:"non-conventional" AND la:"pt"'
+
+
 def test_extract_docs_reads_nested_envelope():
     from scholar_mcp.medical.brazil_moh import _extract_docs
 
@@ -491,6 +523,69 @@ async def test_search_caches_success_and_serves_from_cache(tmp_path: Path):
         assert first_meta.cached is False
         assert second_meta.cached is True
         assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_scoped_hit_makes_only_one_bvs_call(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+        assert len(records) == 1
+        assert route.call_count == 1
+        requested_q = route.calls[0].request.url.params["q"]
+        assert "ti:dengue" in requested_q
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_scoped_miss_falls_back_to_all_field_query(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # First call (title-scoped) returns empty; second call (all-field) returns a hit
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+        assert [r.record_id for r in records] == ["fallback-1"]
+        assert route.call_count == 2
+        assert "ti:dengue" in route.calls[0].request.url.params["q"]
+        assert "(dengue)" in route.calls[1].request.url.params["q"]
+        assert "ti:dengue" not in route.calls[1].request.url.params["q"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_fallback_cached_under_title_scoped_key(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),
+            ]
+        )
+        first, first_meta = await engine.search_guidelines("dengue", limit=5)
+        assert [r.record_id for r in first] == ["fallback-1"]
+        assert route.call_count == 2
+
+        # Second search must be served from cache without re-issuing calls
+        second, second_meta = await engine.search_guidelines("dengue", limit=5)
+        assert route.call_count == 2
+        assert second_meta.cached is True
+        assert [r.record_id for r in second] == ["fallback-1"]
     finally:
         await cache.close()
         await http_client.aclose()

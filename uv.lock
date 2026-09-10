@@ -2551,6 +2551,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "beautifulsoup4" },
+    { name = "camoufox" },
     { name = "fastmcp" },
     { name = "fonttools" },
     { name = "httpx" },
@@ -2572,6 +2573,7 @@ medical = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
+    { name = "camoufox", specifier = ">=0.5.0" },
     { name = "camoufox", marker = "extra == 'medical'", specifier = ">=0.5.0" },
     { name = "fastmcp", specifier = ">=3.0.0" },
     { name = "fonttools", specifier = ">=4.40.0" },

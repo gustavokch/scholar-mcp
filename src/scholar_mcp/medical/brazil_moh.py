@@ -122,6 +122,14 @@ def _derive_fulltext_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+_FIELD_PREFIX_RE = re.compile(r"^(?:[a-zA-Z_]+:)+")
+_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
+
+# Boolean words are composed by this module itself; a user token of "AND"
+# would otherwise surface as ``AND AND AND`` in the composed query.
+_SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
+
+
 def _sanitize_token(token: str) -> str:
     """Strip Solr query syntax from one user token.
 
@@ -130,15 +138,13 @@ def _sanitize_token(token: str) -> str:
     ``+`` ``!``) or a leading ``+``/``-`` operator would corrupt the query
     rather than match text. Characters are removed, not escaped, because the
     endpoint's escaping rules differ from Solr's own.
+
+    Caller-supplied field prefixes (e.g. ``ti:dengue``) are stripped before
+    special character removal so colon removal does not concatenate them into
+    ``tidengue``. Field scoping is the engine's decision, not the caller's.
     """
-    return _SOLR_SPECIALS_RE.sub("", token).lstrip("+-")
-
-
-_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
-
-# Boolean words are composed by this module itself; a user token of "AND"
-# would otherwise surface as ``AND AND AND`` in the composed query.
-_SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
+    stripped = _FIELD_PREFIX_RE.sub("", token)
+    return _SOLR_SPECIALS_RE.sub("", stripped).lstrip("+-")
 
 
 def _usable_tokens(query: str) -> list[str]:
