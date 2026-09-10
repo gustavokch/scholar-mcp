@@ -1,7 +1,12 @@
 import pytest
 
 from scholar_mcp.medical.models import MedicalArticle
-from scholar_mcp.medical.ranking import rank_medical_articles
+from scholar_mcp.medical.ranking import (
+    PORTUGUESE_STOPWORDS,
+    normalize_portuguese,
+    rank_medical_articles,
+    tokenize_portuguese,
+)
 
 
 def _article(title: str, abstract: str = "", year: str = "", **kwargs) -> MedicalArticle:
@@ -97,6 +102,55 @@ def test_abstract_match_outranks_irrelevant_recent_article():
     ]
     ranked = rank_medical_articles(articles, query, current_year=2026)
     assert ranked[0].title == "Cohort study of outcomes"
+
+
+def test_normalize_portuguese_folds_accents_and_lowercases():
+    assert normalize_portuguese("Atenção Básica à Saúde") == "atencao basica a saude"
+    assert normalize_portuguese("CÂNCER") == "cancer"
+    # Every accented vowel and the cedilla, plus the grave the spec calls out.
+    assert normalize_portuguese("á é í ó ú â ê ô ã õ à ç") == "a e i o u a e o a o a c"
+
+
+def test_normalize_portuguese_handles_falsy_input():
+    assert normalize_portuguese(None) == ""
+    assert normalize_portuguese("") == ""
+
+
+def test_tokenize_portuguese_strips_stopwords():
+    assert tokenize_portuguese("manejo da dengue") == ["manejo", "dengue"]
+    assert tokenize_portuguese("tratamento de tuberculose para adultos") == [
+        "tratamento",
+        "tuberculose",
+        "adultos",
+    ]
+
+
+def test_tokenize_portuguese_strips_accented_stopword():
+    # "à" folds to "a", which is a stopword; "atenção" folds to a substantive token.
+    assert tokenize_portuguese("atenção à saúde") == ["atencao", "saude"]
+
+
+def test_tokenize_portuguese_drops_short_tokens():
+    # The >= 2 floor applies here, unlike in brazil_moh._usable_tokens.
+    assert tokenize_portuguese("b dengue c") == ["dengue"]
+
+
+def test_tokenize_portuguese_matches_folded_and_unfolded_forms():
+    # A query term and a document term must tokenize to the same string.
+    assert tokenize_portuguese("cancer") == tokenize_portuguese("câncer")
+
+
+def test_tokenize_portuguese_handles_falsy_and_punctuation():
+    assert tokenize_portuguese(None) == []
+    assert tokenize_portuguese("") == []
+    assert tokenize_portuguese("---") == []
+
+
+def test_portuguese_stopwords_are_stored_accent_folded():
+    # The set is consulted after folding, so an accented member would be dead.
+    for word in PORTUGUESE_STOPWORDS:
+        assert normalize_portuguese(word) == word
+
 
 
 def test_full_title_match_reaches_max_relevance():

@@ -1,6 +1,10 @@
 import datetime
+import re
+import unicodedata
+from collections.abc import Callable
+from typing import Protocol, TypeVar
 
-from scholar_mcp.medical.models import MedicalArticle
+from scholar_mcp.medical.models import BrazilGuideline, MedicalArticle
 from scholar_mcp.ranking import ScoringEngine
 
 # Recency weight and half-life mirror the scholar path defaults (0.3 / 7 years).
@@ -14,6 +18,52 @@ DEFAULT_AGE_YEARS = 10.0
 # Match). Keeps the trained upstream ranking influential without letting it
 # override a clear lexical mismatch.
 SOURCE_POSITION_WEIGHT = 0.35
+
+# Mirrors the private pattern in scholar_mcp.ranking. Declared locally rather
+# than imported: that copy is private to its module, and normalization has
+# already reduced the text to ASCII, so the two are intentionally identical.
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+# Stored already accent-folded, because tokenization folds before it consults
+# this set -- an accented member would never be matched. Two consumers share
+# it: client-side re-ranking here, and outbound query composition in
+# medical/brazil_moh.py. One source of truth keeps a term from being scored as
+# substantive while being dropped from the query, or the reverse.
+PORTUGUESE_STOPWORDS = frozenset({
+    "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos",
+    "e", "em", "entre", "na", "nao", "nas", "no", "nos", "o", "os", "ou",
+    "para", "pela", "pelo", "por", "que", "se", "sem", "sob", "sobre",
+    "um", "uma", "umas", "uns",
+})
+
+
+def normalize_portuguese(text: str | None) -> str:
+    """Fold Portuguese diacritics to ASCII and lowercase.
+
+    NFKD splits an accented character into its base plus a combining mark;
+    encoding to ASCII with ``ignore`` then drops the marks. This also discards
+    any non-Latin script, which is acceptable: a record whose text is entirely
+    non-Latin cannot match a Portuguese query.
+    """
+    if not text:
+        return ""
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return folded.lower()
+
+
+def tokenize_portuguese(text: str | None) -> list[str]:
+    """Accent-folded, stopword-stripped tokens.
+
+    Signature and filtering rules deliberately mirror ``ScoringEngine.tokenize``
+    so the two are interchangeable wherever a tokenizer is injected.
+    """
+    if not text:
+        return []
+    return [
+        t
+        for t in _WORD_SPLIT_RE.split(normalize_portuguese(text))
+        if len(t) >= 2 and t not in PORTUGUESE_STOPWORDS
+    ]
 
 
 def rank_medical_articles(
