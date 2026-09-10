@@ -535,7 +535,7 @@ async def test_search_title_scoped_hit_makes_only_one_bvs_call(tmp_path: Path):
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
         )
-        records, meta = await engine.search_guidelines("dengue", limit=5)
+        records, _ = await engine.search_guidelines("dengue", limit=5)
         assert len(records) == 1
         assert route.call_count == 1
         requested_q = route.calls[0].request.url.params["q"]
@@ -556,7 +556,7 @@ async def test_search_title_scoped_miss_falls_back_to_all_field_query(tmp_path: 
                 httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),
             ]
         )
-        records, meta = await engine.search_guidelines("dengue", limit=5)
+        records, _ = await engine.search_guidelines("dengue", limit=5)
         assert [r.record_id for r in records] == ["fallback-1"]
         assert route.call_count == 2
         assert "ti:dengue" in route.calls[0].request.url.params["q"]
@@ -577,7 +577,7 @@ async def test_search_fallback_cached_under_title_scoped_key(tmp_path: Path):
                 httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),
             ]
         )
-        first, first_meta = await engine.search_guidelines("dengue", limit=5)
+        first, _ = await engine.search_guidelines("dengue", limit=5)
         assert [r.record_id for r in first] == ["fallback-1"]
         assert route.call_count == 2
 

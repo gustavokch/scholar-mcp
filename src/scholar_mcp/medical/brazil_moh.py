@@ -161,18 +161,24 @@ def _usable_tokens(query: str) -> list[str]:
     ]
 
 
-def _build_query(query: str, collection: str) -> str:
+def _build_query(query: str, collection: str, title_scoped: bool = False) -> str:
     """Compose every filter into ``q``.
 
     ``fq`` is silently ignored by this API, and the default operator is OR,
     so user tokens are explicitly ANDed inside their own group.
+    When ``title_scoped`` is True, each user token is scoped to the ``ti:``
+    field so title matching takes precedence over full-text matches.
     """
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
     tokens = _usable_tokens(query)
     if tokens:
-        clauses.append("(" + " AND ".join(tokens) + ")")
+        if title_scoped:
+            token_clause = " AND ".join(f"ti:{t}" for t in tokens)
+        else:
+            token_clause = " AND ".join(tokens)
+        clauses.append(f"({token_clause})")
     return " AND ".join(clauses)
 
 
@@ -321,10 +327,11 @@ class BrazilMoHEngine:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        # Keyed on the composed query, not the raw one: "dengue" and
-        # "  dengue  " compose identically and must share one cache row.
-        composed = _build_query(query, norm_collection)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed}"
+        # Compose title-scoped query first. Key the cache on the title-scoped
+        # query so the result of the two-step search is cached under this key
+        # and repeated searches (including misses) do not re-issue both calls.
+        title_composed = _build_query(query, norm_collection, title_scoped=True)
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{title_composed}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -333,30 +340,40 @@ class BrazilMoHEngine:
         pcdt_records, pcdt_meta = await self.pcdt_engine.search(query, limit=clamped)
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        resp = await self.http_client.get(
-            BVS_SEARCH_URL,
-            headers=BVS_HEADERS,
-            params={
-                "q": composed,
-                "output": "json",
-                "count": count,
-            },
-        )
-        if resp is None:
+
+        async def _fetch_bvs(q_str: str) -> tuple[list[BrazilGuideline], bool]:
+            resp = await self.http_client.get(
+                BVS_SEARCH_URL,
+                headers=BVS_HEADERS,
+                params={
+                    "q": q_str,
+                    "output": "json",
+                    "count": count,
+                },
+            )
+            if resp is None:
+                return [], True
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.warning("brazil_moh search returned non-JSON payload")
+                return [], True
+
+            bvs_docs = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
+            return [record for record in bvs_docs if _is_brazilian(record)], False
+
+        bvs_records, errored = await _fetch_bvs(title_composed)
+        if errored:
             if pcdt_records:
                 return pcdt_records, pcdt_meta
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        try:
-            data = resp.json()
-        except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
-            if pcdt_records:
-                return pcdt_records, pcdt_meta
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
-
-        bvs_records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
-        bvs_records = [record for record in bvs_records if _is_brazilian(record)]
+        # Fall back to all-field query when title-scoped query yields zero Brazilian records
+        if not bvs_records and _usable_tokens(query):
+            all_composed = _build_query(query, norm_collection, title_scoped=False)
+            fallback_records, fallback_errored = await _fetch_bvs(all_composed)
+            if not fallback_errored:
+                bvs_records = fallback_records
 
         # Merge PCDT records (first) and BVS records, deduplicating by record_id
         seen_ids: set[str] = set()
