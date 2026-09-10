@@ -11,12 +11,9 @@ from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
-BF_BASE = "https://brightfutures.aap.org"
-BF_URL = "https://brightfutures.aap.org/Search"
 AAP_BASE = "https://publications.aap.org"
 AAP_URL = "https://publications.aap.org/pediatrics/search"
 
-BF_ITEM_SELECTORS = ".search-result, .result-item, .guideline-item, article, .content-item"
 AAP_ITEM_SELECTORS = ".search-result, .result-item, .article-item, article, .publication-item"
 TITLE_SELECTORS = "h2, h3, .title, a.title"
 DESC_SELECTORS = ".description, .summary, .abstract, p"
@@ -226,16 +223,16 @@ class PediatricsEngine:
         if meta.cached and cached_data is not None:
             return [PediatricGuideline.from_dict(d) for d in cached_data], meta
 
-        results, errored = await self._scrape_html(
-            BF_URL,
-            {"q": query},
-            BF_ITEM_SELECTORS,
-            BF_BASE,
-            "bright-futures",
-        )
-        results = self._filter_matches(results, query)
-
-        if errored:
+        # The BF ?q= endpoint is dead: it ignores the query and returns
+        # static nav HTML. Go straight to the PubMed organization=AAP
+        # search instead of hitting an endpoint that never searches.
+        try:
+            results = await self._pubmed_guidelines(query)
+        except Exception:
+            logger.warning(
+                "PubMed bright-futures fallback failed for %r", query,
+                exc_info=True,
+            )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
@@ -328,19 +325,15 @@ class PediatricsEngine:
                 )
 
         if not deduped and self.settings.enable_browser_fallback:
-            browser_items: list[PediatricGuideline] = []
-            for url, selectors, base, source in (
-                (BF_URL, BF_ITEM_SELECTORS, BF_BASE, "bright-futures"),
-                (AAP_URL, AAP_ITEM_SELECTORS, AAP_BASE, "aap-policy"),
-            ):
-                try:
-                    browser_items.extend(
-                        await self._camoufox_scrape(url, query, selectors, base, source)
-                    )
-                except Exception:
-                    logger.warning(
-                        "Browser fallback failed for %s", url, exc_info=True
-                    )
+            try:
+                browser_items = await self._camoufox_scrape(
+                    AAP_URL, query, AAP_ITEM_SELECTORS, AAP_BASE, "aap-policy"
+                )
+            except Exception:
+                logger.warning(
+                    "Browser fallback failed for %s", AAP_URL, exc_info=True
+                )
+                browser_items = []
             if browser_items:
                 deduped = []
                 browser_seen: set[str] = set()
@@ -350,6 +343,11 @@ class PediatricsEngine:
                         browser_seen.add(norm)
                         deduped.append(g)
                 errored = False
+
+        if deduped and all(g.source == "pubmed-aap" for g in deduped):
+            # Everything came from PubMed, which never touches the
+            # Cloudflare-walled AAP host: the scrape error is stale.
+            errored = False
 
         if errored and not deduped:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)

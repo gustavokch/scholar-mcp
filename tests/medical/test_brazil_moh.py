@@ -326,11 +326,13 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
+    BVS_HEADERS,
     BVS_SEARCH_URL,
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
     _dedupe_by_id,
 )
+from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
@@ -589,6 +591,13 @@ def test_is_allowed_host_accepts_bvs_hosts_only():
     assert _is_allowed_host("https://www.sciencedirect.com/x") is False
     assert _is_allowed_host("https://evil.example.com/fi-admin.bvsalud.org") is False
     assert _is_allowed_host("") is False
+    # gov.br PCDT PDFs may be served from any *.gov.br static host; the
+    # catch-all is deliberate and its boundary is pinned here.
+    assert _is_allowed_host("https://www.gov.br/saude/pt-br/assuntos/pcdt/a/x.pdf") is True
+    assert _is_allowed_host("https://bvsms.saude.gov.br/pcdt.pdf") is True
+    assert _is_allowed_host("https://gov.br.evil.com/x") is False
+    assert _is_allowed_host("https://notgov.br/x") is False
+    assert _is_allowed_host("https://saude.gov.br.evil.com/x") is False
 
 
 @respx.mock
@@ -1000,18 +1009,73 @@ async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),
-                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
-        records, meta = await engine.search_guidelines("manejo dengue", limit=5)
+        records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert route.call_count == 2
         first = str(route.calls[0].request.url)
         second = str(route.calls[1].request.url)
-        assert "manejo+AND+dengue" in first or "manejo%20AND%20dengue" in first
-        assert "manejo+OR+dengue" in second or "manejo%20OR%20dengue" in second
+        assert "dengue+AND+hemorragica" in first or "dengue%20AND%20hemorragica" in first
+        assert "dengue+OR+hemorragica" in second or "dengue%20OR%20hemorragica" in second
         assert len(records) == 1
         assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_headers_by_hostname(tmp_path, monkeypatch):
+    """gov.br appearing in a query string must not switch to GOVBR headers."""
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    respx.get("https://docs.bvsalud.org/x").mock(
+        return_value=httpx.Response(
+            200, content=b"%PDF-1.4", headers={"Content-Type": "application/pdf"}
+        )
+    )
+    try:
+        text, errored = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x?ref=gov.br"
+        )
+        assert errored is False
+        assert text == "texto"
+        sent = respx.calls.last.request.headers
+        # User-Agent is identical in both header sets; Accept is GOVBR-only.
+        assert sent["accept"] != GOVBR_HEADERS["Accept"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeypatch):
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    respx.get(url__startswith="https://www.gov.br/").mock(
+        return_value=httpx.Response(
+            200, content=b"%PDF-1.4", headers={"Content-Type": "application/pdf"}
+        )
+    )
+    try:
+        _text, errored = await engine._extract_pdf_text(
+            "https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia.pdf/@@download/file"
+        )
+        assert errored is False
+        sent = respx.calls.last.request.headers
+        assert sent["accept"] == GOVBR_HEADERS["Accept"]
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1027,7 +1091,7 @@ async def test_search_relaxed_request_reuses_the_same_count(tmp_path: Path):
                 httpx.Response(200, json=_bvs_response([])),
             ]
         )
-        await engine.search_guidelines("manejo dengue", limit=5)
+        await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert route.call_count == 2
         # count=0 returns HTTP 500 from this endpoint, so the relaxed request
@@ -1051,10 +1115,10 @@ async def test_search_relaxes_when_strict_hits_are_all_non_brazilian(tmp_path: P
                     200,
                     json=_bvs_response([_bvs_doc(country="^iPortugal^ePortugal")]),
                 ),
-                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
-        records, _ = await engine.search_guidelines("manejo dengue", limit=5)
+        records, _ = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert route.call_count == 2
         assert len(records) == 1
@@ -1089,7 +1153,7 @@ async def test_search_does_not_relax_when_stopwords_leave_one_token(tmp_path: Pa
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         # Two raw tokens, one substantive. The gate counts substantive tokens.
-        await engine.search_guidelines("manejo da", limit=5)
+        await engine.search_guidelines("dengue da", limit=5)
 
         assert route.call_count == 1
     finally:
@@ -1103,10 +1167,10 @@ async def test_search_does_not_relax_when_strict_finds_a_brazilian_record(tmp_pa
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(
-                200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])
+                200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])
             )
         )
-        records, _ = await engine.search_guidelines("manejo dengue", limit=5)
+        records, _ = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert route.call_count == 1
         assert len(records) == 1
@@ -1122,11 +1186,11 @@ async def test_search_caches_relaxed_result_under_the_strict_key(tmp_path: Path)
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),
-                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
-        first, _ = await engine.search_guidelines("manejo dengue", limit=5)
-        second, meta = await engine.search_guidelines("manejo dengue", limit=5)
+        first, _ = await engine.search_guidelines("dengue hemorragica", limit=5)
+        second, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         # One user query, one cache row: no third request.
         assert route.call_count == 2
@@ -1143,11 +1207,11 @@ async def test_search_score_survives_the_cache_round_trip(tmp_path: Path):
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(
-                200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])
+                200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])
             )
         )
-        fresh, _ = await engine.search_guidelines("manejo dengue", limit=5)
-        cached, meta = await engine.search_guidelines("manejo dengue", limit=5)
+        fresh, _ = await engine.search_guidelines("dengue hemorragica", limit=5)
+        cached, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert meta.cached is True
         assert fresh[0].score is not None
@@ -1167,11 +1231,11 @@ async def test_search_relaxed_request_failure_is_error_and_not_cached(tmp_path: 
                 httpx.Response(200, text="<html>Estamos em manutenção</html>"),
             ]
         )
-        records, meta = await engine.search_guidelines("manejo dengue", limit=5)
+        records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
         assert records == []
         assert meta.error is True
-        composed = 'type:"non-conventional" AND la:"pt" AND (manejo AND dengue)'
+        composed = 'type:"non-conventional" AND la:"pt" AND (dengue AND hemorragica)'
         _payload, cache_meta = await cache.get(f"brazil_moh_search:all:5:{composed}")
         assert cache_meta.cached is False
     finally:
@@ -1212,11 +1276,11 @@ async def test_search_ranks_before_slicing(tmp_path: Path):
                     _bvs_doc(record_id="biblio-0", title="Relatorio anual"),
                     _bvs_doc(record_id="biblio-1", title="Nota tecnica"),
                     _bvs_doc(record_id="biblio-2", title="Informe semanal"),
-                    _bvs_doc(record_id="biblio-3", title="Manejo clínico da dengue"),
+                    _bvs_doc(record_id="biblio-3", title="Manejo clínico da dengue hemorrágica"),
                 ]),
             )
         )
-        records, _ = await engine.search_guidelines("manejo dengue", limit=2)
+        records, _ = await engine.search_guidelines("dengue hemorragica", limit=2)
 
         assert len(records) == 2
         assert records[0].record_id == "biblio-3"

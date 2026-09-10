@@ -4,6 +4,7 @@ import email.utils
 import logging
 import math
 import random
+import re
 import threading
 from typing import Any
 import urllib.parse
@@ -78,6 +79,31 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
 # How much of a failing response body to quote in the log. Bytes are sliced before
 # decoding so a multi-megabyte PDF or XML body is never decoded in full.
 ERROR_BODY_LOG_CHARS = 500
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _sanitize_error_body(content: bytes, content_type: str = "") -> str:
+    """Format and sanitize an HTTP error response body for logging."""
+    if not content:
+        return ""
+    sample = content[: ERROR_BODY_LOG_CHARS * 2].decode("utf-8", "replace")
+    is_html = (
+        "text/html" in (content_type or "").lower()
+        or "<html" in sample.lower()
+        or "<!doctype" in sample.lower()
+    )
+    if is_html:
+        cleaned = _HTML_COMMENT_RE.sub(" ", sample)
+        cleaned = _HTML_SCRIPT_STYLE_RE.sub(" ", cleaned)
+        cleaned = _HTML_TAG_RE.sub(" ", cleaned)
+        cleaned = _WHITESPACE_RE.sub(" ", cleaned).strip()
+        return cleaned[:ERROR_BODY_LOG_CHARS]
+    cleaned = _WHITESPACE_RE.sub(" ", sample).strip()
+    return cleaned[:ERROR_BODY_LOG_CHARS]
 
 # Query parameters whose values must never reach the log stream. Kept narrow:
 # only credential-bearing keys. `email` is here because NCBI's contact
@@ -270,7 +296,7 @@ class AsyncHttpClient:
                         "HTTP GET %s failed with status %d: %s",
                         log_url,
                         resp.status_code,
-                        resp.content[:ERROR_BODY_LOG_CHARS].decode("utf-8", "replace"),
+                        _sanitize_error_body(resp.content, resp.headers.get("content-type", "")),
                     )
                     return None
                 return resp
