@@ -95,12 +95,14 @@ class SciHubProvider(BaseProvider):
                             timeout=15000,
                         )
                         content = await page.content()
-                        pdf_url = _extract_pdf_url(content, base_url=mirror_url)
+                        page_referer = page.url or mirror_url
+                        pdf_url = _extract_pdf_url(content, base_url=page_referer)
                         if not pdf_url:
                             continue
 
+                        pdf_headers = {"Referer": page_referer}
                         try:
-                            resp = await page.request.get(pdf_url, timeout=15000)
+                            resp = await page.request.get(pdf_url, headers=pdf_headers, timeout=15000)
                             if resp.status == 200:
                                 b = await resp.body()
                                 if b and b.startswith(b"%PDF-"):
@@ -108,7 +110,7 @@ class SciHubProvider(BaseProvider):
                         except Exception:
                             pass
 
-                        pdf_bytes = await self.http_client.get_bytes(pdf_url)
+                        pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=pdf_headers)
                         if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                             return pdf_bytes, pdf_url
                     except Exception:
@@ -138,11 +140,13 @@ class SciHubProvider(BaseProvider):
                 if resp is None or resp.status_code != 200 or not resp.text:
                     continue
 
-                pdf_url = _extract_pdf_url(resp.text, base_url=mirror_url)
+                final_page_url = str(resp.url) if getattr(resp, "url", None) else mirror_url
+                pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
                 if not pdf_url:
                     continue
 
-                pdf_bytes = await self.http_client.get_bytes(pdf_url)
+                pdf_headers = {"Referer": final_page_url}
+                pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=pdf_headers)
                 if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                     return pdf_bytes, pdf_url
             except Exception:

@@ -188,7 +188,7 @@ async def test_scihub_mirror_fallback(client, monkeypatch):
             text='<html><iframe src="//cyber.sci-hub.se/tree/10.1038/test.pdf#view=fitH"></iframe></html>',
         )
     )
-    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+    pdf_route = respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
         return_value=httpx.Response(200, content=b"%PDF-scihub-data")
     )
     monkeypatch.setattr(
@@ -199,6 +199,35 @@ async def test_scihub_mirror_fallback(client, monkeypatch):
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
     assert res is not None and res.source == "scihub"
     assert "SciHub Extracted Content" in res.content
+    assert pdf_route.called
+    assert pdf_route.calls.last.request.headers.get("referer") == "https://mirror2.org/10.1038/test"
+
+
+@respx.mock
+async def test_scihub_passes_referer_header_from_redirected_url(client, monkeypatch):
+    """Upstream PDF hosts (like sci.bban.top) block requests lacking a Referer header."""
+    respx.get("https://mirror1.org/10.1038/redirected").mock(
+        return_value=httpx.Response(
+            301,
+            headers={"Location": "https://landing-page.org/10.1038/redirected"},
+        )
+    )
+    respx.get("https://landing-page.org/10.1038/redirected").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://upstream.org/paper.pdf"></iframe></html>',
+        )
+    )
+    pdf_route = respx.get("https://upstream.org/paper.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-redirected-data")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/redirected"))
+    assert pdf_bytes == b"%PDF-redirected-data"
+    assert pdf_url == "https://upstream.org/paper.pdf"
+    assert pdf_route.called
+    assert pdf_route.calls.last.request.headers.get("referer") == "https://landing-page.org/10.1038/redirected"
 
 
 def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-fake-data"):
@@ -207,6 +236,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-f
 
     attempts: list[bool] = []
     captured_urls: list[str] = []
+    captured_headers: list[dict] = []
 
     class _FakeResponse:
         status = 200
@@ -215,15 +245,18 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-f
             return pdf_bytes
 
     class _FakeRequest:
-        async def get(self, url, *a, **k):
+        async def get(self, url, headers=None, *a, **k):
+            captured_headers.append(headers or {})
             return _FakeResponse()
 
     class _FakePage:
         def __init__(self):
             self.request = _FakeRequest()
+            self.url = ""
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
+            self.url = url
             return None
 
         async def content(self):
@@ -250,7 +283,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-f
     camoufox_mod.async_api = api_mod
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
-    return attempts, captured_urls
+    return attempts, captured_urls, captured_headers
 
 
 def test_scihub_extract_pdf_url_resolves_relative_path():
@@ -294,7 +327,7 @@ async def test_scihub_fetch_pdf_bytes_ignores_non_pdf_content(client):
 async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
     rendered_html = '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
-    attempts, captured = _install_fake_camoufox(monkeypatch, rendered_html=rendered_html)
+    attempts, captured, captured_headers = _install_fake_camoufox(monkeypatch, rendered_html=rendered_html)
     monkeypatch.setattr(
         "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "Camoufox SciHub Content"
     )
@@ -305,12 +338,14 @@ async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
     assert "Camoufox SciHub Content" in res.content
     assert len(attempts) == 1
     assert "https://mirror1.org/10.1038/test" in captured
+    assert len(captured_headers) == 1
+    assert captured_headers[0].get("Referer") == "https://mirror1.org/10.1038/test"
 
 
 @respx.mock
 async def test_scihub_browser_fallback_disabled_skips_camoufox(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
-    attempts, _ = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    attempts, _, _ = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
     settings = Settings(enable_browser_fallback=False)
     provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
@@ -364,7 +399,7 @@ async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
     for m in mirrors:
         respx.get(url__startswith=m).mock(return_value=httpx.Response(403))
     # Camoufox returns no PDF from any mirror (empty HTML)
-    _, captured = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    _, captured, _ = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
     settings = Settings(enable_browser_fallback=True)
     provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
     await provider._fetch_via_camoufox("10.1038/test")
