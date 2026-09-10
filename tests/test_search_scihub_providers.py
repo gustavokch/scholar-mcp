@@ -1,7 +1,8 @@
+from typing import NamedTuple
+
 import httpx
 import pytest
 import respx
-from typing import NamedTuple
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata
