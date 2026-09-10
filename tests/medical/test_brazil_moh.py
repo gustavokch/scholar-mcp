@@ -173,6 +173,13 @@ def test_build_query_caller_supplied_ti_prefix_is_neutralized():
     all_fields_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=False)
     assert all_fields_multi == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
 
+    # Leading +/- signs with field prefix
+    scoped_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=True)
+    assert scoped_signed == 'type:"non-conventional" AND la:"pt" AND (ti:dengue AND ti:zika)'
+
+    all_fields_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=False)
+    assert all_fields_signed == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+
 
 def test_build_query_title_scoped_blank_or_reserved_yields_filters_only():
     from scholar_mcp.medical.brazil_moh import _build_query
