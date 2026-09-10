@@ -230,6 +230,35 @@ async def test_scihub_passes_referer_header_from_redirected_url(client, monkeypa
     assert pdf_route.calls.last.request.headers.get("referer") == "https://landing-page.org/10.1038/redirected"
 
 
+@respx.mock
+async def test_scihub_retries_without_referer_when_hotlink_protected(client):
+    """Hosts configured with `valid_referers none …` reject a foreign Referer but
+    serve a bare request, so a blocked fetch must be retried without the header."""
+    seen: list[str | None] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        if request.headers.get("referer"):
+            return httpx.Response(403, text="<html>Hotlink denied</html>")
+        return httpx.Response(200, content=b"%PDF-hotlink-data")
+
+    respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://pdf-host.org/paper.pdf"></iframe></html>',
+        )
+    )
+    respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
+
+    assert pdf_bytes == b"%PDF-hotlink-data"
+    assert pdf_url == "https://pdf-host.org/paper.pdf"
+    assert seen == ["https://mirror1.org/10.1038/test", None]
+
+
 def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-fake-data"):
     import sys
     import types

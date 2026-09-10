@@ -72,6 +72,20 @@ class SciHubProvider(BaseProvider):
         self.settings = settings or Settings.load()
         self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
 
+    async def _get_pdf_bytes(self, pdf_url: str, referer: str | None) -> bytes | None:
+        """Fetch raw PDF bytes, preferring a landing-page ``Referer``.
+
+        Hosts such as sci.bban.top require the header; others use hotlink
+        protection that rejects a foreign one while accepting a bare request.
+        A miss (403, transport failure, or bot-challenge page) gets one retry
+        without it.
+        """
+        headers = {"Referer": referer} if referer else None
+        pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=headers)
+        if pdf_bytes is None and headers:
+            pdf_bytes = await self.http_client.get_bytes(pdf_url)
+        return pdf_bytes
+
     async def _fetch_via_camoufox(
         self,
         clean_doi: str,
@@ -110,7 +124,7 @@ class SciHubProvider(BaseProvider):
                         except Exception:
                             pass
 
-                        pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=pdf_headers)
+                        pdf_bytes = await self._get_pdf_bytes(pdf_url, page_referer)
                         if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                             return pdf_bytes, pdf_url
                     except Exception:
@@ -145,8 +159,7 @@ class SciHubProvider(BaseProvider):
                 if not pdf_url:
                     continue
 
-                pdf_headers = {"Referer": final_page_url}
-                pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=pdf_headers)
+                pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
                 if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                     return pdf_bytes, pdf_url
             except Exception:
