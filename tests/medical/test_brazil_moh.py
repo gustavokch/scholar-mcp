@@ -252,11 +252,13 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
+    BVS_HEADERS,
     BVS_SEARCH_URL,
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
     _dedupe_by_id,
 )
+from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
@@ -515,6 +517,13 @@ def test_is_allowed_host_accepts_bvs_hosts_only():
     assert _is_allowed_host("https://www.sciencedirect.com/x") is False
     assert _is_allowed_host("https://evil.example.com/fi-admin.bvsalud.org") is False
     assert _is_allowed_host("") is False
+    # gov.br PCDT PDFs may be served from any *.gov.br static host; the
+    # catch-all is deliberate and its boundary is pinned here.
+    assert _is_allowed_host("https://www.gov.br/saude/pt-br/assuntos/pcdt/a/x.pdf") is True
+    assert _is_allowed_host("https://bvsms.saude.gov.br/pcdt.pdf") is True
+    assert _is_allowed_host("https://gov.br.evil.com/x") is False
+    assert _is_allowed_host("https://notgov.br/x") is False
+    assert _is_allowed_host("https://saude.gov.br.evil.com/x") is False
 
 
 @respx.mock
@@ -914,6 +923,61 @@ async def test_search_cache_key_ignores_query_whitespace(tmp_path: Path):
         assert route.call_count == 1
         assert meta.cached is True
         assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_headers_by_hostname(tmp_path, monkeypatch):
+    """gov.br appearing in a query string must not switch to GOVBR headers."""
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    respx.get("https://docs.bvsalud.org/x").mock(
+        return_value=httpx.Response(
+            200, content=b"%PDF-1.4", headers={"Content-Type": "application/pdf"}
+        )
+    )
+    try:
+        text, errored = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x?ref=gov.br"
+        )
+        assert errored is False
+        assert text == "texto"
+        sent = respx.calls.last.request.headers
+        # User-Agent is identical in both header sets; Accept is GOVBR-only.
+        assert sent["accept"] != GOVBR_HEADERS["Accept"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeypatch):
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    respx.get(url__startswith="https://www.gov.br/").mock(
+        return_value=httpx.Response(
+            200, content=b"%PDF-1.4", headers={"Content-Type": "application/pdf"}
+        )
+    )
+    try:
+        text, errored = await engine._extract_pdf_text(
+            "https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia.pdf/@@download/file"
+        )
+        assert errored is False
+        sent = respx.calls.last.request.headers
+        assert sent["accept"] == GOVBR_HEADERS["Accept"]
     finally:
         await cache.close()
         await http_client.aclose()

@@ -23,6 +23,7 @@ import urllib.parse
 from typing import Any
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
 from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -47,7 +48,9 @@ FI_ADMIN_DOC_RE = re.compile(
 # The full-text fetch follows a URL taken from record content while the
 # record id is caller-controlled. Without this allowlist the tool would act
 # as a general-purpose request proxy.
-FULLTEXT_ALLOWED_HOSTS = frozenset({"fi-admin.bvsalud.org", "docs.bvsalud.org"})
+FULLTEXT_ALLOWED_HOSTS = frozenset(
+    {"fi-admin.bvsalud.org", "docs.bvsalud.org", "www.gov.br", "gov.br", "bvsms.saude.gov.br"}
+)
 
 MAX_RESULTS = 50
 OVERFETCH_FACTOR = 3
@@ -56,7 +59,7 @@ MAX_FULL_TEXT_CHARS = 50_000
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
-VALID_COLLECTIONS = frozenset({"all", "brisa"})
+VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt"})
 
 BRAZIL_COUNTRY = "Brasil"
 
@@ -232,12 +235,22 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
 
 
 def is_allowed_bvs_host(url: str) -> bool:
-    """True only for the BVS hosts this module is permitted to fetch."""
+    """True only for the BVS and Brazilian MoH hosts this module is permitted to fetch."""
+    # The *.gov.br catch-all is deliberate: PCDT PDFs are served from
+    # www.gov.br, bvsms.saude.gov.br, and static asset hosts that change
+    # without notice. gov.br is a state-run registry, so the catch-all
+    # stays inside Brazilian government infrastructure. Lookalike hosts
+    # (gov.br.evil.com) fail the endswith check; the boundary is pinned
+    # by test_is_allowed_host_accepts_bvs_hosts_only.
     try:
         host = (urllib.parse.urlparse(url or "").hostname or "").lower()
     except ValueError:
         return False
-    return host in FULLTEXT_ALLOWED_HOSTS
+    return (
+        host in FULLTEXT_ALLOWED_HOSTS
+        or host == "gov.br"
+        or host.endswith(".gov.br")
+    )
 
 
 is_allowed_host = is_allowed_bvs_host
@@ -276,6 +289,7 @@ class BrazilMoHEngine:
         self.http_client = http_client
         self.cache = cache
         self.settings = settings
+        self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
 
     async def search_guidelines(
         self,
@@ -289,6 +303,9 @@ class BrazilMoHEngine:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         clamped = min(max(1, limit), MAX_RESULTS)
+
+        if norm_collection == "pcdt":
+            return await self.pcdt_engine.search(query, limit=clamped)
 
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
@@ -306,6 +323,9 @@ class BrazilMoHEngine:
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
 
+        # Query PCDT engine first
+        pcdt_records, pcdt_meta = await self.pcdt_engine.search(query, limit=clamped)
+
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
@@ -317,16 +337,32 @@ class BrazilMoHEngine:
             },
         )
         if resp is None:
+            if pcdt_records:
+                return pcdt_records, pcdt_meta
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         try:
             data = resp.json()
         except ValueError:
             logger.warning("brazil_moh search returned non-JSON payload")
+            if pcdt_records:
+                return pcdt_records, pcdt_meta
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
-        records = [record for record in records if _is_brazilian(record)][:clamped]
+        bvs_records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
+        bvs_records = [record for record in bvs_records if _is_brazilian(record)]
+
+        # Merge PCDT records (first) and BVS records, deduplicating by record_id
+        seen_ids: set[str] = set()
+        merged_records: list[BrazilGuideline] = []
+        for r in pcdt_records + bvs_records:
+            if r.record_id and r.record_id in seen_ids:
+                continue
+            if r.record_id:
+                seen_ids.add(r.record_id)
+            merged_records.append(r)
+
+        records = merged_records[:clamped]
 
         await self.cache.set(
             cache_key,
@@ -377,7 +413,14 @@ class BrazilMoHEngine:
         """
         if not _is_allowed_host(document_url):
             return "", False
-        resp = await self.http_client.get(document_url, headers=BVS_HEADERS)
+        # Pick headers by hostname, not by substring: "gov.br" appearing in
+        # a query string or path on a non-gov host must not match.
+        try:
+            host = (urllib.parse.urlparse(document_url or "").hostname or "").lower()
+        except ValueError:
+            host = ""
+        headers = GOVBR_HEADERS if host.endswith("gov.br") else BVS_HEADERS
+        resp = await self.http_client.get(document_url, headers=headers)
         if resp is None:
             return "", True
         if not _is_allowed_host(str(resp.url)):
@@ -424,7 +467,13 @@ class BrazilMoHEngine:
         if meta.cached and cached_data is not None:
             return self._serve_full_text(cached_data, max_chars), meta
 
-        record, errored = await self._lookup_record(normalized)
+        pcdt_record = await self.pcdt_engine.get_guideline(normalized)
+        if pcdt_record is not None:
+            record = pcdt_record
+            errored = False
+        else:
+            record, errored = await self._lookup_record(normalized)
+
         if errored:
             return (
                 {**base, "status": "error", "error": "bvs request failed",
