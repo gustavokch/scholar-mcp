@@ -1,108 +1,215 @@
 # Brazilian Ministry of Health Retrieval Improvements — Design
 
 Date: 2026-09-09
-Status: Approved, ready for implementation planning
+Status: In review (revision 2)
 
 ## Purpose
 
 Improve recall and ranking precision for the Brazilian Ministry of Health (`brazil-moh`) guideline search tooling.
 
 This design introduces:
-1. Portuguese-aware tokenization and re-ranking in `scholar_mcp.medical.ranking`.
-2. Automatic query relaxation (two-stage `AND` -> `OR` search) in `scholar_mcp.medical.brazil_moh` when strict conjunction yields zero records.
+
+1. Portuguese-aware tokenization and re-ranking for `BrazilGuideline` records.
+2. Automatic query relaxation (two-stage `AND` -> `OR` search) in `scholar_mcp.medical.brazil_moh` when strict conjunction yields zero Brazilian records.
+
+It does so by **generalizing the existing ranking function rather than duplicating it**. `scholar_mcp.medical.ranking.rank_medical_articles` already implements the target scoring contract (`0.7 * relevance + 0.3 * recency`, a `0.35` source-position share, `1/sqrt(idx + 1)` position prior, title weighted 2x abstract, stable sort on `(-score, source_index)`). The only genuine difference for the Brazilian corpus is the tokenizer and the choice of text fields. Both become injected parameters.
 
 ## Scope
 
 In scope:
-- Portuguese text normalization (Unicode NFKD accent folding, lowercasing, stopword stripping).
-- Re-ranking function `rank_brazil_guidelines` combining Portuguese lexical coverage (title weighted 2x abstract), BVS source position prior (35%), and recency decay (7-year half-life).
-- Query relaxation in `BrazilMoHEngine.search_guidelines` fallback from `AND` to `OR` on zero hits when query contains two or more usable tokens.
-- Updating `BrazilGuideline.score` in search results.
-- Unit and integration tests in `tests/medical/`.
+
+- Portuguese text normalization (Unicode NFKD accent folding, lowercasing, stopword stripping) in `scholar_mcp/medical/ranking.py`.
+- An optional `tokenizer` parameter on `ScoringEngine.text_coverage` in `src/scholar_mcp/ranking.py`, defaulting to current behaviour.
+- A shared, tokenizer-agnostic ranking core in `scholar_mcp/medical/ranking.py`, with `rank_medical_articles` and a new `rank_brazil_guidelines` as thin wrappers over it.
+- Query relaxation in `BrazilMoHEngine.search_guidelines`: fallback from `AND` to `OR` when the strict query yields zero Brazilian records and the query carries two or more usable tokens.
+- Populating `BrazilGuideline.score` in search results.
+- Correcting the existing slice-before-rank ordering in `search_guidelines`.
+- Updating the `brazil_moh.py` module docstring and the `BrazilGuideline.score` docstring, both of which currently document the *absence* of ranking as a deliberate decision.
+- Unit tests in `tests/medical/`.
 
 Out of scope:
-- Changes to `ScoringEngine` in `src/scholar_mcp/ranking.py` (kept isolated to `medical/`).
-- External NLP dependencies or heavy ML models.
-- Changes to MCP tool schema or parameters in `src/scholar_mcp/server.py`.
+
+- Any change to the scoring contract itself (weights, half-life, position prior) for the existing `MedicalArticle` path. `rank_medical_articles` must remain behaviourally identical.
+- New scoring signals (evidence grade, citation counts, MeSH matching).
+- External NLP dependencies, stemmers, or ML models.
+- Changes to the MCP tool schema or parameters in `src/scholar_mcp/server.py`.
+- Server-side Solr relevance tuning (`mm`, boosts, `fq`). The BVS endpoint silently ignores `fq`, and its handling of `mm` is unverified.
 
 ## Architecture & Data Flow
 
-### 1. Portuguese Normalization & Ranking (`scholar_mcp/medical/ranking.py`)
+### 1. Tokenizer injection in `ScoringEngine` (`src/scholar_mcp/ranking.py`)
 
-#### Normalization
-- Function `normalize_portuguese(text: str | None) -> str`:
-  - Applies Unicode NFKD decomposition and strips non-ASCII diacritics: `unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("utf-8")`.
-  - Converts text to lowercase.
-- Constant `PORTUGUESE_STOPWORDS`:
-  - Curated set of common Portuguese prepositions, conjunctions, and articles (`de`, `do`, `da`, `dos`, `das`, `em`, `no`, `na`, `nos`, `nas`, `para`, `por`, `pelo`, `pela`, `com`, `sem`, `sob`, `sobre`, `um`, `uma`, `uns`, `umas`, `o`, `a`, `os`, `as`, `e`, `ou`, `se`, `que`).
-- Function `tokenize_portuguese(text: str | None) -> list[str]`:
-  - Normalizes input with `normalize_portuguese`.
-  - Splits tokens on non-alphanumeric boundaries `[^a-z0-9]+`.
-  - Retains tokens with `len(token) >= 2` and `token not in PORTUGUESE_STOPWORDS`.
+`ScoringEngine.text_coverage` currently hardcodes `ScoringEngine.tokenize` for both the query terms and the document fields. That is the sole reason a Portuguese coverage function would otherwise have to be duplicated.
 
-#### Lexical Scoring
-- Function `calculate_portuguese_coverage(query_terms: list[str], title: str | None, abstract: str | None) -> float`:
-  - Computes fraction of unique `query_terms` present in tokenized title (`title_cov`) and tokenized abstract (`abstract_cov`).
-  - Weights title 2.0 and abstract 1.0 (matching `ScoringEngine.text_coverage` formula):
-    `min(1.0, title_cov + 0.5 * abstract_cov)`.
+Change:
 
-#### Guideline Re-Ranking
-- Function `rank_brazil_guidelines(guidelines: list[BrazilGuideline], query: str, current_year: int | None = None) -> list[BrazilGuideline]`:
-  - If `guidelines` is empty, returns empty list.
-  - Tokenizes `query` using `tokenize_portuguese`. If no terms remain, returns copy of `guidelines`.
-  - Blends components:
-    - `lexical_coverage = calculate_portuguese_coverage(terms, g.title, g.abstract)`
-    - `position_prior = 1.0 / math.sqrt(idx + 1)` (where `idx` is 0-indexed BVS returned order)
-    - `relevance = 0.65 * lexical_coverage + 0.35 * position_prior`
-    - `recency = ScoringEngine.calculate_recency_feature(g.year, current_year=now_year, half_life_years=7.0, default_age=10.0)[0]`
-    - `final_score = 0.7 * relevance + 0.3 * recency`
-  - Sets `g.score = final_score` on each record.
-  - Sorts stably by `(-final_score, original_index)`.
+```python
+@staticmethod
+def text_coverage(
+    query_terms: list[str],
+    title: str | None,
+    abstract: str | None,
+    tokenizer: Callable[[str | None], list[str]] | None = None,
+) -> float:
+```
 
-### 2. Query Relaxation Engine (`scholar_mcp/medical/brazil_moh.py`)
+- `tokenizer` resolves to `ScoringEngine.tokenize` when `None`.
+- All existing call sites are unchanged and keep identical behaviour.
+- `_TITLE_WEIGHT` / `_ABSTRACT_WEIGHT` and the `min(1.0, title_cov + ratio * abstract_cov)` formula are untouched.
+- `Callable` is imported from `collections.abc`.
 
-#### Query Construction
-- Update `_build_query(query: str, collection: str, operator: str = "AND") -> str`:
-  - Accepts operator parameter (default `"AND"`, alternative `"OR"`).
-  - Joins usable tokens with specified operator inside parentheses: `f"({f' {operator} '.join(tokens)})"`.
+This is the only edit to `src/scholar_mcp/ranking.py`.
 
-#### Search Workflow in `BrazilMoHEngine.search_guidelines`
-1. Validate collection and parameters as currently implemented.
-2. Check SQLite cache using key `f"brazil_moh_search:{norm_collection}:{clamped}:{composed_strict}"`. If cached, return.
-3. Fetch candidate batch from BVS using `composed_strict` (`count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)`).
-4. Parse docs, deduplicate by ID, filter by `_is_brazilian`.
-5. **Zero-hit Fallback:**
-   - If candidate records list is empty AND `len(_usable_tokens(query)) >= 2`:
-     - Construct `composed_relaxed = _build_query(query, norm_collection, operator="OR")`.
-     - Request BVS using `composed_relaxed`.
-     - Parse docs, deduplicate by ID, filter by `_is_brazilian`.
-6. Apply `rank_brazil_guidelines(records, query)`.
-7. Slice top `clamped` records.
-8. Store resulting records in cache under the strict cache key.
+### 2. Portuguese normalization (`scholar_mcp/medical/ranking.py`)
+
+- `normalize_portuguese(text: str | None) -> str`:
+  - Returns `""` for falsy input.
+  - Applies NFKD decomposition, drops the combining marks, lowercases:
+    `unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii").lower()`.
+  - Note the ASCII `encode(..., "ignore")` also discards any non-Latin script. Acceptable: the corpus is Portuguese, and a record whose title is entirely non-Latin cannot match a Portuguese query anyway.
+
+- `PORTUGUESE_STOPWORDS: frozenset[str]`, stored **already accent-folded** (the tokenizer folds before it consults the set):
+  `a`, `ao`, `aos`, `as`, `com`, `como`, `da`, `das`, `de`, `do`, `dos`, `e`, `em`, `entre`, `na`, `nao`, `nas`, `no`, `nos`, `o`, `os`, `ou`, `para`, `pela`, `pelo`, `por`, `que`, `se`, `sem`, `sob`, `sobre`, `um`, `uma`, `umas`, `uns`.
+
+- `tokenize_portuguese(text: str | None) -> list[str]`:
+  - Normalizes with `normalize_portuguese`, splits on a module-local `_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")`, and keeps tokens where `len(token) >= 2 and token not in PORTUGUESE_STOPWORDS`. The pattern is declared locally rather than imported from `scholar_mcp.ranking`, whose copy is private to that module; the two are intentionally identical, since normalization has already reduced the text to ASCII.
+  - Signature and filtering rules deliberately mirror `ScoringEngine.tokenize` so the two are interchangeable as an injected `tokenizer`.
+
+### 3. Shared ranking core (`scholar_mcp/medical/ranking.py`)
+
+A private generic replaces the body of `rank_medical_articles`:
+
+```python
+class _Rankable(Protocol):
+    year: str
+    score: float | None
+
+R = TypeVar("R", bound=_Rankable)
+
+def _rank_records(
+    records: list[R],
+    query: str,
+    *,
+    tokenizer: Callable[[str | None], list[str]],
+    text_fields: Callable[[R], tuple[str, str]],
+    position_weight: float,
+    current_year: int | None = None,
+) -> list[R]:
+```
+
+- Empty input returns `[]`.
+- `terms = tokenizer(query)`; if empty, returns `list(records)` with `score` left untouched.
+- Per record, `text_fields(record)` yields `(title_text, abstract_text)`.
+- `lexical = ScoringEngine.text_coverage(terms, title_text, abstract_text, tokenizer=tokenizer)`.
+- When `position_weight` is non-zero: `relevance = (1 - position_weight) * lexical + position_weight * ScoringEngine.calculate_relevance(idx)`; otherwise `relevance = lexical`.
+- `recency, _ = ScoringEngine.calculate_recency_feature(record.year, current_year=now_year, half_life_years=RECENCY_HALF_LIFE_YEARS, default_age=DEFAULT_AGE_YEARS)`.
+- `record.score = RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recency`, assigned in place.
+- Sorts stably on `(-score, source_index)`.
+
+Existing module constants (`RELEVANCE_WEIGHT`, `RECENCY_WEIGHT`, `RECENCY_HALF_LIFE_YEARS`, `DEFAULT_AGE_YEARS`, `SOURCE_POSITION_WEIGHT`) are reused unchanged.
+
+Two public wrappers:
+
+- `rank_medical_articles(articles, query, current_year=None, position_weight=0.0)` — signature, docstring intent, and behaviour unchanged. Delegates with `tokenizer=ScoringEngine.tokenize` and `text_fields=lambda a: (a.title, a.abstract)`.
+
+- `rank_brazil_guidelines(guidelines, query, current_year=None)` — delegates with:
+  - `tokenizer=tokenize_portuguese`
+  - `text_fields=lambda g: (f"{g.title} {g.title_en}", g.abstract)`
+  - `position_weight=SOURCE_POSITION_WEIGHT` (`0.35`)
+
+  The title field is the **union** of the Portuguese and English titles. `BrazilGuideline.title_en` is populated from Solr `ti_en` (`brazil_moh.py:209`); without it an English query ("dengue treatment") scores zero lexical coverage against a record titled "Tratamento da dengue" whose `title_en` reads "Dengue treatment". Joining with a space is safe because the tokenizer splits on non-alphanumerics, so the result is exactly the union of both token sets. Coverage is a fraction of *query* terms found, so widening the document token set cannot deflate the score of a Portuguese-only match.
+
+  `position_weight` is non-zero here because BVS returns a single relevance-sorted list, matching the condition documented on `rank_medical_articles`.
+
+### 4. Query relaxation (`scholar_mcp/medical/brazil_moh.py`)
+
+#### Query construction
+
+`_build_query(query: str, collection: str, operator: str = "AND") -> str`:
+
+- `operator` is `"AND"` (default) or `"OR"`; it joins the usable tokens inside their own parenthesized group. Repo style: `"(" + f" {operator} ".join(tokens) + ")"`.
+- `BASE_FILTER` and `BRISA_FILTER` remain joined with `AND` regardless of `operator`. Only the user-token group relaxes.
+
+#### Search workflow in `BrazilMoHEngine.search_guidelines`
+
+1. Validate collection and the no-usable-tokens case exactly as today.
+2. `composed_strict = _build_query(query, norm_collection)`. Cache key stays `f"brazil_moh_search:{norm_collection}:{clamped}:{composed_strict}"`. A cache hit returns as today. The relaxed query never appears in the key: it is derived from the same user query, so one user query keeps one cache row.
+3. `count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)`. Request BVS with `composed_strict`.
+4. Parse docs, dedupe by id, filter by `_is_brazilian`. **No slice yet** — see step 7.
+5. Zero-hit fallback. Trigger condition, stated precisely: **the record list is empty after the `_is_brazilian` filter**, and `len(_usable_tokens(query)) >= 2`. A pool of non-Brazilian Portuguese hits therefore also triggers relaxation, which is the intent — the strict conjunction yielded nothing usable. On trigger:
+   - `composed_relaxed = _build_query(query, norm_collection, operator="OR")`.
+   - Request BVS with `composed_relaxed` and **the same `count`**.
+   - Parse, dedupe, filter by `_is_brazilian`. The result replaces the (empty) strict list.
+6. `records = rank_brazil_guidelines(records, query)`.
+7. `records = records[:clamped]`. **This slice moves after ranking.** Today it sits at `brazil_moh.py:329`, before any ranking exists; leaving it in place would hand the ranker only `clamped` of the `clamped * OVERFETCH_FACTOR` candidates and discard the rest in BVS order, defeating the over-fetch. The reordering is intentional and is part of this change.
+8. Cache the sliced records under the strict cache key.
 9. Return `(records, CacheMetadata(cached=False, cache_age=0, error=False))`.
+
+#### Why a bare `OR` and not minimum-should-match
+
+An N-token `OR` matches a record carrying only one token, which without ranking would be a clear precision loss. It is acceptable **only because step 6 now sorts by lexical coverage first**: a record matching one of four tokens sinks below one matching all four. Do not add a `mm` parameter (the endpoint's support is unverified, and it silently ignores `fq`) and do not implement progressive token-dropping — coverage-first ranking already recovers the precision, at a fraction of the complexity.
+
+Note the BVS default operator is OR, so the explicit `OR` group is equivalent to omitting the operator. It is written explicitly for symmetry with the strict path and to keep the composed query self-documenting.
+
+### 5. Docstring corrections
+
+Both of these currently document the absence of ranking as a considered decision, and both become false with this change. Updating them is a deliverable, not a nicety.
+
+- `src/scholar_mcp/medical/brazil_moh.py:14-17` — "Results are served in the order BVS returns them. No re-ranking is applied: `ScoringEngine` does not fold accents or strip Portuguese stopwords, so blending it against a Solr ordering tuned for this corpus would degrade it. `BrazilGuideline.score` is the seam for adding that later." Replace with a description of the two-stage search and the Portuguese-aware re-ranking, recording that accent folding and Portuguese stopwords are what made blending viable, and that the BVS ordering is retained as a weighted prior rather than discarded.
+- `src/scholar_mcp/medical/models.py:246` — "`score` is reserved for a future ranking pass and is unset in v1." Replace with a statement that `score` is populated by `rank_brazil_guidelines` on the search path.
 
 ## Error Handling & Edge Cases
 
-- **Single token query yielding zero hits:** Does not trigger relaxed query; strict and relaxed clauses are identical for a single token.
-- **BVS failure on relaxed attempt:** If the relaxed request returns an error or non-JSON, log warning and return empty result with `error=True`. Do not cache errored payload.
-- **Diacritics in BVS query:** `_sanitize_token` retains diacritics; Solr BVS handles Portuguese characters natively. Accent folding occurs in client-side re-ranking.
-- **Missing or non-standard publication year:** Handled gracefully via `ScoringEngine.parse_year` falling back to `default_age=10.0`.
+- **Single-token query, zero hits:** no relaxation. The strict and relaxed groups are byte-identical for one token, so a second request would be pure waste.
+- **Query with no usable tokens:** unchanged — early return with `error=False`, before any request.
+- **Strict request fails** (`resp is None`, or non-JSON): unchanged — early return, `error=True`, nothing cached.
+- **Relaxed request fails:** log a warning and return `([], CacheMetadata(cached=False, cache_age=0, error=True))`. Do not cache. Do not fall back to the strict result, which is empty by construction.
+- **Zero-hit latency:** a zero-hit multi-token query now costs two sequential BVS round trips. Accepted: the alternative is a speculative parallel `OR` request on every search, which would double load on a host that already 403s the default User-Agent.
+- **Empty result caching:** unchanged. A search where both stages return nothing caches `[]` for the TTL, as today.
+- **Missing or malformed year:** `ScoringEngine.parse_year` returns `None` and `calculate_recency_feature` applies `default_age=10.0`. `BrazilGuideline.year` is already normalized to a 4-digit string or `""` by `_parse_issued`.
+- **Diacritics in the outbound query:** `_sanitize_token` keeps them and BVS handles Portuguese natively, so the request is unchanged. Accent folding is client-side only, in re-ranking.
+- **Cached rows written before this change:** `BrazilGuideline.from_dict` fills `score=None` for rows lacking the key, and ordering for a cache hit is whatever was stored. Pre-existing rows are served unranked until their TTL expires. Acceptable; no cache-key version bump.
 
 ## Verification & Testing Plan
 
-### Unit Tests
-- `tests/medical/test_ranking_portuguese.py`:
-  - Accent folding across common accented vowels and cedilla (`ç`, `ã`, `õ`, `á`, `é`, `í`, `ó`, `ú`, `â`, `ê`, `ô`).
-  - Stopword filtering: ensures stopwords like `de`, `da`, `para` are omitted, while clinical words are retained.
-  - Scoring correctness: verify title matches score higher than abstract-only matches, newer documents score higher than older ones ceteris paribus, and BVS tie-breaking is preserved.
-  - In-place population of `BrazilGuideline.score`.
+### `tests/medical/test_medical_ranking.py` (extend; do not create a new ranking test file)
 
-- `tests/medical/test_brazil_moh.py`:
-  - Verify strict `AND` query is sent on initial search.
-  - Verify relaxation occurs when strict query returns zero Brazilian documents.
-  - Verify relaxation does not occur when query has only one token.
-  - Verify relaxation does not occur when strict query returns at least one Brazilian document.
-  - Verify cached result of a relaxed search is returned on subsequent searches.
+This file already covers `rank_medical_articles` and is where the Portuguese tests belong.
 
-### Manual / Integration Verification
-- Execute `pytest tests/medical/` to ensure 100% test pass across all medical modules.
+Regression — the generalization must not move the existing path:
+
+- Existing `rank_medical_articles` tests pass unchanged, including the `position_weight=0.0` and non-zero cases.
+- `ScoringEngine.text_coverage` called without `tokenizer` returns exactly what it returns today.
+
+New — normalization:
+
+- Accent folding over `á é í ó ú â ê ô ã õ ç`, and `ção`/`cao` equivalence.
+- Stopword filtering: `de`, `da`, `para`, `nao` dropped; `dengue`, `tratamento`, `diretriz` retained.
+- Tokens shorter than 2 characters dropped.
+- `None` and `""` inputs return `[]` / `""`.
+
+New — `rank_brazil_guidelines`:
+
+- Accent-insensitive matching: query `"cancer"` matches a title reading `"Câncer"`.
+- Title match outranks abstract-only match, all else equal.
+- Newer year outranks older year, all else equal.
+- Equal scores preserve BVS input order (stable sort).
+- `guideline.score` is populated in place on every record, and is a float in `[0.0, 1.0]`.
+- A query that tokenizes to nothing returns the input order with `score` untouched (`None`).
+- Empty input returns `[]`.
+- **`title_en` coverage:** an English query matches a record whose `title` is Portuguese and whose `title_en` carries the English terms; and a Portuguese-only match is not penalised when `title_en` is `""`.
+
+### `tests/medical/test_brazil_moh.py` (extend)
+
+- Strict `AND` group is sent on the first request.
+- Relaxation fires when the strict request returns zero *Brazilian* records — including the case where it returned non-Brazilian Portuguese records that the filter dropped. Assert the second request's `q` carries the `OR` group and the same `count`.
+- No relaxation when the query has one usable token.
+- No relaxation when the strict request returns at least one Brazilian record (assert exactly one HTTP call).
+- Relaxed results are cached under the strict cache key, and a repeat search is served from cache with one HTTP call total.
+- A failing relaxed request returns `([], error=True)` and writes nothing to the cache.
+- Ranking is applied before the slice: with `limit=2` and an over-fetched pool whose best-matching record sits outside the first two in BVS order, that record is present in the returned two.
+- Returned records carry a non-`None` `score`.
+
+### Gate
+
+`pytest tests/medical/ tests/test_ranking.py` green, plus the repo's full suite and lint gate before merge. Per the worktree convention, run tests with the main repo venv python; do not `uv sync` in a worktree.
