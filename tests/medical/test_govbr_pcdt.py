@@ -135,6 +135,57 @@ async def test_pcdt_7_day_cache_refresh(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_refresh_total_crawl_failure_caches_nothing(tmp_path):
+    """All letter pages fail: catalog stays empty and nothing is cached."""
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    mock_http = AsyncMock()
+    mock_http.get.return_value = None
+    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
+    try:
+        catalog = await engine.refresh_catalog()
+        assert catalog == {}
+        _, meta = await cache.get("govbr_pcdt:catalog")
+        assert meta.cached is False
+        assert engine._memory_catalog is None
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_partial_crawl_not_cached(tmp_path):
+    """One letter page OK, the rest fail: items returned but NOT cached.
+
+    A partial crawl cached with the full 7-day TTL would pin an incomplete
+    catalog for a week whenever gov.br is flaky.
+    """
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    mock_http = AsyncMock()
+    ok_page = (
+        '<div id="content-core">'
+        '<a href="https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia/view">Acromegalia</a>'
+        "</div>"
+    )
+
+    async def get(url, **kwargs):
+        if "/pcdt/a" in url:
+            return type("R", (), {"status_code": 200, "text": ok_page})()
+        return None
+
+    mock_http.get.side_effect = get
+    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
+    try:
+        catalog = await engine.refresh_catalog()
+        assert "pcdt-acromegalia" in catalog
+        _, meta = await cache.get("govbr_pcdt:catalog")
+        assert meta.cached is False, "partial crawl must not be cached"
+        assert engine._memory_catalog is None, "partial crawl must not become the in-memory catalog"
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_brazil_moh_engine_pcdt_integration(tmp_path, monkeypatch):
     import httpx
     import respx

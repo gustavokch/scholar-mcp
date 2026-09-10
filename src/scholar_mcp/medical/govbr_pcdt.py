@@ -279,9 +279,11 @@ class GovBrPCDTEngine:
     async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
         """Crawl fresh catalog from gov.br portal."""
         catalog: dict[str, dict[str, Any]] = {}
+        letters_ok = 0
         for letter in PCDT_LETTERS:
             urls_to_visit = [f"{PCDT_BASE_URL}/{letter}"]
             visited: set[str] = set()
+            letter_ok = False
             while urls_to_visit:
                 curr_url = urls_to_visit.pop(0)
                 if curr_url in visited:
@@ -291,6 +293,7 @@ class GovBrPCDTEngine:
                     resp = await self.http_client.get(curr_url, headers=GOVBR_HEADERS)
                     if resp is None or resp.status_code != 200:
                         continue
+                    letter_ok = True
                     items, next_urls = parse_letter_page(resp.text, letter, curr_url)
                     catalog.update(items)
                     for nurl in next_urls:
@@ -298,8 +301,14 @@ class GovBrPCDTEngine:
                             urls_to_visit.append(nurl)
                 except Exception as exc:
                     logger.warning("Error crawling PCDT letter %s at %s: %s", letter, curr_url, exc)
+            if letter_ok:
+                letters_ok += 1
 
-        if catalog:
+        # Cache only a fully-crawled catalog: a partial crawl pinned with
+        # the 7-day TTL would serve an incomplete catalog for a week while
+        # gov.br is flaky. Partial results are returned for this call but
+        # leave the cached and in-memory catalogs untouched.
+        if catalog and letters_ok == len(PCDT_LETTERS):
             self._memory_catalog = catalog
             await self.cache.set(
                 "govbr_pcdt:catalog",
