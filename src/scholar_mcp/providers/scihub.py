@@ -13,6 +13,11 @@ from scholar_mcp.utils.http import AsyncHttpClient
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
 
+# Statuses that mean "this host looked at the Referer and said no". Anything else
+# (transport error, timeout, 5xx, 429, other 4xx) is a failed request, not a
+# rejected header, and must not buy a second retry ladder.
+_REFERER_REJECTED_STATUSES = frozenset({401, 403})
+
 
 def _normalize_pdf_url(url: str, base_url: str | None = None) -> str:
     url = url.split("#")[0]
@@ -89,14 +94,26 @@ class SciHubProvider(BaseProvider):
 
         Hosts such as sci.bban.top require the header; others use hotlink
         protection that rejects a foreign one while accepting a bare request.
-        A miss (403, transport failure, or bot-challenge page) gets one retry
-        without it.
+        Only a refusal -- 401/403, or a 200 bot-challenge page -- gets one retry
+        without the header. A request that never completed is not a Referer
+        problem, and ``get`` has already spent its own retry ladder on it, so it
+        falls through to the next mirror instead.
         """
-        headers = {"Referer": referer} if referer else None
-        pdf_bytes = await self.http_client.get_bytes(pdf_url, headers=headers)
-        if pdf_bytes is None and headers:
-            pdf_bytes = await self.http_client.get_bytes(pdf_url)
-        return pdf_bytes
+        if not referer:
+            return await self.http_client.get_bytes(pdf_url)
+
+        resp = await self.http_client.get(
+            pdf_url,
+            headers={"Referer": referer},
+            ok_statuses=_REFERER_REJECTED_STATUSES,
+        )
+        if resp is None:
+            return None
+        if resp.status_code in _REFERER_REJECTED_STATUSES or self.http_client.is_unexpected_html(
+            resp
+        ):
+            return await self.http_client.get_bytes(pdf_url)
+        return resp.content
 
     async def _fetch_via_camoufox(
         self,

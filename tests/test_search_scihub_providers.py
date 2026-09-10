@@ -260,6 +260,64 @@ async def test_scihub_retries_without_referer_when_hotlink_protected(client):
     assert seen == ["https://mirror1.org/10.1038/test", None]
 
 
+@respx.mock
+async def test_scihub_does_not_retry_bare_when_host_fails(client):
+    """A 5xx is not a Referer problem. Paying a second fetch for it burns the
+    resolver budget that the remaining mirrors need."""
+    seen: list[str | None] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        return httpx.Response(500, text="upstream boom")
+
+    respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://pdf-host.org/paper.pdf"></iframe></html>',
+        )
+    )
+    respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
+
+    assert pdf_bytes is None and pdf_url is None
+    assert seen == ["https://mirror1.org/10.1038/test"]
+
+
+@respx.mock
+async def test_scihub_retries_bare_when_referer_gets_bot_challenge(client):
+    """A challenge page is a refusal, not a failure — the header is still the
+    plausible cause, so the bare retry must still fire."""
+    seen: list[str | None] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        if request.headers.get("referer"):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<html>Just a moment...</html>",
+            )
+        return httpx.Response(200, content=b"%PDF-challenge-cleared")
+
+    respx.get(url__startswith="https://mirror1.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://pdf-host.org/paper.pdf"></iframe></html>',
+        )
+    )
+    respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
+
+    assert pdf_bytes == b"%PDF-challenge-cleared"
+    assert seen == ["https://mirror1.org/10.1038/test", None]
+
+
 class _FakeCamoufox(NamedTuple):
     """State captured by the fake browser; a bare tuple hid the third field."""
 
