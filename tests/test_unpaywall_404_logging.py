@@ -81,3 +81,87 @@ async def test_resolver_fetch_pdf_bytes_unpaywall_500_still_warns(client, caplog
     assert bytes_data is None
     assert source is None
     assert len(http_records(caplog, "WARNING")) == 1
+
+
+@respx.mock
+async def test_fetch_oa_pdf_url_prefers_url_for_pdf(client):
+    route = respx.get("https://api.unpaywall.org/v2/10.1000/x").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "is_oa": True,
+                "best_oa_location": {
+                    "url_for_pdf": "https://example.org/paper.pdf",
+                    "url": "https://example.org/landing",
+                },
+            },
+        )
+    )
+    provider = UnpaywallProvider(client, email="test@example.com")
+
+    assert route  # bound so a URL typo fails here rather than silently
+    assert (
+        await provider.fetch_oa_pdf_url(IdentifierMap(doi="10.1000/x"))
+        == "https://example.org/paper.pdf"
+    )
+    assert route.called
+
+
+@respx.mock
+async def test_fetch_oa_pdf_url_falls_back_to_landing_url(client):
+    respx.get("https://api.unpaywall.org/v2/10.1000/z").mock(
+        return_value=httpx.Response(
+            200,
+            json={"is_oa": True, "best_oa_location": {"url": "https://example.org/landing"}},
+        )
+    )
+    provider = UnpaywallProvider(client, email="test@example.com")
+
+    assert (
+        await provider.fetch_oa_pdf_url(IdentifierMap(doi="10.1000/z"))
+        == "https://example.org/landing"
+    )
+
+
+@respx.mock
+async def test_fetch_oa_pdf_url_none_when_closed_access(client):
+    respx.get("https://api.unpaywall.org/v2/10.1000/y").mock(
+        return_value=httpx.Response(200, json={"is_oa": False})
+    )
+    provider = UnpaywallProvider(client, email="test@example.com")
+
+    assert await provider.fetch_oa_pdf_url(IdentifierMap(doi="10.1000/y")) is None
+
+
+async def test_fetch_oa_pdf_url_none_without_email(client):
+    """No email means no Unpaywall request at all; respx is not even engaged."""
+    provider = UnpaywallProvider(client, email=None)
+
+    assert await provider.fetch_oa_pdf_url(IdentifierMap(doi="10.1000/x")) is None
+
+
+@respx.mock
+async def test_resolver_fetch_pdf_bytes_uses_unpaywall_provider(client):
+    """The resolver must go through the provider, not a second inline lookup."""
+    settings = Settings(unpaywall_email="test@example.com", enable_scihub=False)
+    resolver = WaterfallResolver(settings=settings, http_client=client)
+
+    lookup = respx.get("https://api.unpaywall.org/v2/10.1000/x").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "is_oa": True,
+                "best_oa_location": {"url_for_pdf": "https://example.org/paper.pdf"},
+            },
+        )
+    )
+    pdf = respx.get("https://example.org/paper.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-1.4 body")
+    )
+
+    bytes_data, source = await resolver.fetch_pdf_bytes(IdentifierMap(doi="10.1000/x"))
+
+    assert lookup.called
+    assert pdf.called
+    assert bytes_data == b"%PDF-1.4 body"
+    assert source == "unpaywall"
