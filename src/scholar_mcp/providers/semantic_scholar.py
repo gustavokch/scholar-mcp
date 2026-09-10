@@ -96,6 +96,7 @@ class SemanticScholarProvider:
                 f"{S2_RECS_BASE}/papers/forpaper/{quoted_id}",
                 params={"limit": min(max(1, limit), 100), "fields": PAPER_FIELDS},
                 headers=self._headers(),
+                ok_statuses={404},
             )
             if resp is None or resp.status_code != 200:
                 return []

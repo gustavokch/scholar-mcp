@@ -247,6 +247,18 @@ async def test_s2_recommendations(client):
 
 
 @respx.mock
+async def test_s2_fetch_recommendations_404_no_warning(client, caplog):
+    respx.get("https://api.semanticscholar.org/recommendations/v1/papers/forpaper/unknown_id").mock(
+        return_value=httpx.Response(404, text="Paper not found")
+    )
+    provider = SemanticScholarProvider(client)
+    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
+        recs = await provider.fetch_recommendations("unknown_id")
+    assert recs == []
+    assert len(caplog.records) == 0
+
+
+@respx.mock
 async def test_s2_search_post_filters_author_and_journal(client):
     """S2 graph search has no author/journal filter, so results must be filtered locally."""
     respx.get(url__startswith=f"{S2_BASE}/paper/search").mock(
