@@ -436,3 +436,29 @@ def test_score_candidates_full_pipeline_favors_high_quality_paper():
 
     assert ranked[0].pmid == "1"
     assert ranked[0].score > ranked[1].score
+
+
+def test_text_coverage_accepts_injected_tokenizer():
+    # A tokenizer that folds "ç" to "c" makes an accented title match a plain query term.
+    def folding_tokenizer(text):
+        if not text:
+            return []
+        return [t for t in text.lower().replace("ç", "c").split() if t]
+
+    terms = ["cancer"]
+    # Default tokenizer: "câncer" does not fold, so no match.
+    assert ScoringEngine.text_coverage(terms, "Câncer de mama", "") == 0.0
+    # Injected tokenizer folds the cedilla, so the title matches fully.
+    assert ScoringEngine.text_coverage(
+        terms, "Cancer de mama", "", tokenizer=folding_tokenizer
+    ) == pytest.approx(1.0)
+
+
+def test_text_coverage_default_tokenizer_unchanged():
+    # Regression: omitting `tokenizer` must behave exactly as before.
+    terms = ["metformin", "diabetes"]
+    assert ScoringEngine.text_coverage(terms, "Metformin for Diabetes", "") == pytest.approx(1.0)
+    assert ScoringEngine.text_coverage(terms, "", "Metformin and diabetes outcomes") == pytest.approx(0.5)
+    assert ScoringEngine.text_coverage(terms, "Unrelated title", "Unrelated abstract") == 0.0
+    assert ScoringEngine.text_coverage([], "Metformin", "Diabetes") == 0.0
+
