@@ -4,17 +4,31 @@ Discovery uses the BVS portal search API. Several of its behaviours are
 counter-intuitive and are load-bearing for this module:
 
 * ``fq`` is silently ignored, so every filter is composed into ``q``.
-* The default boolean operator is OR, so user tokens are joined with AND.
+* The default boolean operator is OR, so user tokens carry an explicit
+  operator inside their own group.
 * ``pais_publicacao`` is subfield-encoded and is neither exact-matchable
   nor wildcard-searchable, so Brazil scoping is ``la:"pt"`` server-side
   plus a client-side assertion on the parsed country.
 * Records are duplicated across indexing collections at roughly 2.1-2.3x,
   so the engine over-fetches and trims after deduplication.
+* The index does not strip Portuguese stopwords, so ``_usable_tokens``
+  does. Measured, ``(da)`` alone matches 25,635 records.
+* ``count=0`` returns HTTP 500 rather than a count-only response, and the
+  host is unreliable enough that the error paths here are live.
 
-Results are served in the order BVS returns them. No re-ranking is applied:
-``ScoringEngine`` does not fold accents or strip Portuguese stopwords, so
-blending it against a Solr ordering tuned for this corpus would degrade it.
-``BrazilGuideline.score`` is the seam for adding that later.
+Search runs in two stages. The strict stage ANDs the user tokens; if it
+yields no Brazilian records and two or more substantive tokens remain,
+the same tokens are retried ORed. Relaxation loosens the operator and
+nothing else -- both stages compose from one stopword-stripped token
+list, so a relaxed hit is never one the strict stage structurally could
+not have matched.
+
+Results are then re-ranked by ``rank_brazil_guidelines``. Accent folding
+and Portuguese stopword stripping are what made that viable: without
+them, blending a generic scorer against a Solr ordering tuned for this
+corpus degraded it. The BVS ordering is not discarded but retained as a
+weighted position prior, because a relaxed ``OR`` pool is far larger than
+the over-fetch window and the server still chooses which slice we see.
 """
 
 import logging
@@ -24,7 +38,11 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import BrazilGuideline
-from scholar_mcp.medical.ranking import PORTUGUESE_STOPWORDS, normalize_portuguese
+from scholar_mcp.medical.ranking import (
+    PORTUGUESE_STOPWORDS,
+    normalize_portuguese,
+    rank_brazil_guidelines,
+)
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -312,6 +330,37 @@ class BrazilMoHEngine:
         self.cache = cache
         self.settings = settings
 
+    async def _fetch_records(
+        self,
+        composed: str,
+        count: int,
+    ) -> tuple[list[BrazilGuideline], bool]:
+        """One BVS search request, parsed, deduplicated and Brazil-filtered.
+
+        Returns ``(records, errored)``. Extracted so the strict and relaxed
+        stages cannot drift apart in how they parse or filter.
+        """
+        resp = await self.http_client.get(
+            BVS_SEARCH_URL,
+            headers=BVS_HEADERS,
+            params={
+                "q": composed,
+                "output": "json",
+                "count": count,
+            },
+        )
+        if resp is None:
+            return [], True
+
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning("brazil_moh search returned non-JSON payload")
+            return [], True
+
+        records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
+        return [record for record in records if _is_brazilian(record)], False
+
     async def search_guidelines(
         self,
         query: str,
@@ -328,40 +377,42 @@ class BrazilMoHEngine:
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
         # filters alone would return arbitrary top-of-index documents dressed
-        # as matches for terms that were never searched.
-        if (query or "").strip() and not _usable_tokens(query):
+        # as matches for terms that were never searched. Stopword stripping
+        # widens this: "sobre a" now lands here rather than being searched.
+        tokens = _usable_tokens(query)
+        if (query or "").strip() and not tokens:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        # Keyed on the composed query, not the raw one: "dengue" and
-        # "  dengue  " compose identically and must share one cache row.
-        composed = _build_query(query, norm_collection)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed}"
+        # Keyed on the composed strict query, not the raw one: "dengue" and
+        # "  dengue  " compose identically and must share one cache row. The
+        # relaxed query never enters the key -- it derives from the same user
+        # query, so one user query keeps one row.
+        composed_strict = _build_query(query, norm_collection)
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed_strict}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        resp = await self.http_client.get(
-            BVS_SEARCH_URL,
-            headers=BVS_HEADERS,
-            params={
-                "q": composed,
-                "output": "json",
-                "count": count,
-            },
-        )
-        if resp is None:
+        records, errored = await self._fetch_records(composed_strict, count)
+        if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        try:
-            data = resp.json()
-        except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # The strict conjunction found nothing usable -- either no hits at all,
+        # or only records the Brazil assertion dropped. Retry the same tokens
+        # ORed. A single substantive token is skipped: the two groups would be
+        # byte-identical, so the request would be pure waste.
+        if not records and len(tokens) >= 2:
+            composed_relaxed = _build_query(query, norm_collection, operator="OR")
+            records, errored = await self._fetch_records(composed_relaxed, count)
+            if errored:
+                return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
-        records = [record for record in records if _is_brazilian(record)][:clamped]
+        # Rank, then slice. Slicing first would hand the ranker only `clamped`
+        # of the `count` over-fetched candidates and discard the rest in BVS
+        # order, defeating the over-fetch.
+        records = rank_brazil_guidelines(records, query)[:clamped]
 
         await self.cache.set(
             cache_key,

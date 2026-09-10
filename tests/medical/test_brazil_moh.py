@@ -321,6 +321,7 @@ def test_is_brazilian_keeps_brasil_and_drops_others():
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from scholar_mcp.config import Settings
@@ -987,6 +988,239 @@ async def test_search_cache_key_ignores_query_whitespace(tmp_path: Path):
         assert route.call_count == 1
         assert meta.cached is True
         assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert route.call_count == 2
+        first = str(route.calls[0].request.url)
+        second = str(route.calls[1].request.url)
+        assert "manejo+AND+dengue" in first or "manejo%20AND%20dengue" in first
+        assert "manejo+OR+dengue" in second or "manejo%20OR%20dengue" in second
+        assert len(records) == 1
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_relaxed_request_reuses_the_same_count(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
+            ]
+        )
+        await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert route.call_count == 2
+        # count=0 returns HTTP 500 from this endpoint, so the relaxed request
+        # must reuse the over-fetch count, never a count-only probe.
+        assert route.calls[0].request.url.params["count"] == "15"
+        assert route.calls[1].request.url.params["count"] == "15"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_relaxes_when_strict_hits_are_all_non_brazilian(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                # Portuguese but published elsewhere: dropped by _is_brazilian,
+                # so the record list is empty and relaxation must fire.
+                httpx.Response(
+                    200,
+                    json=_bvs_response([_bvs_doc(country="^iPortugal^ePortugal")]),
+                ),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+            ]
+        )
+        records, _ = await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert route.call_count == 2
+        assert len(records) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_does_not_relax_for_a_single_token(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+
+        # The strict and relaxed groups would be byte-identical.
+        assert route.call_count == 1
+        assert records == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_does_not_relax_when_stopwords_leave_one_token(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        # Two raw tokens, one substantive. The gate counts substantive tokens.
+        await engine.search_guidelines("manejo da", limit=5)
+
+        assert route.call_count == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_does_not_relax_when_strict_finds_a_brazilian_record(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])
+            )
+        )
+        records, _ = await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert route.call_count == 1
+        assert len(records) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_caches_relaxed_result_under_the_strict_key(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])),
+            ]
+        )
+        first, _ = await engine.search_guidelines("manejo dengue", limit=5)
+        second, meta = await engine.search_guidelines("manejo dengue", limit=5)
+
+        # One user query, one cache row: no third request.
+        assert route.call_count == 2
+        assert meta.cached is True
+        assert [g.record_id for g in second] == [g.record_id for g in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_score_survives_the_cache_round_trip(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(title="Manejo da dengue")])
+            )
+        )
+        fresh, _ = await engine.search_guidelines("manejo dengue", limit=5)
+        cached, meta = await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert meta.cached is True
+        assert fresh[0].score is not None
+        assert cached[0].score == pytest.approx(fresh[0].score)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_relaxed_request_failure_is_error_and_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, text="<html>Estamos em manutenção</html>"),
+            ]
+        )
+        records, meta = await engine.search_guidelines("manejo dengue", limit=5)
+
+        assert records == []
+        assert meta.error is True
+        composed = 'type:"non-conventional" AND la:"pt" AND (manejo AND dengue)'
+        _payload, cache_meta = await cache.get(f"brazil_moh_search:all:5:{composed}")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_stopword_only_query_makes_no_request(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        # Every token is a Portuguese stopword, so nothing selective remains.
+        # Composing filters alone would return arbitrary top-of-index
+        # documents dressed as matches for terms never searched.
+        records, meta = await engine.search_guidelines("sobre a", limit=5)
+
+        assert records == []
+        assert meta.error is False
+        assert route.call_count == 0
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_ranks_before_slicing(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # limit=2 over-fetches 6. The best match sits fourth in BVS order, so
+        # it only survives if ranking runs before the slice.
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=_bvs_response([
+                    _bvs_doc(record_id="biblio-0", title="Relatorio anual"),
+                    _bvs_doc(record_id="biblio-1", title="Nota tecnica"),
+                    _bvs_doc(record_id="biblio-2", title="Informe semanal"),
+                    _bvs_doc(record_id="biblio-3", title="Manejo clínico da dengue"),
+                ]),
+            )
+        )
+        records, _ = await engine.search_guidelines("manejo dengue", limit=2)
+
+        assert len(records) == 2
+        assert records[0].record_id == "biblio-3"
+        assert all(g.score is not None for g in records)
     finally:
         await cache.close()
         await http_client.aclose()
