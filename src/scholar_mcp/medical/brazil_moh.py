@@ -413,7 +413,13 @@ class BrazilMoHEngine:
         """
         if not _is_allowed_host(document_url):
             return "", False
-        headers = GOVBR_HEADERS if "gov.br" in document_url else BVS_HEADERS
+        # Pick headers by hostname, not by substring: "gov.br" appearing in
+        # a query string or path on a non-gov host must not match.
+        try:
+            host = (urllib.parse.urlparse(document_url or "").hostname or "").lower()
+        except ValueError:
+            host = ""
+        headers = GOVBR_HEADERS if host.endswith("gov.br") else BVS_HEADERS
         resp = await self.http_client.get(document_url, headers=headers)
         if resp is None:
             return "", True
