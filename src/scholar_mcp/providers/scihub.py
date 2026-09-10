@@ -89,15 +89,18 @@ class SciHubProvider(BaseProvider):
         self.settings = settings or Settings.load()
         self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
 
-    async def _get_pdf_bytes(self, pdf_url: str, referer: str | None) -> bytes | None:
+    async def _get_pdf_bytes(
+        self, pdf_url: str, referer: str | None, *, allow_bare_retry: bool = True
+    ) -> bytes | None:
         """Fetch raw PDF bytes, preferring a landing-page ``Referer``.
 
         Hosts such as sci.bban.top require the header; others use hotlink
         protection that rejects a foreign one while accepting a bare request.
         Only a refusal -- 401/403, or a 200 bot-challenge page -- gets one retry
-        without the header. A request that never completed is not a Referer
-        problem, and ``get`` has already spent its own retry ladder on it, so it
-        falls through to the next mirror instead.
+        without the header, and only when ``allow_bare_retry`` is set. A request
+        that never completed is not a Referer problem, and ``get`` has already
+        spent its own retry ladder on it, so it falls through to the next mirror
+        instead.
         """
         if not referer:
             return await self.http_client.get_bytes(pdf_url)
@@ -112,6 +115,8 @@ class SciHubProvider(BaseProvider):
         if resp.status_code in _REFERER_REJECTED_STATUSES or self.http_client.is_unexpected_html(
             resp
         ):
+            if not allow_bare_retry:
+                return None
             return await self.http_client.get_bytes(pdf_url)
         return resp.content
 
@@ -144,16 +149,25 @@ class SciHubProvider(BaseProvider):
                             continue
 
                         pdf_headers = {"Referer": page_referer}
+                        browser_refused = False
                         try:
-                            resp = await page.request.get(pdf_url, headers=pdf_headers, timeout=15000)
+                            resp = await page.request.get(
+                                pdf_url, headers=pdf_headers, timeout=15000
+                            )
                             if resp.status == 200:
                                 b = await resp.body()
                                 if b and b.startswith(b"%PDF-"):
                                     return b, pdf_url
+                            else:
+                                # A real browser session was already refused; a bare
+                                # httpx request has strictly less to offer than it did.
+                                browser_refused = True
                         except Exception:
                             pass
 
-                        pdf_bytes = await self._get_pdf_bytes(pdf_url, page_referer)
+                        pdf_bytes = await self._get_pdf_bytes(
+                            pdf_url, page_referer, allow_bare_retry=not browser_refused
+                        )
                         if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                             return pdf_bytes, pdf_url
                     except Exception:

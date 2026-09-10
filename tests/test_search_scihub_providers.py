@@ -327,7 +327,11 @@ class _FakeCamoufox(NamedTuple):
 
 
 def _install_fake_camoufox(
-    monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-fake-data", final_url=None
+    monkeypatch,
+    rendered_html="",
+    pdf_bytes=b"%PDF-1.5-fake-data",
+    final_url=None,
+    browser_status=200,
 ):
     import sys
     import types
@@ -337,7 +341,7 @@ def _install_fake_camoufox(
     captured_headers: list[dict] = []
 
     class _FakeResponse:
-        status = 200
+        status = browser_status
 
         async def body(self):
             return pdf_bytes
@@ -476,6 +480,32 @@ async def test_scihub_camoufox_uses_final_page_url_as_referer(client, monkeypatc
     assert pdf_bytes == b"%PDF-1.5-fake-data"
     assert pdf_url == "https://landed.org/10.1038/paper.pdf"
     assert fake.headers[0].get("Referer") == "https://landed.org/10.1038/test"
+
+
+@respx.mock
+async def test_scihub_camoufox_falls_through_to_http_without_bare_retry(client, monkeypatch):
+    """When the browser fetch is refused, the httpx fall-through still sends the
+    Referer, but must not spend a third, bare request: a real browser session was
+    already turned away, so the barest request has strictly less to offer."""
+    respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
+    seen: list[str | None] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("referer"))
+        return httpx.Response(403, text="<html>denied</html>")
+
+    respx.get("https://sci-pdf.org/paper.pdf").mock(side_effect=_handler)
+    rendered_html = (
+        '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
+    )
+    _install_fake_camoufox(monkeypatch, rendered_html=rendered_html, browser_status=403)
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
+
+    assert pdf_bytes is None and pdf_url is None
+    assert seen == ["https://mirror1.org/10.1038/test"]
 
 
 @respx.mock
