@@ -107,7 +107,7 @@ class WaterfallResolver:
                 resp = await self.http_client.get(
                     f"{UNPAYWALL_BASE}/{ids.doi.strip()}",
                     params={"email": self.settings.unpaywall_email},
-                    ok_statuses={404},
+                    quiet_statuses={404},
                 )
                 if resp is not None and resp.status_code == 200:
                     data = resp.json()
