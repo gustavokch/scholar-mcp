@@ -130,7 +130,10 @@ def test_build_query_strips_solr_special_characters():
     from scholar_mcp.medical.brazil_moh import _build_query
 
     built = _build_query('a "quote" (b) [c] && d || e', "all")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (a AND quote AND b AND c AND d AND e)'
+    # "a" and "e" are Portuguese stopwords and are dropped. The single-char
+    # "b", "c", "d" are not Portuguese words, so they survive -- confirming
+    # the length floor is not applied to outbound tokens.
+    assert built == 'type:"non-conventional" AND la:"pt" AND (quote AND b AND c AND d)'
 
 
 def test_build_query_drops_bare_boolean_words():
@@ -144,6 +147,76 @@ def test_build_query_all_tokens_reserved_yields_filters_only():
     from scholar_mcp.medical.brazil_moh import _build_query
 
     assert _build_query("AND OR NOT", "all") == 'type:"non-conventional" AND la:"pt"'
+
+
+def test_usable_tokens_strips_portuguese_stopwords():
+    from scholar_mcp.medical.brazil_moh import _usable_tokens
+
+    assert _usable_tokens("manejo da dengue") == ["manejo", "dengue"]
+    assert _usable_tokens("tratamento de tuberculose para adultos") == [
+        "tratamento",
+        "tuberculose",
+        "adultos",
+    ]
+
+
+def test_usable_tokens_strips_accented_stopword_but_keeps_accented_terms():
+    from scholar_mcp.medical.brazil_moh import _usable_tokens
+
+    # "à" folds to the stopword "a" and is dropped. "atenção" is substantive
+    # and must survive WITH its diacritics -- BVS handles Portuguese natively,
+    # so folding is client-side only.
+    assert _usable_tokens("atenção à saúde") == ["atenção", "saúde"]
+
+
+def test_usable_tokens_keeps_single_char_non_stopwords():
+    from scholar_mcp.medical.brazil_moh import _usable_tokens
+
+    # "a" and "e" are Portuguese function words; "b" and "c" are not. The
+    # >= 2 length floor from tokenize_portuguese is deliberately NOT applied
+    # here: "b" is genuinely selective in this index (hepatite AND b retains
+    # 71% of bare hepatite, while hepatite AND a retains 90%).
+    assert _usable_tokens("hepatite b") == ["hepatite", "b"]
+    assert _usable_tokens("hepatite a") == ["hepatite"]
+
+
+def test_usable_tokens_all_stopwords_yields_nothing():
+    from scholar_mcp.medical.brazil_moh import _usable_tokens
+
+    assert _usable_tokens("sobre a") == []
+
+
+def test_build_query_strips_stopwords_in_and_mode():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    built = _build_query("manejo da dengue", "all")
+    assert built == 'type:"non-conventional" AND la:"pt" AND (manejo AND dengue)'
+
+
+def test_build_query_strips_stopwords_in_or_mode():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    built = _build_query("manejo da dengue", "all", operator="OR")
+    assert built == 'type:"non-conventional" AND la:"pt" AND (manejo OR dengue)'
+
+
+def test_build_query_or_operator_leaves_base_filters_anded():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    # Only the user-token group relaxes. The filters stay conjunctive, or the
+    # query would match non-Portuguese and conventional literature.
+    built = _build_query("manejo dengue", "brisa", operator="OR")
+    assert built == (
+        'type:"non-conventional" AND la:"pt" AND db:"BRISA" AND (manejo OR dengue)'
+    )
+
+
+def test_build_query_defaults_to_and():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    assert _build_query("manejo dengue", "all") == _build_query(
+        "manejo dengue", "all", operator="AND"
+    )
 
 
 def test_extract_docs_reads_nested_envelope():

@@ -24,6 +24,7 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.medical.ranking import PORTUGUESE_STOPWORDS, normalize_portuguese
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -141,29 +142,63 @@ _SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
 def _usable_tokens(query: str) -> list[str]:
     """User tokens that survive sanitization, in order.
 
-    A token reduced to nothing by ``_sanitize_token``, or reserved as a
-    boolean word, contributes no matching text and is dropped.
+    A token reduced to nothing by ``_sanitize_token``, reserved as a boolean
+    word, or serving only as a Portuguese function word contributes no useful
+    matching text and is dropped.
+
+    Portuguese stopwords are stripped because this index does not strip them
+    itself: measured against the live endpoint, ``(da)`` alone matches 25,635
+    records and ``(a)`` 24,779. Left in, a stopword inflates a relaxed ``OR``
+    pool by roughly 10x (2,538 -> 25,759 for one added token) against an
+    over-fetch of at most ``MAX_PAGE_SIZE`` documents, so the topical matches
+    never get retrieved. In the strict ``AND`` path the effect is narrower --
+    the token is near-universal in Portuguese prose, so it usually changes
+    nothing -- but it still discards short-title records carrying no abstract,
+    which is the class this module most wants to surface.
+
+    Stripping happens here rather than in ``_build_query`` so that both
+    operators and the relaxation gate see one identical token list. Stripping
+    in only one stage would let the relaxed query match records the strict
+    query never could, for a reason unrelated to the operator.
+
+    Membership is tested on the accent-folded form while the original token is
+    emitted: ``PORTUGUESE_STOPWORDS`` is stored folded, so the raw token "à"
+    would otherwise escape the set, and BVS handles Portuguese diacritics
+    natively so there is no reason to strip them from the query.
+
+    The ``len >= 2`` floor used by ``tokenize_portuguese`` is deliberately not
+    applied. A single character that is not a Portuguese word is selective
+    here -- ``hepatite AND b`` retains 71% of bare ``hepatite`` -- while the
+    single-character function words are already covered by the stopword set.
     """
-    return [
-        cleaned
-        for token in (query or "").split()
-        if (cleaned := _sanitize_token(token))
-        and cleaned.lower() not in _SOLR_BOOLEAN_WORDS
-    ]
+    tokens: list[str] = []
+    for token in (query or "").split():
+        cleaned = _sanitize_token(token)
+        if not cleaned:
+            continue
+        folded = normalize_portuguese(cleaned)
+        if folded in _SOLR_BOOLEAN_WORDS or folded in PORTUGUESE_STOPWORDS:
+            continue
+        tokens.append(cleaned)
+    return tokens
 
 
-def _build_query(query: str, collection: str) -> str:
+def _build_query(query: str, collection: str, operator: str = "AND") -> str:
     """Compose every filter into ``q``.
 
-    ``fq`` is silently ignored by this API, and the default operator is OR,
-    so user tokens are explicitly ANDed inside their own group.
+    ``fq`` is silently ignored by this API, and the default operator is OR, so
+    the user tokens get an explicit operator inside their own group.
+
+    ``operator`` relaxes only that group. ``BASE_FILTER`` and ``BRISA_FILTER``
+    stay conjunctive regardless: an ``OR`` across them would match
+    conventional and non-Portuguese literature.
     """
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
     tokens = _usable_tokens(query)
     if tokens:
-        clauses.append("(" + " AND ".join(tokens) + ")")
+        clauses.append("(" + f" {operator} ".join(tokens) + ")")
     return " AND ".join(clauses)
 
 
