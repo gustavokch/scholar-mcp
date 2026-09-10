@@ -315,6 +315,22 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", pdf_bytes=b"%PDF-1.5-f
     return attempts, captured_urls, captured_headers
 
 
+def test_landing_referer_falls_back_for_non_http_urls():
+    """`page.url` is "about:blank" when navigation lands nowhere; that must not
+    become a Referer, and must not become the base for relative PDF paths."""
+    from scholar_mcp.providers.scihub import _landing_referer
+
+    assert _landing_referer("https://mirror1.org/10.1038/test", "https://m/x") == (
+        "https://mirror1.org/10.1038/test"
+    )
+    assert _landing_referer("http://mirror1.org/10.1038/test", "https://m/x") == (
+        "http://mirror1.org/10.1038/test"
+    )
+    assert _landing_referer("about:blank", "https://m/x") == "https://m/x"
+    assert _landing_referer("", "https://m/x") == "https://m/x"
+    assert _landing_referer(None, "https://m/x") == "https://m/x"
+
+
 def test_scihub_extract_pdf_url_resolves_relative_path():
     html = '<html><iframe src="/storage/10.1038/test.pdf#view=fitH"></iframe></html>'
     res = _extract_pdf_url(html, base_url="https://sci-hub.se/10.1038/test")

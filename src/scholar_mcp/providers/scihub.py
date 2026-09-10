@@ -25,6 +25,18 @@ def _normalize_pdf_url(url: str, base_url: str | None = None) -> str:
     return url
 
 
+def _landing_referer(page_url: str | None, fallback: str) -> str:
+    """URL to send as ``Referer``, or ``fallback`` when ``page_url`` is unusable.
+
+    ``page.url`` is ``"about:blank"`` when navigation landed nowhere, and that
+    value would both send a meaningless header and mis-resolve a relative PDF
+    path through ``urljoin``.
+    """
+    if page_url and page_url.startswith(("http://", "https://")):
+        return page_url
+    return fallback
+
+
 def _extract_pdf_url(html: str, base_url: str | None = None) -> str | None:
     """Extract PDF URL from Sci-Hub HTML response."""
     if not html:
@@ -109,7 +121,7 @@ class SciHubProvider(BaseProvider):
                             timeout=15000,
                         )
                         content = await page.content()
-                        page_referer = page.url or mirror_url
+                        page_referer = _landing_referer(page.url, mirror_url)
                         pdf_url = _extract_pdf_url(content, base_url=page_referer)
                         if not pdf_url:
                             continue
@@ -154,7 +166,7 @@ class SciHubProvider(BaseProvider):
                 if resp is None or resp.status_code != 200 or not resp.text:
                     continue
 
-                final_page_url = str(resp.url) if getattr(resp, "url", None) else mirror_url
+                final_page_url = _landing_referer(str(resp.url), mirror_url)
                 pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
                 if not pdf_url:
                     continue
