@@ -515,6 +515,13 @@ def test_is_allowed_host_accepts_bvs_hosts_only():
     assert _is_allowed_host("https://www.sciencedirect.com/x") is False
     assert _is_allowed_host("https://evil.example.com/fi-admin.bvsalud.org") is False
     assert _is_allowed_host("") is False
+    # gov.br PCDT PDFs may be served from any *.gov.br static host; the
+    # catch-all is deliberate and its boundary is pinned here.
+    assert _is_allowed_host("https://www.gov.br/saude/pt-br/assuntos/pcdt/a/x.pdf") is True
+    assert _is_allowed_host("https://bvsms.saude.gov.br/pcdt.pdf") is True
+    assert _is_allowed_host("https://gov.br.evil.com/x") is False
+    assert _is_allowed_host("https://notgov.br/x") is False
+    assert _is_allowed_host("https://saude.gov.br.evil.com/x") is False
 
 
 @respx.mock

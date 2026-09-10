@@ -236,6 +236,12 @@ def _is_brazilian(record: BrazilGuideline) -> bool:
 
 def is_allowed_bvs_host(url: str) -> bool:
     """True only for the BVS and Brazilian MoH hosts this module is permitted to fetch."""
+    # The *.gov.br catch-all is deliberate: PCDT PDFs are served from
+    # www.gov.br, bvsms.saude.gov.br, and static asset hosts that change
+    # without notice. gov.br is a state-run registry, so the catch-all
+    # stays inside Brazilian government infrastructure. Lookalike hosts
+    # (gov.br.evil.com) fail the endswith check; the boundary is pinned
+    # by test_is_allowed_host_accepts_bvs_hosts_only.
     try:
         host = (urllib.parse.urlparse(url or "").hostname or "").lower()
     except ValueError:
