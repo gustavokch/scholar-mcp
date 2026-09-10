@@ -202,7 +202,7 @@ def rank_brazil_guidelines(
         tokenizer=tokenize_portuguese,
         text_fields=lambda g: (
             f"{g.title or ''} {g.title_en or ''}",
-            " ".join([g.abstract or "", *g.mesh_subjects]),
+            " ".join([g.abstract or "", *(g.mesh_subjects or [])]),
         ),
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,

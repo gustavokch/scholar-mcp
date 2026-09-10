@@ -153,7 +153,6 @@ def test_portuguese_stopwords_are_stored_accent_folded():
         assert normalize_portuguese(word) == word
 
 
-
 def test_full_title_match_reaches_max_relevance():
     query = "metformin diabetes"
     articles = [_article("Metformin diabetes", year="2026")]

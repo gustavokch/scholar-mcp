@@ -34,7 +34,7 @@ the over-fetch window and the server still chooses which slice we see.
 import logging
 import re
 import urllib.parse
-from typing import Any
+from typing import Any, Literal
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import BrazilGuideline
@@ -201,7 +201,7 @@ def _usable_tokens(query: str) -> list[str]:
     return tokens
 
 
-def _build_query(query: str, collection: str, operator: str = "AND") -> str:
+def _build_query(query: str, collection: str, operator: Literal["AND", "OR"] = "AND") -> str:
     """Compose every filter into ``q``.
 
     ``fq`` is silently ignored by this API, and the default operator is OR, so
@@ -407,6 +407,7 @@ class BrazilMoHEngine:
             composed_relaxed = _build_query(query, norm_collection, operator="OR")
             records, errored = await self._fetch_records(composed_relaxed, count)
             if errored:
+                logger.warning("brazil_moh relaxed search failed for query %r", query)
                 return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Rank, then slice. Slicing first would hand the ranker only `clamped`

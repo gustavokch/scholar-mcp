@@ -439,18 +439,18 @@ def test_score_candidates_full_pipeline_favors_high_quality_paper():
 
 
 def test_text_coverage_accepts_injected_tokenizer():
-    # A tokenizer that folds "ç" to "c" makes an accented title match a plain query term.
+    # A tokenizer that folds "â" to "a" makes an accented title match a plain query term.
     def folding_tokenizer(text):
         if not text:
             return []
-        return [t for t in text.lower().replace("ç", "c").split() if t]
+        return [t for t in text.lower().replace("â", "a").split() if t]
 
     terms = ["cancer"]
     # Default tokenizer: "câncer" does not fold, so no match.
     assert ScoringEngine.text_coverage(terms, "Câncer de mama", "") == 0.0
-    # Injected tokenizer folds the cedilla, so the title matches fully.
+    # Injected tokenizer folds the circumflex, so the title matches fully.
     assert ScoringEngine.text_coverage(
-        terms, "Cancer de mama", "", tokenizer=folding_tokenizer
+        terms, "Câncer de mama", "", tokenizer=folding_tokenizer
     ) == pytest.approx(1.0)
 
 
