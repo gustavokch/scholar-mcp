@@ -34,7 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-- **Sci-Hub Referer header**: PDF fetches now send the landing mirror page as `Referer`, which upstream PDF hosts (for example `sci.bban.top`) require, and retry once without the header when hotlink protection rejects it (PR #25).
+- **Sci-Hub Referer header**: PDF fetches now send the landing mirror page as `Referer`, which upstream PDF hosts (for example `sci.bban.top`) require. When the host refuses that header — a 401/403 or a bot-challenge page — the fetch is retried once without it, for mirrors whose hotlink protection accepts only bare requests. A request that fails outright (timeout, 5xx, transport error) is not retried and falls through to the next mirror instead (PR #25).
 - **NCBI credential preservation**: `AsyncHttpClient._inject_credentials` now merges caller-provided `params` into the URL before credential injection so `httpx` does not overwrite authentication query parameters when `params` is supplied (PR #18).
 - **ClinicalTrials.gov query term limit**: Capped `query.term` at 10 terms (`CT_MAX_QUERY_TERMS`) to prevent CT.gov Essie parser HTTP 400 "Too complicated query" failures on complex natural-language queries (PR #15).
 - **PubMed metadata parsing DOI collision**: Fixed `PubMedProvider.fetch_abstract` to skip `ArticleId` tags nested within `ReferenceList`/`Reference` blocks, preventing cited articles' DOIs from overwriting the primary paper's DOI (PR #12).
