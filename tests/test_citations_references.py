@@ -1,6 +1,7 @@
 import httpx
 import pytest
 import respx
+from log_helpers import HTTP_LOGGER, assert_no_http_warnings, http_records
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap
@@ -10,6 +11,8 @@ from scholar_mcp.utils.http import AsyncHttpClient
 
 EPMC_REF = "https://www.ebi.ac.uk/europepmc/webservices/rest/MED/12345/references"
 CROSSREF_WORKS = "https://api.crossref.org/works/10.1038/nature123"
+MISSING_DOI = "10.1093/humupd/dmab061"
+CROSSREF_MISSING = f"https://api.crossref.org/works/{MISSING_DOI}"
 
 
 @pytest.fixture
@@ -318,23 +321,56 @@ async def test_europe_pmc_references_and_citations_doi_fallback(client):
 
 @respx.mock
 async def test_crossref_fetch_metadata_404_no_warning(client, caplog):
-    respx.get("https://api.crossref.org/works/10.1093/humupd/dmab061").mock(
+    route = respx.get(CROSSREF_MISSING).mock(
         return_value=httpx.Response(404, text="Resource not found.")
     )
     provider = CrossRefProvider(client)
-    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
-        meta = await provider.fetch_metadata("10.1093/humupd/dmab061")
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        meta = await provider.fetch_metadata(MISSING_DOI)
+
+    assert route.called
     assert meta is None
-    assert len(caplog.records) == 0
+    assert_no_http_warnings(caplog)
+
+
+@respx.mock
+async def test_crossref_fetch_metadata_500_still_warns(client, caplog):
+    """Only 404 is an expected miss; a server error must stay loud."""
+    route = respx.get(CROSSREF_MISSING).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    provider = CrossRefProvider(client)
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        meta = await provider.fetch_metadata(MISSING_DOI)
+
+    assert route.called
+    assert meta is None
+    assert len(http_records(caplog, "WARNING")) == 1
 
 
 @respx.mock
 async def test_crossref_fetch_references_404_no_warning(client, caplog):
-    respx.get("https://api.crossref.org/works/10.1093/humupd/dmab061").mock(
+    route = respx.get(CROSSREF_MISSING).mock(
         return_value=httpx.Response(404, text="Resource not found.")
     )
     provider = CrossRefProvider(client)
-    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
-        refs = await provider.fetch_references("10.1093/humupd/dmab061")
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        refs = await provider.fetch_references(MISSING_DOI)
+
+    assert route.called
     assert refs == []
-    assert len(caplog.records) == 0
+    assert_no_http_warnings(caplog)
+
+
+@respx.mock
+async def test_crossref_fetch_references_500_still_warns(client, caplog):
+    route = respx.get(CROSSREF_MISSING).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    provider = CrossRefProvider(client)
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        refs = await provider.fetch_references(MISSING_DOI)
+
+    assert route.called
+    assert refs == []
+    assert len(http_records(caplog, "WARNING")) == 1

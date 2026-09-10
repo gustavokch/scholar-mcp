@@ -1,6 +1,7 @@
 import httpx
 import pytest
 import respx
+from log_helpers import HTTP_LOGGER, assert_no_http_warnings, http_records
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap
@@ -9,6 +10,9 @@ from scholar_mcp.providers.semantic_scholar import S2_BASE, S2_RECS_BASE, Semant
 from scholar_mcp.utils.http import AsyncHttpClient
 
 WORK_URL = f"{OPENALEX_BASE}/works/https://doi.org/10.1038/nature123"
+MISSING_DOI = "10.1093/humupd/dmab061"
+OPENALEX_MISSING = f"{OPENALEX_BASE}/works/https://doi.org/10.1093%2Fhumupd%2Fdmab061"
+S2_RECS_MISSING = f"{S2_RECS_BASE}/papers/forpaper/unknown_id"
 
 WORK_JSON = {
     "id": "https://openalex.org/W1",
@@ -88,16 +92,31 @@ async def test_openalex_handles_missing_work(client):
 
 @respx.mock
 async def test_openalex_get_work_404_no_warning(client, caplog):
-    respx.get(
-        "https://api.openalex.org/works/https://doi.org/10.1093%2Fhumupd%2Fdmab061"
-    ).mock(
+    route = respx.get(OPENALEX_MISSING).mock(
         return_value=httpx.Response(404, text="Not Found")
     )
     provider = OpenAlexProvider(client)
-    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
-        meta = await provider.fetch_metadata("10.1093/humupd/dmab061")
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        meta = await provider.fetch_metadata(MISSING_DOI)
+
+    assert route.called
     assert meta is None
-    assert len(caplog.records) == 0
+    assert_no_http_warnings(caplog)
+
+
+@respx.mock
+async def test_openalex_get_work_500_still_warns(client, caplog):
+    """Only 404 is an expected miss; a server error must stay loud."""
+    route = respx.get(OPENALEX_MISSING).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    provider = OpenAlexProvider(client)
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        meta = await provider.fetch_metadata(MISSING_DOI)
+
+    assert route.called
+    assert meta is None
+    assert len(http_records(caplog, "WARNING")) == 1
 
 
 @respx.mock
@@ -248,14 +267,31 @@ async def test_s2_recommendations(client):
 
 @respx.mock
 async def test_s2_fetch_recommendations_404_no_warning(client, caplog):
-    respx.get("https://api.semanticscholar.org/recommendations/v1/papers/forpaper/unknown_id").mock(
+    route = respx.get(S2_RECS_MISSING).mock(
         return_value=httpx.Response(404, text="Paper not found")
     )
     provider = SemanticScholarProvider(client)
-    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
         recs = await provider.fetch_recommendations("unknown_id")
+
+    assert route.called
     assert recs == []
-    assert len(caplog.records) == 0
+    assert_no_http_warnings(caplog)
+
+
+@respx.mock
+async def test_s2_fetch_recommendations_500_still_warns(client, caplog):
+    """Only 404 is an expected miss; a server error must stay loud."""
+    route = respx.get(S2_RECS_MISSING).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    provider = SemanticScholarProvider(client)
+    with caplog.at_level("WARNING", logger=HTTP_LOGGER):
+        recs = await provider.fetch_recommendations("unknown_id")
+
+    assert route.called
+    assert recs == []
+    assert len(http_records(caplog, "WARNING")) == 1
 
 
 @respx.mock
