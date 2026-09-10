@@ -87,6 +87,20 @@ async def test_openalex_handles_missing_work(client):
 
 
 @respx.mock
+async def test_openalex_get_work_404_no_warning(client, caplog):
+    respx.get(
+        "https://api.openalex.org/works/https://doi.org/10.1093%2Fhumupd%2Fdmab061"
+    ).mock(
+        return_value=httpx.Response(404, text="Not Found")
+    )
+    provider = OpenAlexProvider(client)
+    with caplog.at_level("WARNING", logger="scholar_mcp.utils.http"):
+        meta = await provider.fetch_metadata("10.1093/humupd/dmab061")
+    assert meta is None
+    assert len(caplog.records) == 0
+
+
+@respx.mock
 async def test_openalex_enrichment_keeps_existing_oa_url():
     """A closed OpenAlex record must not erase an oa_url found by an earlier provider."""
     from unittest.mock import AsyncMock
