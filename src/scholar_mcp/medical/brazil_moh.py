@@ -238,7 +238,6 @@ def _build_query(
             token_clause = f" {operator} ".join(tokens)
         clauses.append(f"({token_clause})")
     return " AND ".join(clauses)
-    return " AND ".join(clauses)
 
 
 def _extract_docs(data: Any) -> list[dict[str, Any]]:
