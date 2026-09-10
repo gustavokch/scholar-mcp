@@ -368,8 +368,11 @@ class AsyncHttpClient:
         url: str,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
+        quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> bytes | None:
-        resp = await self.get(url, headers=headers, params=params)
+        resp = await self.get(
+            url, headers=headers, params=params, quiet_statuses=quiet_statuses
+        )
         if resp is not None and resp.status_code == 200:
             if not self._is_unexpected_html(resp):
                 return resp.content

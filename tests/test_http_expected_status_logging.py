@@ -110,3 +110,31 @@ async def test_no_quiet_statuses_keeps_warning_on_404(client, caplog):
     assert route.called
     assert resp is None
     assert len(_http_records(caplog, "WARNING")) == 1
+
+
+@respx.mock
+async def test_get_bytes_forwards_quiet_statuses(client, caplog):
+    """A stale open-access URL 404s routinely; the caller must be able to say so."""
+    route = respx.get("https://example.org/gone.pdf").mock(
+        return_value=httpx.Response(404, text="Not Found")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        data = await client.get_bytes("https://example.org/gone.pdf", quiet_statuses={404})
+
+    assert route.called
+    assert data is None
+    assert _http_records(caplog, "WARNING") == []
+    assert len(_http_records(caplog, "DEBUG")) == 1
+
+
+@respx.mock
+async def test_get_bytes_without_quiet_statuses_still_warns(client, caplog):
+    route = respx.get("https://example.org/gone2.pdf").mock(
+        return_value=httpx.Response(404, text="Not Found")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        data = await client.get_bytes("https://example.org/gone2.pdf")
+
+    assert route.called
+    assert data is None
+    assert len(_http_records(caplog, "WARNING")) == 1
