@@ -186,6 +186,33 @@ async def test_refresh_partial_crawl_not_cached(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pcdt_get_guideline_slug_case_insensitive(tmp_path):
+    """Slug lookup must be case-insensitive in both directions."""
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings)
+    try:
+        # Uppercase-slug catalog item, lowercase input.
+        engine._memory_catalog = {
+            "pcdt-X": {
+                "record_id": "pcdt-X",
+                "slug": "X",
+                "title": "X Condition",
+                "download_url": "https://www.gov.br/saude/pt-br/assuntos/pcdt/x/X/@@download/file",
+            }
+        }
+        item = await engine.get_guideline("x")
+        assert item is not None and item.record_id == "pcdt-X"
+
+        # Mixed-case input against the lowercase seed catalog.
+        engine._memory_catalog = None
+        item2 = await engine.get_guideline("Hanseniase")
+        assert item2 is not None and item2.record_id == "pcdt-hanseniase"
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_brazil_moh_engine_pcdt_integration(tmp_path, monkeypatch):
     import httpx
     import respx

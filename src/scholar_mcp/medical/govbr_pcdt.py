@@ -381,9 +381,10 @@ class GovBrPCDTEngine:
         if prefixed_id in catalog:
             return _dict_to_guideline(catalog[prefixed_id])
 
-        # Search by slug
+        # Search by slug (case-insensitive: gov.br slugs may carry case
+        # that the lowercased input no longer has).
         for item in catalog.values():
-            if item.get("slug") == slug:
+            if item.get("slug", "").lower() == slug:
                 return _dict_to_guideline(item)
 
         return None
