@@ -141,6 +141,14 @@ def _derive_fulltext_id(url: str) -> str:
     return match.group(1) if match else ""
 
 
+_FIELD_PREFIX_RE = re.compile(r"^(?:[a-zA-Z_]+:)+")
+_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
+
+# Boolean words are composed by this module itself; a user token of "AND"
+# would otherwise surface as ``AND AND AND`` in the composed query.
+_SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
+
+
 def _sanitize_token(token: str) -> str:
     """Strip Solr query syntax from one user token.
 
@@ -149,15 +157,13 @@ def _sanitize_token(token: str) -> str:
     ``+`` ``!``) or a leading ``+``/``-`` operator would corrupt the query
     rather than match text. Characters are removed, not escaped, because the
     endpoint's escaping rules differ from Solr's own.
+
+    Caller-supplied field prefixes (e.g. ``ti:dengue``) are stripped before
+    special character removal so colon removal does not concatenate them into
+    ``tidengue``. Field scoping is the engine's decision, not the caller's.
     """
-    return _SOLR_SPECIALS_RE.sub("", token).lstrip("+-")
-
-
-_SOLR_SPECIALS_RE = re.compile(r'[\[\]{}()^"~*?:\\/+!&|]')
-
-# Boolean words are composed by this module itself; a user token of "AND"
-# would otherwise surface as ``AND AND AND`` in the composed query.
-_SOLR_BOOLEAN_WORDS = frozenset({"and", "or", "not", "to"})
+    stripped = _FIELD_PREFIX_RE.sub("", token.lstrip("+-"))
+    return _SOLR_SPECIALS_RE.sub("", stripped).lstrip("+-")
 
 
 def _usable_tokens(query: str) -> list[str]:
@@ -204,11 +210,18 @@ def _usable_tokens(query: str) -> list[str]:
     return tokens
 
 
-def _build_query(query: str, collection: str, operator: Literal["AND", "OR"] = "AND") -> str:
+def _build_query(
+    query: str,
+    collection: str,
+    operator: Literal["AND", "OR"] = "AND",
+    title_scoped: bool = False,
+) -> str:
     """Compose every filter into ``q``.
 
     ``fq`` is silently ignored by this API, and the default operator is OR, so
     the user tokens get an explicit operator inside their own group.
+    When ``title_scoped`` is True, each user token is scoped to the ``ti:``
+    field so title matching takes precedence over full-text matches.
 
     ``operator`` relaxes only that group. ``BASE_FILTER`` and ``BRISA_FILTER``
     stay conjunctive regardless: an ``OR`` across them would match
@@ -219,7 +232,11 @@ def _build_query(query: str, collection: str, operator: Literal["AND", "OR"] = "
         clauses.append(BRISA_FILTER)
     tokens = _usable_tokens(query)
     if tokens:
-        clauses.append("(" + f" {operator} ".join(tokens) + ")")
+        if title_scoped:
+            token_clause = f" {operator} ".join(f"ti:{t}" for t in tokens)
+        else:
+            token_clause = f" {operator} ".join(tokens)
+        clauses.append(f"({token_clause})")
     return " AND ".join(clauses)
 
 
@@ -401,12 +418,12 @@ class BrazilMoHEngine:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        # Keyed on the composed strict query, not the raw one: "dengue" and
-        # "  dengue  " compose identically and must share one cache row. The
-        # relaxed query never enters the key -- it derives from the same user
-        # query, so one user query keeps one row.
-        composed_strict = _build_query(query, norm_collection)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{composed_strict}"
+        # Keyed on the composed strict title-scoped query, not the raw one:
+        # "dengue" and "  dengue  " compose identically and must share one
+        # cache row. The fallback and relaxed queries never enter the key --
+        # they derive from the same user query, so one user query keeps one row.
+        title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
+        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{title_composed}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -415,24 +432,35 @@ class BrazilMoHEngine:
         pcdt_records, pcdt_meta = await self.pcdt_engine.search(query, limit=clamped)
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        records, errored = await self._fetch_records(composed_strict, count)
+        records, errored = await self._fetch_records(title_composed, count)
         if errored:
             if pcdt_records:
                 return pcdt_records, pcdt_meta
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        # Fall back to all-field query when title-scoped query yields zero Brazilian records
+        if not records and tokens:
+            all_composed = _build_query(query, norm_collection, operator="AND", title_scoped=False)
+            fallback_records, fallback_errored = await self._fetch_records(all_composed, count)
+            if fallback_errored:
+                if pcdt_records:
+                    return pcdt_records, pcdt_meta
+                return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            records = fallback_records
 
         # The strict conjunction found nothing usable -- either no hits at all,
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
         if not records and len(tokens) >= 2:
-            composed_relaxed = _build_query(query, norm_collection, operator="OR")
-            records, errored = await self._fetch_records(composed_relaxed, count)
-            if errored:
+            composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
+            relaxed_records, relaxed_errored = await self._fetch_records(composed_relaxed, count)
+            if relaxed_errored:
                 logger.warning("brazil_moh relaxed search failed for query %r", query)
                 if pcdt_records:
                     return pcdt_records, pcdt_meta
                 return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            records = relaxed_records
 
         # Merge PCDT records (first) and BVS records, deduplicating by record_id
         seen_ids: set[str] = set()
