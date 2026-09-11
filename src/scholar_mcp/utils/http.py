@@ -233,7 +233,7 @@ class AsyncHttpClient:
             return urllib.parse.urlunparse(parsed._replace(query=new_query))
         return url
 
-    def _is_unexpected_html(self, resp: httpx.Response) -> bool:
+    def is_unexpected_html(self, resp: httpx.Response) -> bool:
         content_type = resp.headers.get("content-type", "").lower()
         if "text/html" in content_type:
             text_sample = resp.text[:1000].lower()
@@ -250,6 +250,8 @@ class AsyncHttpClient:
             ):
                 return True
         return False
+
+    _is_unexpected_html = is_unexpected_html
 
     async def get(
         self,
@@ -358,7 +360,7 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
     ) -> bytes | None:
         resp = await self.get(url, headers=headers, params=params)
-        if resp is not None and resp.status_code == 200 and not self._is_unexpected_html(resp):
+        if resp is not None and resp.status_code == 200 and not self.is_unexpected_html(resp):
             return resp.content
         return None
 
