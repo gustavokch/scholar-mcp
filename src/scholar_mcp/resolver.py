@@ -26,7 +26,7 @@ from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.providers.scihub import SciHubProvider
 from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
-from scholar_mcp.providers.unpaywall import UNPAYWALL_BASE, UnpaywallProvider
+from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -104,19 +104,11 @@ class WaterfallResolver:
         # Try Unpaywall first if configured
         if self.settings.unpaywall_configured() and ids.doi:
             try:
-                resp = await self.http_client.get(
-                    f"{UNPAYWALL_BASE}/{ids.doi.strip()}",
-                    params={"email": self.settings.unpaywall_email},
-                )
-                if resp is not None and resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("is_oa"):
-                        loc = data.get("best_oa_location") or {}
-                        pdf_url = loc.get("url_for_pdf") or loc.get("url")
-                        if pdf_url:
-                            b = await self.http_client.get_bytes(pdf_url)
-                            if b:
-                                return b, "unpaywall"
+                pdf_url = await self.unpaywall.fetch_oa_pdf_url(ids)
+                if pdf_url:
+                    b = await self.http_client.get_bytes(pdf_url)
+                    if b:
+                        return b, "unpaywall"
             except Exception:
                 pass
 

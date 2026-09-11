@@ -17,7 +17,13 @@ class UnpaywallProvider(BaseProvider):
         super().__init__(http_client)
         self.email = email
 
-    async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
+    async def _lookup(self, ids: IdentifierMap) -> dict[str, Any] | None:
+        """Fetch the Unpaywall record for ``ids.doi``, or None if there is none.
+
+        A 404 here means Unpaywall does not hold the DOI -- routine for a
+        preprint or a very recent article -- so it is an expected miss rather
+        than a fetch failure.
+        """
         if not self.email:
             self.last_skip_reason = "UNPAYWALL_EMAIL not configured"
             return None
@@ -26,19 +32,40 @@ class UnpaywallProvider(BaseProvider):
             return None
 
         clean_doi = ids.doi.strip()
-        url = f"{UNPAYWALL_BASE}/{clean_doi}"
+        resp = await self.http_client.get(
+            f"{UNPAYWALL_BASE}/{clean_doi}",
+            params={"email": self.email},
+            quiet_statuses={404},
+        )
+        if resp is None or resp.status_code != 200:
+            return None
+        return resp.json()
 
+    @staticmethod
+    def _best_pdf_url(data: dict[str, Any]) -> str | None:
+        """Pick the best open-access URL from an Unpaywall record."""
+        if not data.get("is_oa"):
+            return None
+        best_loc = data.get("best_oa_location") or {}
+        return best_loc.get("url_for_pdf") or best_loc.get("url")
+
+    async def fetch_oa_pdf_url(self, ids: IdentifierMap) -> str | None:
+        """Locate an open-access PDF for ``ids`` without downloading it."""
         try:
-            resp = await self.http_client.get(url, params={"email": self.email})
-            if resp is None or resp.status_code != 200:
+            data = await self._lookup(ids)
+            if data is None:
+                return None
+            return self._best_pdf_url(data)
+        except Exception:
+            return None
+
+    async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
+        try:
+            data = await self._lookup(ids)
+            if data is None:
                 return None
 
-            data = resp.json()
-            if not data.get("is_oa"):
-                return None
-
-            best_loc = data.get("best_oa_location") or {}
-            pdf_url = best_loc.get("url_for_pdf") or best_loc.get("url")
+            pdf_url = self._best_pdf_url(data)
             if not pdf_url:
                 return None
 
