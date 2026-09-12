@@ -162,7 +162,7 @@ def _sanitize_token(token: str) -> str:
     special character removal so colon removal does not concatenate them into
     ``tidengue``. Field scoping is the engine's decision, not the caller's.
     """
-    stripped = _FIELD_PREFIX_RE.sub("", token)
+    stripped = _FIELD_PREFIX_RE.sub("", token.lstrip("+-"))
     return _SOLR_SPECIALS_RE.sub("", stripped).lstrip("+-")
 
 
@@ -237,7 +237,6 @@ def _build_query(
         else:
             token_clause = f" {operator} ".join(tokens)
         clauses.append(f"({token_clause})")
-    return " AND ".join(clauses)
     return " AND ".join(clauses)
 
 

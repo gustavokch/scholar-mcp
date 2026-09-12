@@ -13,6 +13,11 @@ from scholar_mcp.utils.http import AsyncHttpClient
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
 
+# Statuses that mean "this host looked at the Referer and said no". Anything else
+# (transport error, timeout, 5xx, 429, other 4xx) is a failed request, not a
+# rejected header, and must not buy a second retry ladder.
+_REFERER_REJECTED_STATUSES = frozenset({401, 403})
+
 
 def _normalize_pdf_url(url: str, base_url: str | None = None) -> str:
     url = url.split("#")[0]
@@ -23,6 +28,19 @@ def _normalize_pdf_url(url: str, base_url: str | None = None) -> str:
     if base_url:
         return urljoin(base_url, url)
     return url
+
+
+def _landing_url(page_url: str | None, fallback: str) -> str:
+    """URL the mirror actually landed on: sent as ``Referer`` and used as the base
+    for relative PDF paths. Falls back to ``fallback`` when ``page_url`` is unusable.
+
+    ``page.url`` is ``"about:blank"`` when navigation landed nowhere, and that
+    value would both send a meaningless header and mis-resolve a relative PDF
+    path through ``urljoin``.
+    """
+    if page_url and page_url.startswith(("http://", "https://")):
+        return page_url
+    return fallback
 
 
 def _extract_pdf_url(html: str, base_url: str | None = None) -> str | None:
@@ -72,6 +90,37 @@ class SciHubProvider(BaseProvider):
         self.settings = settings or Settings.load()
         self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
 
+    async def _get_pdf_bytes(
+        self, pdf_url: str, referer: str | None, *, allow_bare_retry: bool = True
+    ) -> bytes | None:
+        """Fetch raw PDF bytes, preferring a landing-page ``Referer``.
+
+        Hosts such as sci.bban.top require the header; others use hotlink
+        protection that rejects a foreign one while accepting a bare request.
+        Only a refusal -- 401/403, or a 200 bot-challenge page -- gets one retry
+        without the header, and only when ``allow_bare_retry`` is set. A request
+        that never completed is not a Referer problem, and ``get`` has already
+        spent its own retry ladder on it, so it falls through to the next mirror
+        instead.
+        """
+        if not referer:
+            return await self.http_client.get_bytes(pdf_url)
+
+        resp = await self.http_client.get(
+            pdf_url,
+            headers={"Referer": referer},
+            ok_statuses=_REFERER_REJECTED_STATUSES,
+        )
+        if resp is None:
+            return None
+        if resp.status_code in _REFERER_REJECTED_STATUSES or self.http_client.is_unexpected_html(
+            resp
+        ):
+            if not allow_bare_retry:
+                return None
+            return await self.http_client.get_bytes(pdf_url)
+        return resp.content
+
     async def _fetch_via_camoufox(
         self,
         clean_doi: str,
@@ -95,20 +144,31 @@ class SciHubProvider(BaseProvider):
                             timeout=15000,
                         )
                         content = await page.content()
-                        pdf_url = _extract_pdf_url(content, base_url=mirror_url)
+                        page_referer = _landing_url(page.url, mirror_url)
+                        pdf_url = _extract_pdf_url(content, base_url=page_referer)
                         if not pdf_url:
                             continue
 
+                        pdf_headers = {"Referer": page_referer}
+                        browser_refused = False
                         try:
-                            resp = await page.request.get(pdf_url, timeout=15000)
+                            resp = await page.request.get(
+                                pdf_url, headers=pdf_headers, timeout=15000
+                            )
                             if resp.status == 200:
                                 b = await resp.body()
                                 if b and b.startswith(b"%PDF-"):
                                     return b, pdf_url
+                            else:
+                                # A real browser session was already refused; a bare
+                                # httpx request has strictly less to offer than it did.
+                                browser_refused = True
                         except Exception:
                             pass
 
-                        pdf_bytes = await self.http_client.get_bytes(pdf_url)
+                        pdf_bytes = await self._get_pdf_bytes(
+                            pdf_url, page_referer, allow_bare_retry=not browser_refused
+                        )
                         if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                             return pdf_bytes, pdf_url
                     except Exception:
@@ -138,11 +198,12 @@ class SciHubProvider(BaseProvider):
                 if resp is None or resp.status_code != 200 or not resp.text:
                     continue
 
-                pdf_url = _extract_pdf_url(resp.text, base_url=mirror_url)
+                final_page_url = _landing_url(str(resp.url), mirror_url)
+                pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
                 if not pdf_url:
                     continue
 
-                pdf_bytes = await self.http_client.get_bytes(pdf_url)
+                pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
                 if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
                     return pdf_bytes, pdf_url
             except Exception:

@@ -1,13 +1,13 @@
 import asyncio
-from datetime import datetime, timezone
 import email.utils
 import logging
 import math
 import random
 import re
 import threading
-from typing import Any
 import urllib.parse
+from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 
@@ -26,8 +26,15 @@ DEFAULT_HOST_RATES: dict[str, float] = {
     "www.ebi.ac.uk": 10.0,
     "clinicaltrials.gov": 5.0,
     "rxnav.nlm.nih.gov": 5.0,
+    "pesquisa.bvsalud.org": 1.0,
 }
 DEFAULT_FALLBACK_RATE = 5.0
+
+# Hosts whose 403 is a bot shield reacting to bursts, not a real "forbidden".
+# pesquisa.bvsalud.org rejected ~30 requests during an eval run even under the
+# configured rate; for these hosts a 403 must back the whole host bucket off
+# and retry, like a 429. Elsewhere a 403 stays fatal.
+BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -47,6 +54,8 @@ def _host_key(host: str | None) -> str:
         return "ncbi.nlm.nih.gov"
     if hostname == "arxiv.org" or hostname.endswith(".arxiv.org"):
         return "arxiv.org"
+    if hostname == "pesquisa.bvsalud.org" or hostname.endswith(".bvsalud.org"):
+        return "pesquisa.bvsalud.org"
     return hostname
 
 
@@ -105,6 +114,20 @@ def _sanitize_error_body(content: bytes, content_type: str = "") -> str:
     cleaned = _WHITESPACE_RE.sub(" ", sample).strip()
     return cleaned[:ERROR_BODY_LOG_CHARS]
 
+def _log_expected_status(log_url: str, resp: httpx.Response) -> None:
+    """Record an error status the caller declared expected.
+
+    A registry answering 404 for a DOI it does not hold is routine, but so is a
+    404 caused by broken URL quoting or a wrong base path. Dropping the record
+    entirely makes the two indistinguishable, so the miss is kept at DEBUG.
+    """
+    logger.debug(
+        "HTTP GET %s returned expected status %d: %s",
+        log_url,
+        resp.status_code,
+        _sanitize_error_body(resp.content, resp.headers.get("content-type", "")),
+    )
+
 # Query parameters whose values must never reach the log stream. Kept narrow:
 # only credential-bearing keys. `email` is here because NCBI's contact
 # address identifies the operator, not because it is a key.
@@ -151,9 +174,10 @@ class AsyncHttpClient:
         self.settings = settings or Settings.load()
         self.max_retries = max_retries
         self.backoff_base = backoff_base
-        # Floor on the pause after a 429. NCBI counts requests in a 1.0s sliding
-        # window, so anything shorter can retry inside the window that rejected
-        # us. Tests set it to 0.0 to keep the suite fast.
+        # Floor on the pause after a 429, or after a bot-shield 403 (BVS).
+        # NCBI counts requests in a 1.0s sliding window, so anything shorter
+        # can retry inside the window that rejected us. Tests set it to 0.0
+        # to keep the suite fast.
         self.min_429_wait = min_429_wait
         self.client = httpx.AsyncClient(
             timeout=float(self.settings.request_timeout),
@@ -223,7 +247,7 @@ class AsyncHttpClient:
             return urllib.parse.urlunparse(parsed._replace(query=new_query))
         return url
 
-    def _is_unexpected_html(self, resp: httpx.Response) -> bool:
+    def is_unexpected_html(self, resp: httpx.Response) -> bool:
         content_type = resp.headers.get("content-type", "").lower()
         if "text/html" in content_type:
             text_sample = resp.text[:1000].lower()
@@ -241,34 +265,55 @@ class AsyncHttpClient:
                 return True
         return False
 
+    _is_unexpected_html = is_unexpected_html
+
     async def get(
         self,
         url: str,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         ok_statuses: frozenset[int] | set[int] | None = None,
+        quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
-        Non-retryable failures report as ``None``. Statuses listed in
-        ``ok_statuses`` are returned as-is instead, for callers that must
-        distinguish them (e.g. api.fda.gov uses 404 for "no matches found",
+        Non-retryable failures report as ``None``.
+
+        ``ok_statuses`` lists statuses the caller must inspect itself, so they are
+        returned as-is instead (e.g. api.fda.gov uses 404 for "no matches found",
         a valid answer rather than a fetch failure).
+
+        ``quiet_statuses`` lists statuses that are an expected miss rather than a
+        defect, so they report as ``None`` like any other failure but without the
+        warning (e.g. a scholarly registry answering 404 for a DOI it does not
+        hold). Callers needing the response object want ``ok_statuses`` instead.
+
+        A status in either set is still logged at DEBUG when it is ``>= 400``, so
+        a 404 caused by a bad URL or a misconfigured parameter stays recoverable
+        at ``LOG_LEVEL=DEBUG`` rather than vanishing.
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
+        host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
 
         for attempt in range(self.max_retries):
             await limiter.acquire()
             try:
                 resp = await self.client.get(target_url, headers=headers)
-                if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self.max_retries - 1:
+                # A bot-shield 403 must behave like a 429: throttle the whole
+                # host bucket and retry. A 403 from any other host stays fatal.
+                shielded_403 = (
+                    resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
+                )
+                if (
+                    resp.status_code in RETRYABLE_STATUS_CODES or shielded_403
+                ) and attempt < self.max_retries - 1:
                     retry_after = _parse_retry_after(resp)
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
-                    if resp.status_code == 429:
+                    if resp.status_code == 429 or shielded_403:
                         wait_time = max(
                             retry_after or 0.0, calc_wait, self.min_429_wait
                         )
@@ -290,8 +335,13 @@ class AsyncHttpClient:
                     await asyncio.sleep(wait_time)
                     continue
                 if ok_statuses and resp.status_code in ok_statuses:
+                    if resp.status_code >= 400:
+                        _log_expected_status(log_url, resp)
                     return resp
                 if resp.status_code >= 400:
+                    if quiet_statuses and resp.status_code in quiet_statuses:
+                        _log_expected_status(log_url, resp)
+                        return None
                     logger.warning(
                         "HTTP GET %s failed with status %d: %s",
                         log_url,
@@ -338,8 +388,11 @@ class AsyncHttpClient:
         url: str,
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
+        quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> bytes | None:
-        resp = await self.get(url, headers=headers, params=params)
+        resp = await self.get(
+            url, headers=headers, params=params, quiet_statuses=quiet_statuses
+        )
         if resp is not None and resp.status_code == 200:
             if not self._is_unexpected_html(resp):
                 return resp.content

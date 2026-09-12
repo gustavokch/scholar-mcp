@@ -45,7 +45,7 @@ class OpenAlexProvider:
     async def _get_work(self, doi: str) -> dict[str, Any] | None:
         clean_doi = _strip_doi_url(doi) or doi.strip()
         url = f"{OPENALEX_BASE}/works/https://doi.org/{urllib.parse.quote(clean_doi, safe='')}"
-        resp = await self.http_client.get(url, params=self._params())
+        resp = await self.http_client.get(url, params=self._params(), quiet_statuses={404})
         if resp is None or resp.status_code != 200:
             return None
         return resp.json()
