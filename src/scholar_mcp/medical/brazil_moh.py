@@ -31,6 +31,7 @@ weighted position prior, because a relaxed ``OR`` pool is far larger than
 the over-fetch window and the server still chooses which slice we see.
 """
 
+import asyncio
 import logging
 import re
 import urllib.parse
@@ -392,6 +393,29 @@ class BrazilMoHEngine:
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
         return [record for record in records if _is_brazilian(record)], False
 
+    async def _stage(self, stage: str, coro: Any, default: Any) -> Any:
+        """Run one retrieval stage under its own time budget.
+
+        Callers wrap the whole ``search_guidelines`` chain in a hard ceiling
+        (zimqa's per-call ``wait_for``). A stage stalled behind a throttled
+        rate limiter must die here so the remaining stages — or the PCDT
+        fallback — still get their share of that ceiling, and so the chain
+        degrades to partial results instead of a cancelled coroutine.
+
+        ``brazil_stage_timeout_s <= 0`` disables the budget. On expiry the
+        stage counts as errored and ``default`` is returned.
+        """
+        budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        if budget <= 0:
+            return await coro
+        try:
+            return await asyncio.wait_for(coro, budget)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
+            )
+            return default
+
     async def search_guidelines(
         self,
         query: str,
@@ -428,24 +452,31 @@ class BrazilMoHEngine:
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
 
-        # Query PCDT engine first
-        pcdt_records, pcdt_meta = await self.pcdt_engine.search(query, limit=clamped)
+        # Query PCDT engine first. Every stage runs under its own budget, so
+        # one stalled stage costs its budget and the chain moves on.
+        stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
+        pcdt_records, pcdt_meta = await self._stage(
+            "pcdt",
+            self.pcdt_engine.search(query, limit=clamped),
+            ([], stage_error_meta),
+        )
+        errored_any = pcdt_meta.error
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        records, errored = await self._fetch_records(title_composed, count)
-        if errored:
-            if pcdt_records:
-                return pcdt_records, pcdt_meta
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        records, errored = await self._stage(
+            "title-scoped", self._fetch_records(title_composed, count), ([], True)
+        )
+        errored_any = errored_any or errored
 
-        # Fall back to all-field query when title-scoped query yields zero Brazilian records
+        # Fall back to all-field query when the title-scoped stage yields no
+        # Brazilian records — including when it stalled, since a slow strict
+        # query says nothing about the relaxed one.
         if not records and tokens:
             all_composed = _build_query(query, norm_collection, operator="AND", title_scoped=False)
-            fallback_records, fallback_errored = await self._fetch_records(all_composed, count)
-            if fallback_errored:
-                if pcdt_records:
-                    return pcdt_records, pcdt_meta
-                return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            fallback_records, fallback_errored = await self._stage(
+                "all-field", self._fetch_records(all_composed, count), ([], True)
+            )
+            errored_any = errored_any or fallback_errored
             records = fallback_records
 
         # The strict conjunction found nothing usable -- either no hits at all,
@@ -454,13 +485,16 @@ class BrazilMoHEngine:
         # byte-identical, so the request would be pure waste.
         if not records and len(tokens) >= 2:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
-            relaxed_records, relaxed_errored = await self._fetch_records(composed_relaxed, count)
-            if relaxed_errored:
-                logger.warning("brazil_moh relaxed search failed for query %r", query)
-                if pcdt_records:
-                    return pcdt_records, pcdt_meta
-                return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            relaxed_records, relaxed_errored = await self._stage(
+                "relaxed", self._fetch_records(composed_relaxed, count), ([], True)
+            )
+            errored_any = errored_any or relaxed_errored
             records = relaxed_records
+
+        if not records and errored_any:
+            if pcdt_records:
+                return pcdt_records, pcdt_meta
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Merge PCDT records (first) and BVS records, deduplicating by record_id
         seen_ids: set[str] = set()
@@ -477,11 +511,14 @@ class BrazilMoHEngine:
         # order, defeating the over-fetch.
         records = rank_brazil_guidelines(merged_records, query)[:clamped]
 
-        await self.cache.set(
-            cache_key,
-            [record.to_dict() for record in records],
-            source="brazil_moh",
-        )
+        # A chain with a stalled stage returns partial results; caching them
+        # under the 30-day TTL would make a transient stall permanent.
+        if not errored_any:
+            await self.cache.set(
+                cache_key,
+                [record.to_dict() for record in records],
+                source="brazil_moh",
+            )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
 
     async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
