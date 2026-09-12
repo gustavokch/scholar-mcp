@@ -67,6 +67,11 @@ class Settings:
     cache_ttl_clinical_trials: int = 86400
     cache_ttl_who_iris: int = 2592000
     cache_ttl_brazil_moh: int = 2592000
+    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to three BVS stages
+    # run sequentially, and callers wrap the whole chain in their own hard
+    # timeout. Ten seconds per stage keeps the worst case inside a 60s caller
+    # ceiling while leaving room for the HTTP layer's own retries.
+    brazil_stage_timeout_s: float = 10.0
     enable_browser_fallback: bool = True
     enable_medical_tools: bool = True
 
@@ -166,6 +171,7 @@ class Settings:
             cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
             cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
+            brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

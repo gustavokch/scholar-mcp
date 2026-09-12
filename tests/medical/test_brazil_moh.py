@@ -1403,3 +1403,89 @@ async def test_search_ranks_before_slicing(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def _slow_response(request: httpx.Request) -> httpx.Response:
+    """A BVS response that arrives long after any sane stage budget."""
+    import asyncio as _asyncio
+
+    await _asyncio.sleep(5.0)
+    return httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+
+
+@respx.mock
+async def test_search_stage_timeout_returns_error_instead_of_hanging(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.05
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
+        # No PCDT seed match for this query, so a stage stall must surface as
+        # an error, not as a hang that the caller's outer ceiling has to kill.
+        import time as _time
+
+        start = _time.monotonic()
+        records, meta = await engine.search_guidelines("xyzzy nonsensetoken", limit=5)
+        elapsed = _time.monotonic() - start
+
+        assert elapsed < 2.0
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_stage_timeout_falls_through_to_fallback(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    # Budget must exceed the BVS host limiter's 1/s refill so the fallback
+    # stage can still acquire a token after the stalled first stage dies.
+    engine.settings.brazil_stage_timeout_s = 1.5
+    try:
+        import asyncio as _asyncio
+
+        calls = {"n": 0}
+
+        async def _first_slow_then_fast(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                await _asyncio.sleep(5.0)
+            return httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_first_slow_then_fast)
+        records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
+
+        assert records, "fallback stage should still serve records"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.05
+    try:
+        async def _stalling_pcdt(*args, **kwargs):
+            await _asyncio.sleep(5.0)
+            return [], None
+
+        engine.pcdt_engine.search = _stalling_pcdt
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        import time as _time
+
+        start = _time.monotonic()
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+        elapsed = _time.monotonic() - start
+
+        assert elapsed < 2.0
+        assert records and records[0].record_id == "biblio-1"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
