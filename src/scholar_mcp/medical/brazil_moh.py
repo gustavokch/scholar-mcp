@@ -16,12 +16,18 @@ counter-intuitive and are load-bearing for this module:
 * ``count=0`` returns HTTP 500 rather than a count-only response, and the
   host is unreliable enough that the error paths here are live.
 
-Search runs in two stages. The strict stage ANDs the user tokens; if it
-yields no Brazilian records and two or more substantive tokens remain,
-the same tokens are retried ORed. Relaxation loosens the operator and
-nothing else -- both stages compose from one stopword-stripped token
-list, so a relaxed hit is never one the strict stage structurally could
-not have matched.
+Search runs as a stage chain. A title-scoped stage ANDs the user tokens in
+the ``ti:`` field; when it returns no Brazilian records, progressive
+title-token relaxation drops trailing tokens right-to-left and retries,
+because scenario queries carry clinical descriptors that formal document
+titles rarely contain. A relaxed step that errors halts the chain: the
+endpoint is already misbehaving, so further variants likely fail the same
+way. When the ladder is exhausted without a hit, an all-field stage ANDs
+the same tokens; if it also yields nothing and two or more substantive
+tokens remain, the same tokens are retried ORed. Relaxation loosens the
+field scope or the operator and nothing else -- every stage composes from
+one stopword-stripped token list, so a relaxed hit is never one the strict
+stage structurally could not have matched.
 
 Results are then re-ranked by ``rank_brazil_guidelines``. Accent folding
 and Portuguese stopword stripping are what made that viable: without
