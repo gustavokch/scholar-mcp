@@ -496,10 +496,39 @@ class BrazilMoHEngine:
         )
         errored_any = errored_any or errored
 
+        # Progressive title-token relaxation: when the full-token title AND
+        # returns zero records without error, drop trailing tokens and retry.
+        # Scenario queries frequently contain clinical descriptors ('grupo',
+        # 'criterios', 'hidratacao') that do not appear in formal manual titles.
+        # An errored relaxation step halts the whole BVS chain: the endpoint is
+        # already misbehaving, so further variants likely fail the same way.
+        title_relaxed_errored = False
+        if not records and not errored and tokens:
+            for relaxed_tokens in _title_token_relaxations(tokens):
+                relaxed_title_clause = " AND ".join(f"ti:{t}" for t in relaxed_tokens)
+                clauses = [BASE_FILTER]
+                if norm_collection == "brisa":
+                    clauses.append(BRISA_FILTER)
+                clauses.append(f"({relaxed_title_clause})")
+                relaxed_title_composed = " AND ".join(clauses)
+
+                relaxed_title_records, relaxed_title_errored = await self._stage(
+                    "title-scoped-relaxed",
+                    self._fetch_records(relaxed_title_composed, count),
+                    ([], True),
+                )
+                errored_any = errored_any or relaxed_title_errored
+                if relaxed_title_errored:
+                    title_relaxed_errored = True
+                    break
+                if relaxed_title_records:
+                    records = relaxed_title_records
+                    break
+
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one.
-        if not records and tokens:
+        if not records and tokens and not title_relaxed_errored:
             all_composed = _build_query(query, norm_collection, operator="AND", title_scoped=False)
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count), ([], True)
@@ -511,7 +540,7 @@ class BrazilMoHEngine:
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2:
+        if not records and len(tokens) >= 2 and not title_relaxed_errored:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
                 "relaxed", self._fetch_records(composed_relaxed, count), ([], True)
