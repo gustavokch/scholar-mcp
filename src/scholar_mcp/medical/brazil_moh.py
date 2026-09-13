@@ -241,7 +241,7 @@ def _title_token_relaxations(
         if len(current) <= min_tokens:
             break
         current = current[:-1]
-        ladder.append(list(current))
+        ladder.append(current)
     return ladder
 
 
