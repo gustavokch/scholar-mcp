@@ -250,6 +250,7 @@ def _build_query(
     collection: str,
     operator: Literal["AND", "OR"] = "AND",
     title_scoped: bool = False,
+    tokens: list[str] | None = None,
 ) -> str:
     """Compose every filter into ``q``.
 
@@ -261,11 +262,16 @@ def _build_query(
     ``operator`` relaxes only that group. ``BASE_FILTER`` and ``BRISA_FILTER``
     stay conjunctive regardless: an ``OR`` across them would match
     conventional and non-Portuguese literature.
+
+    ``tokens`` overrides the sanitized user tokens, so the progressive
+    title-relaxation ladder composes through this one function and a filter
+    added here cannot drift out of the relaxed stages.
     """
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
-    tokens = _usable_tokens(query)
+    if tokens is None:
+        tokens = _usable_tokens(query)
     if tokens:
         if title_scoped:
             token_clause = f" {operator} ".join(f"ti:{t}" for t in tokens)
@@ -511,12 +517,9 @@ class BrazilMoHEngine:
         title_relaxed_errored = False
         if not records and not errored and tokens:
             for relaxed_tokens in _title_token_relaxations(tokens):
-                relaxed_title_clause = " AND ".join(f"ti:{t}" for t in relaxed_tokens)
-                clauses = [BASE_FILTER]
-                if norm_collection == "brisa":
-                    clauses.append(BRISA_FILTER)
-                clauses.append(f"({relaxed_title_clause})")
-                relaxed_title_composed = " AND ".join(clauses)
+                relaxed_title_composed = _build_query(
+                    query, norm_collection, title_scoped=True, tokens=relaxed_tokens
+                )
 
                 relaxed_title_records, relaxed_title_errored = await self._stage(
                     "title-scoped-relaxed",

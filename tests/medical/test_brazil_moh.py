@@ -1506,6 +1506,16 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
         await http_client.aclose()
 
 
+def test_build_query_accepts_token_override():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    composed = _build_query(
+        "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
+    )
+    assert "ti:dengue AND ti:manejo" in composed
+    assert "ti:intratavel" not in composed
+
+
 def test_title_token_relaxations_generates_right_to_left_subsets():
     from scholar_mcp.medical.brazil_moh import _title_token_relaxations
 
