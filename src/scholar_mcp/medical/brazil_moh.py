@@ -211,6 +211,34 @@ def _usable_tokens(query: str) -> list[str]:
     return tokens
 
 
+MAX_TITLE_RELAXATION_STEPS = 3
+
+
+def _title_token_relaxations(
+    tokens: list[str],
+    max_steps: int = MAX_TITLE_RELAXATION_STEPS,
+    min_tokens: int = 1,
+) -> list[list[str]]:
+    """Ladder of progressively relaxed token subsets for title-scoped search.
+
+    When a full conjunction of title tokens returns no documents, trailing
+    tokens are dropped right-to-left. Trailing tokens in scenario queries
+    represent specific clinical criteria or modalities (e.g. 'parenteral',
+    'observacao') that rarely appear in formal document titles.
+
+    Relaxation stops when ``max_steps`` is reached or the token list length
+    would drop below ``min_tokens``.
+    """
+    ladder: list[list[str]] = []
+    current = list(tokens)
+    for _ in range(max_steps):
+        if len(current) <= min_tokens:
+            break
+        current = current[:-1]
+        ladder.append(list(current))
+    return ladder
+
+
 def _build_query(
     query: str,
     collection: str,

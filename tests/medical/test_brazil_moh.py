@@ -1489,3 +1489,45 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_title_token_relaxations_generates_right_to_left_subsets():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["dengue", "manejo", "clinico", "adulto"]
+    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
+    assert ladder == [
+        ["dengue", "manejo", "clinico"],
+        ["dengue", "manejo"],
+        ["dengue"],
+    ]
+
+
+def test_title_token_relaxations_respects_min_tokens():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["dengue", "manejo"]
+    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
+    assert ladder == [["dengue"]]
+
+    # When min_tokens is 2, length-2 input produces no relaxation
+    assert _title_token_relaxations(tokens, max_steps=3, min_tokens=2) == []
+
+
+def test_title_token_relaxations_empty_or_single_token_returns_empty():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    assert _title_token_relaxations([]) == []
+    assert _title_token_relaxations(["dengue"]) == []
+
+
+def test_title_token_relaxations_respects_max_steps():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["a", "b", "c", "d", "e", "f"]
+    ladder = _title_token_relaxations(tokens, max_steps=2, min_tokens=1)
+    assert len(ladder) == 2
+    assert ladder == [
+        ["a", "b", "c", "d", "e"],
+        ["a", "b", "c", "d"],
+    ]
