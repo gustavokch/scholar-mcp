@@ -1639,3 +1639,32 @@ async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
+    """The relaxed title stage composes through _build_query, so the BRISA
+    collection filter must survive into the relaxed call."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),  # full title miss
+                httpx.Response(200, json=_bvs_response([_bvs_doc()])),  # relaxed hit
+            ]
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue manejo intratavel", limit=5, collection="brisa"
+        )
+
+        assert len(records) == 1
+        assert meta.error is False
+        assert route.call_count == 2
+        q2 = route.calls[1].request.url.params["q"]
+        assert 'db:"BRISA"' in q2
+        assert "ti:dengue AND ti:manejo" in q2
+        assert "ti:intratavel" not in q2
+    finally:
+        await cache.close()
+        await http_client.aclose()
