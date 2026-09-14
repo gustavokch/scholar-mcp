@@ -16,12 +16,18 @@ counter-intuitive and are load-bearing for this module:
 * ``count=0`` returns HTTP 500 rather than a count-only response, and the
   host is unreliable enough that the error paths here are live.
 
-Search runs in two stages. The strict stage ANDs the user tokens; if it
-yields no Brazilian records and two or more substantive tokens remain,
-the same tokens are retried ORed. Relaxation loosens the operator and
-nothing else -- both stages compose from one stopword-stripped token
-list, so a relaxed hit is never one the strict stage structurally could
-not have matched.
+Search runs as a stage chain. A title-scoped stage ANDs the user tokens in
+the ``ti:`` field; when it returns no Brazilian records, progressive
+title-token relaxation drops trailing tokens right-to-left and retries,
+because scenario queries carry clinical descriptors that formal document
+titles rarely contain. A relaxed step that errors halts the chain: the
+endpoint is already misbehaving, so further variants likely fail the same
+way. When the ladder is exhausted without a hit, an all-field stage ANDs
+the same tokens; if it also yields nothing and two or more substantive
+tokens remain, the same tokens are retried ORed. Relaxation loosens the
+field scope or the operator and nothing else -- every stage composes from
+one stopword-stripped token list, so a relaxed hit is never one the strict
+stage structurally could not have matched.
 
 Results are then re-ranked by ``rank_brazil_guidelines``. Accent folding
 and Portuguese stopword stripping are what made that viable: without
@@ -211,11 +217,40 @@ def _usable_tokens(query: str) -> list[str]:
     return tokens
 
 
+MAX_TITLE_RELAXATION_STEPS = 3
+
+
+def _title_token_relaxations(
+    tokens: list[str],
+    max_steps: int = MAX_TITLE_RELAXATION_STEPS,
+    min_tokens: int = 1,
+) -> list[list[str]]:
+    """Ladder of progressively relaxed token subsets for title-scoped search.
+
+    When a full conjunction of title tokens returns no documents, trailing
+    tokens are dropped right-to-left. Trailing tokens in scenario queries
+    represent specific clinical criteria or modalities (e.g. 'parenteral',
+    'observacao') that rarely appear in formal document titles.
+
+    Relaxation stops when ``max_steps`` is reached or the token list length
+    would drop below ``min_tokens``.
+    """
+    ladder: list[list[str]] = []
+    current = list(tokens)
+    for _ in range(max_steps):
+        if len(current) <= min_tokens:
+            break
+        current = current[:-1]
+        ladder.append(current)
+    return ladder
+
+
 def _build_query(
     query: str,
     collection: str,
     operator: Literal["AND", "OR"] = "AND",
     title_scoped: bool = False,
+    tokens: list[str] | None = None,
 ) -> str:
     """Compose every filter into ``q``.
 
@@ -227,11 +262,16 @@ def _build_query(
     ``operator`` relaxes only that group. ``BASE_FILTER`` and ``BRISA_FILTER``
     stay conjunctive regardless: an ``OR`` across them would match
     conventional and non-Portuguese literature.
+
+    ``tokens`` overrides the sanitized user tokens, so the progressive
+    title-relaxation ladder composes through this one function and a filter
+    added here cannot drift out of the relaxed stages.
     """
     clauses = [BASE_FILTER]
     if collection == "brisa":
         clauses.append(BRISA_FILTER)
-    tokens = _usable_tokens(query)
+    if tokens is None:
+        tokens = _usable_tokens(query)
     if tokens:
         if title_scoped:
             token_clause = f" {operator} ".join(f"ti:{t}" for t in tokens)
@@ -468,10 +508,36 @@ class BrazilMoHEngine:
         )
         errored_any = errored_any or errored
 
+        # Progressive title-token relaxation: when the full-token title AND
+        # returns zero records without error, drop trailing tokens and retry.
+        # Scenario queries frequently contain clinical descriptors ('grupo',
+        # 'criterios', 'hidratacao') that do not appear in formal manual titles.
+        # An errored relaxation step halts the whole BVS chain: the endpoint is
+        # already misbehaving, so further variants likely fail the same way.
+        title_relaxed_errored = False
+        if not records and not errored and tokens:
+            for relaxed_tokens in _title_token_relaxations(tokens):
+                relaxed_title_composed = _build_query(
+                    query, norm_collection, title_scoped=True, tokens=relaxed_tokens
+                )
+
+                relaxed_title_records, relaxed_title_errored = await self._stage(
+                    "title-scoped-relaxed",
+                    self._fetch_records(relaxed_title_composed, count),
+                    ([], True),
+                )
+                errored_any = errored_any or relaxed_title_errored
+                if relaxed_title_errored:
+                    title_relaxed_errored = True
+                    break
+                if relaxed_title_records:
+                    records = relaxed_title_records
+                    break
+
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one.
-        if not records and tokens:
+        if not records and tokens and not title_relaxed_errored:
             all_composed = _build_query(query, norm_collection, operator="AND", title_scoped=False)
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count), ([], True)
@@ -483,7 +549,7 @@ class BrazilMoHEngine:
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2:
+        if not records and len(tokens) >= 2 and not title_relaxed_errored:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
                 "relaxed", self._fetch_records(composed_relaxed, count), ([], True)

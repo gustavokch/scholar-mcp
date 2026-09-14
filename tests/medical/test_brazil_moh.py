@@ -373,7 +373,7 @@ from scholar_mcp.medical.brazil_moh import (
 )
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS
 from scholar_mcp.utils.http import AsyncHttpClient
-from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 async def _engine(tmp_path: Path):
@@ -382,6 +382,18 @@ async def _engine(tmp_path: Path):
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     return engine, cache, http_client
+
+
+def _stub_pcdt_empty(engine):
+    """Replace the PCDT stage with an empty, non-errored result.
+
+    Isolates BVS call sequencing from the static PCDT dataset, which would
+    otherwise merge its own records into the result list.
+    """
+    async def _no_pcdt(*args, **kwargs):
+        return [], CacheMetadata(cached=False, cache_age=0, error=False)
+
+    engine.pcdt_engine.search = _no_pcdt
 
 
 def _bvs_doc(record_id="biblio-1", title="Protocolo", country="^iBrazil^eBrasil", **extra):
@@ -1113,18 +1125,21 @@ async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert route.call_count == 3
+        assert route.call_count == 4
         q_first = route.calls[0].request.url.params["q"]
-        second = str(route.calls[1].request.url)
+        q_relaxed_title = route.calls[1].request.url.params["q"]
         third = str(route.calls[2].request.url)
+        fourth = str(route.calls[3].request.url)
         assert "ti:dengue" in q_first and "ti:hemorragica" in q_first
-        assert "dengue+AND+hemorragica" in second or "dengue%20AND%20hemorragica" in second
-        assert "dengue+OR+hemorragica" in third or "dengue%20OR%20hemorragica" in third
+        assert "ti:dengue" in q_relaxed_title and "ti:hemorragica" not in q_relaxed_title
+        assert "dengue+AND+hemorragica" in third or "dengue%20AND%20hemorragica" in third
+        assert "dengue+OR+hemorragica" in fourth or "dengue%20OR%20hemorragica" in fourth
         assert len(records) == 1
         assert meta.error is False
     finally:
@@ -1486,6 +1501,170 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
         assert elapsed < 2.0
         assert records and records[0].record_id == "biblio-1"
         assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_build_query_accepts_token_override():
+    from scholar_mcp.medical.brazil_moh import _build_query
+
+    composed = _build_query(
+        "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
+    )
+    assert "ti:dengue AND ti:manejo" in composed
+    assert "ti:intratavel" not in composed
+
+
+def test_title_token_relaxations_generates_right_to_left_subsets():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["dengue", "manejo", "clinico", "adulto"]
+    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
+    assert ladder == [
+        ["dengue", "manejo", "clinico"],
+        ["dengue", "manejo"],
+        ["dengue"],
+    ]
+
+
+def test_title_token_relaxations_respects_min_tokens():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["dengue", "manejo"]
+    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
+    assert ladder == [["dengue"]]
+
+    # When min_tokens is 2, length-2 input produces no relaxation
+    assert _title_token_relaxations(tokens, max_steps=3, min_tokens=2) == []
+
+
+def test_title_token_relaxations_empty_or_single_token_returns_empty():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    assert _title_token_relaxations([]) == []
+    assert _title_token_relaxations(["dengue"]) == []
+
+
+def test_title_token_relaxations_respects_max_steps():
+    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
+
+    tokens = ["a", "b", "c", "d", "e", "f"]
+    ladder = _title_token_relaxations(tokens, max_steps=2, min_tokens=1)
+    assert len(ladder) == 2
+    assert ladder == [
+        ["a", "b", "c", "d", "e"],
+        ["a", "b", "c", "d"],
+    ]
+
+
+@respx.mock
+async def test_search_title_scoped_progressive_relaxation_hits(tmp_path: Path):
+    """When full title-scoped AND misses, progressive relaxation retries with
+    trailing tokens dropped until a title match is found."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        # Query has 3 usable tokens: 'dengue', 'manejo', 'intratavel'
+        # Call 1: ti:dengue AND ti:manejo AND ti:intratavel -> 0 hits
+        # Call 2: ti:dengue AND ti:manejo -> 1 hit
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue: manejo clínico")])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue manejo intratavel", limit=5)
+
+        assert len(records) == 1
+        assert records[0].title == "Dengue: manejo clínico"
+        assert meta.error is False
+        assert route.call_count == 2
+        q1 = route.calls[0].request.url.params["q"]
+        q2 = route.calls[1].request.url.params["q"]
+        assert "ti:dengue AND ti:manejo AND ti:intratavel" in q1
+        assert "ti:dengue AND ti:manejo" in q2
+        assert "ti:intratavel" not in q2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_to_all_field(tmp_path: Path):
+    """When all progressive title relaxations return empty, fall back to all-field query."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> all-field (hit)
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),  # full title
+                httpx.Response(200, json=_bvs_response([])),  # title relaxed 1
+                httpx.Response(200, json=_bvs_response([])),  # title relaxed 2
+                httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),  # all-field
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue zika chikungunya", limit=5)
+
+        assert len(records) == 1
+        assert records[0].record_id == "fallback-1"
+        assert meta.error is False
+        assert route.call_count == 4
+        # Verify call 4 is all-field
+        assert "(dengue AND zika AND chikungunya)" in route.calls[3].request.url.params["q"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
+    """If a progressive title relaxation step errors (HTTP error or timeout),
+    do not keep looping through relaxations; degrade gracefully."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),  # full title miss
+                httpx.Response(500, text="Server Error"),     # relaxed step errors
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue manejo intratavel", limit=5)
+
+        assert route.call_count == 2
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
+    """The relaxed title stage composes through _build_query, so the BRISA
+    collection filter must survive into the relaxed call."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(200, json=_bvs_response([])),  # full title miss
+                httpx.Response(200, json=_bvs_response([_bvs_doc()])),  # relaxed hit
+            ]
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue manejo intratavel", limit=5, collection="brisa"
+        )
+
+        assert len(records) == 1
+        assert meta.error is False
+        assert route.call_count == 2
+        q2 = route.calls[1].request.url.params["q"]
+        assert 'db:"BRISA"' in q2
+        assert "ti:dengue AND ti:manejo" in q2
+        assert "ti:intratavel" not in q2
     finally:
         await cache.close()
         await http_client.aclose()
