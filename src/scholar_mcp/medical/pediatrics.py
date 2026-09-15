@@ -12,10 +12,12 @@ from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 AAP_BASE = "https://publications.aap.org"
-AAP_URL = "https://publications.aap.org/pediatrics/search"
+# AAP moved search to a Solr-backed /search-results page; the old
+# /pediatrics/search endpoint 404s.
+AAP_URL = "https://publications.aap.org/pediatrics/search-results"
 
-AAP_ITEM_SELECTORS = ".search-result, .result-item, .article-item, article, .publication-item"
-TITLE_SELECTORS = "h2, h3, .title, a.title"
+AAP_ITEM_SELECTORS = ".item-container, .search-result, .result-item, .article-item, article, .publication-item"
+TITLE_SELECTORS = "h4, h2, h3, .title, a.title"
 DESC_SELECTORS = ".description, .summary, .abstract, p"
 
 AGE_RANGE_RE = re.compile(
@@ -97,11 +99,14 @@ class PediatricsEngine:
 
         for item in soup.select(item_selectors):
             title_el = item.select_one(TITLE_SELECTORS)
-            title = title_el.get_text(strip=True) if title_el else ""
+            # " " separator: Solr highlight markup (<strong> around matched
+            # terms) nests nodes inside titles; strip=True alone concatenates
+            # them into one token and the query-overlap filter drops the item.
+            title = title_el.get_text(" ", strip=True) if title_el else ""
             if not title or len(title) <= 10:
                 continue
 
-            link = item.find("a")
+            link = (title_el.find("a") if title_el else None) or item.find("a")
             href = link.get("href", "") if link else ""
             if href:
                 item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
@@ -109,7 +114,7 @@ class PediatricsEngine:
                 item_url = base_url
 
             desc_el = item.select_one(DESC_SELECTORS)
-            description = (desc_el.get_text(strip=True) if desc_el else "")[:300]
+            description = (desc_el.get_text(" ", strip=True) if desc_el else "")[:300]
 
             age_group = _extract_age_group(title) or _extract_age_group(description)
 
@@ -178,13 +183,24 @@ class PediatricsEngine:
         fingerprint, so no custom user agent is sent."""
         from camoufox.async_api import AsyncCamoufox
 
+        target = f"{url}?{urlencode({'q': query})}"
         async with AsyncCamoufox(headless=True) as browser:
             page = await browser.new_page()
-            await page.goto(
-                f"{url}?{urlencode({'q': query})}",
-                wait_until="domcontentloaded",
-            )
+            await page.goto(target, wait_until="domcontentloaded")
+            # The Cloudflare interstitial auto-redirects to a mangled URL
+            # ("?autologincheck=redirected" appended to the query) that 404s.
+            # Once the challenge clears, its cookie is set and a clean
+            # re-navigation reaches the real results page.
+            await page.wait_for_timeout(5000)
             content = await page.content()
+            if page.url != target or "just a moment" in content.lower():
+                await page.goto(target, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
+                content = await page.content()
         return self._parse_guideline_items(content, item_selectors, base_url, source)
 
     async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:

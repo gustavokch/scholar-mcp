@@ -9,7 +9,7 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
 BF_URL = "https://brightfutures.aap.org/Search"
-AAP_URL = "https://publications.aap.org/pediatrics/search"
+AAP_URL = "https://publications.aap.org/pediatrics/search-results"
 
 
 async def _engine(tmp_path: Path):
@@ -22,8 +22,12 @@ async def _engine(tmp_path: Path):
     return engine, cache, http_client
 
 
-def _install_fake_camoufox(monkeypatch, rendered_html=""):
-    """Fake camoufox.async_api; returns (attempts, captured_urls)."""
+def _install_fake_camoufox(monkeypatch, rendered_html="", first_landing_url=None):
+    """Fake camoufox.async_api; returns (attempts, captured_urls).
+
+    ``first_landing_url`` simulates the Cloudflare interstitial: the first
+    goto lands on a mangled redirect URL, later gotos land clean.
+    """
     import sys
     import types
 
@@ -31,8 +35,19 @@ def _install_fake_camoufox(monkeypatch, rendered_html=""):
     captured_urls: list[str] = []
 
     class _FakePage:
+        def __init__(self):
+            self.url = ""
+
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
+            self.url = first_landing_url if len(captured_urls) == 1 else url
+            self.url = self.url or url
+            return None
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+        async def wait_for_load_state(self, *a, **k):
             return None
 
         async def content(self):
@@ -565,6 +580,116 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
         assert not camoufox_attempts, "browser launched despite PubMed results"
         assert len(guidelines) == 1
         assert guidelines[0].source == "pubmed-aap"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_parse_new_search_results_markup(tmp_path: Path, monkeypatch):
+    """AAP moved search to /pediatrics/search-results (Solr). Result items
+    are div.item-container with the title in h4 > a under .sri-title; the old
+    /pediatrics/search endpoint 404s. The parser must extract these items."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body>
+      <div class="sr-list al-article-box al-normal">
+        <div class="item-container">
+          <div class="item-info">
+            <div class="sri-title customLink al-title">
+              <h4><a href="/pediatrics/article/155/2/e2024068415/200612/There-Are-No-Bad-Kids?searchresult=1">
+                There Are No Bad Kids: An Antiracist Approach to
+                <strong>Oppositional</strong> <strong>Defiant</strong> Disorder 2024</a></h4>
+            </div>
+            <div class="badge-bar"><div class="resource-links-info">
+              <div class="item"><a href="/pediatrics/article-pdf/1756741/peds.2024-068415.pdf">PDF</a></div>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    </body></html>
+    """
+
+    _install_fake_camoufox(monkeypatch, rendered_html)
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("oppositional defiant")
+        assert guidelines, "new search-results markup not parsed"
+        g = guidelines[0]
+        assert "Oppositional Defiant Disorder" in g.title, (
+            "nested highlight nodes must be space-separated, not concatenated"
+        )
+        assert "/pediatrics/article/" in g.url
+        assert "article-pdf" not in g.url, "link must be the article, not the PDF badge"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_scrape_renavigates_when_challenge_redirects(
+    tmp_path: Path, monkeypatch
+):
+    """The Cloudflare interstitial redirects to a mangled URL
+    (?autologincheck=redirected appended to the query) that 404s. Once the
+    challenge clears, the scrape must re-navigate to the clean target URL
+    before grabbing content."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body>
+      <div class="item-container">
+        <div class="item-info">
+          <div class="sri-title al-title">
+            <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+          </div>
+        </div>
+      </div>
+    </body></html>
+    """
+    mangled = (
+        f"{AAP_URL}?q=ibuprofen?autologincheck=redirected"
+    )
+    _attempts, captured = _install_fake_camoufox(
+        monkeypatch, rendered_html, first_landing_url=mangled
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, (
+            "no re-navigation after the challenge mangled the first landing"
+        )
+        assert captured[-1] == f"{AAP_URL}?q=ibuprofen"
+        assert guidelines
         assert meta.error is False
     finally:
         await cache.close()
