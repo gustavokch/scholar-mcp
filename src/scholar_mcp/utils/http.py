@@ -166,16 +166,16 @@ class AsyncHttpClient:
 
     # Process-global limiter registry. A second client built from the same
     # settings (the resolver's fallback path) must not double the effective
-    # rate against a host — limiters are keyed by (host, rate) so clients
+    # rate against a host — limiters are keyed by (host, rate, loop) so clients
     # with different rates (keyed vs unkeyed NCBI, S2 tiers) keep separate
-    # buckets while same-settings clients share one.
+    # buckets while same-settings clients on the same event loop share one.
     #
-    # Known limitation: a shared AsyncRateLimiter carries an asyncio.Lock
-    # that binds to the first event loop that waits on it; cross-loop sharing
-    # within one process would need per-loop buckets. Not a scenario here —
-    # every client in this codebase agrees on rate and the lock is almost
-    # never contended.
-    _limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
+    # The loop is part of the key because AsyncRateLimiter carries an
+    # asyncio.Lock that binds to the first loop that contends it: sharing one
+    # limiter across loops would raise RuntimeError on the second loop. The
+    # production server runs a single loop, so this costs nothing there; it
+    # keeps each test's loop isolated the way per-instance limiters did.
+    _limiters: dict[tuple[str, float, Any], AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
     def __init__(
@@ -217,11 +217,19 @@ class AsyncHttpClient:
             rate = DEFAULT_HOST_RATES[host_key]
         else:
             rate = DEFAULT_FALLBACK_RATE
-        key = (host_key, rate)
+        key = (host_key, rate, self._current_loop())
         with self._limiters_lock:
             if key not in self._limiters:
                 self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
             return self._limiters[key]
+
+    @staticmethod
+    def _current_loop() -> Any:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            # Sync caller (no running loop): all such callers share one bucket.
+            return None
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.
