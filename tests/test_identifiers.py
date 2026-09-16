@@ -101,12 +101,27 @@ async def test_resolution_is_cached():
 
 
 @respx.mock
-async def test_resolution_survives_upstream_failure():
-    respx.get(url__startswith=IDCONV).mock(return_value=httpx.Response(500))
+async def test_failed_idconv_resolution_is_not_cached():
+    """A failed idconv enrichment must not be cached: the next call retries
+    upstream instead of serving the poisoned map for cache_ttl_seconds."""
+    route = respx.get(url__startswith=IDCONV).mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(
+                200, json={"records": [{"pmid": "32000000", "pmcid": "PMC7000000", "doi": "10.1/x"}]}
+            ),
+        ]
+    )
     client = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
-    res = await resolve_identifiers("32000000", client, TTLCache(), Settings())
-    assert res.pmid == "32000000"  # input is preserved even when enrichment fails
-    await client.aclose()
+    cache = TTLCache()
+    try:
+        res1 = await resolve_identifiers("32000000", client, cache, Settings())
+        assert res1.pmid == "32000000"  # input is preserved even when enrichment fails
+        res2 = await resolve_identifiers("32000000", client, cache, Settings())
+        assert route.call_count == 2  # first failure was NOT cached
+        assert res2.doi == "10.1/x"
+    finally:
+        await client.aclose()
 
 
 def test_clean_identifier_detects_arxiv():

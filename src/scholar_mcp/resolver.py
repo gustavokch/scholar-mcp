@@ -74,6 +74,13 @@ class WaterfallResolver:
 
     async def fetch_abstract(self, ids: IdentifierMap) -> PaperMetadata | None:
         meta = await self.pubmed.fetch_abstract(ids)
+        if (not meta or not meta.abstract) and ids.pmid:
+            epmc_meta = await self.europe_pmc.fetch_metadata(ids)
+            if epmc_meta is not None:
+                if meta is None:
+                    meta = epmc_meta
+                elif not meta.abstract and epmc_meta.abstract:
+                    meta.abstract = epmc_meta.abstract
         if (not meta or not meta.abstract) and ids.doi:
             meta = await self.crossref.fetch_metadata(ids.doi)
         if (not meta or not meta.abstract) and ids.arxiv:

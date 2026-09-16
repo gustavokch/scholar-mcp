@@ -224,6 +224,19 @@ async def test_fetch_pdf_bytes_survives_arxiv_transport_error():
     assert (b, src) == (b"%PDF-sh", "scihub")
 
 
+async def test_fetch_abstract_falls_back_to_europepmc_for_pmid():
+    """PubMed efetch transport failure (None) must not be the end of the
+    chain: Europe PMC metadata by PMID supplies the abstract."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.fetch_abstract = AsyncMock(return_value=None)
+    epmc_meta = PaperMetadata(title="E", abstract="EPMC abstract.", pmid="32000000")
+    r.europe_pmc.fetch_metadata = AsyncMock(return_value=epmc_meta)
+    meta = await r.fetch_abstract(IdentifierMap(pmid="32000000"))
+    assert meta is not None
+    assert meta.abstract == "EPMC abstract."
+    r.europe_pmc.fetch_metadata.assert_awaited_once()
+
+
 async def test_fetch_abstract_falls_back_to_arxiv():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     r.pubmed.fetch_abstract = AsyncMock(return_value=None)

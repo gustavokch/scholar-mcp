@@ -119,13 +119,15 @@ async def resolve_identifiers(
                 id_map.ambiguous = True
 
         # Step 2: Enrich with NCBI idconv if we have pmid, pmcid, or doi
+        enrichment_ok = True
         query_id = id_map.pmcid or id_map.doi or id_map.pmid
         if query_id and not id_map.ambiguous:
             resp = await client.get(
                 IDCONV_URL,
                 params={"ids": query_id, "format": "json"},
             )
-            if resp is not None and resp.status_code == 200:
+            enrichment_ok = resp is not None and resp.status_code == 200
+            if enrichment_ok:
                 data = resp.json()
                 records = data.get("records", [])
                 if records:
@@ -138,9 +140,11 @@ async def resolve_identifiers(
                         id_map.doi = str(rec["doi"])
     except Exception:
         # Never crash; return best-effort map
-        pass
+        enrichment_ok = False
 
-    # Cache under all known keys
+    # Cache under all known keys — but only when the idconv enrichment
+    # succeeded (or was never attempted). A flapping idconv would otherwise
+    # poison the cache with an unenriched map for cache_ttl_seconds.
     keys_to_cache = {cache_key}
     if id_map.doi:
         keys_to_cache.add(f"idmap:{id_map.doi.lower()}")
@@ -151,7 +155,8 @@ async def resolve_identifiers(
     if id_map.arxiv:
         keys_to_cache.add(f"idmap:{id_map.arxiv.lower()}")
 
-    for k in keys_to_cache:
-        await cache.set(k, id_map)
+    if enrichment_ok:
+        for k in keys_to_cache:
+            await cache.set(k, id_map)
 
     return id_map

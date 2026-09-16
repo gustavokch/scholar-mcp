@@ -19,6 +19,49 @@ class EuropePMCProvider(BaseProvider):
     def __init__(self, http_client: AsyncHttpClient) -> None:
         super().__init__(http_client)
 
+    async def fetch_metadata(self, ids: IdentifierMap) -> PaperMetadata | None:
+        """Fetch core metadata by PMID. Returns None on any miss or failure.
+
+        PubMed efetch is the primary PMID metadata source, but its failure
+        (transport error, empty efetch) is indistinguishable from an absent
+        record. Europe PMC search by EXT_ID is the fallback that keeps a
+        transient PubMed failure from surfacing as not_found.
+        """
+        if not ids.pmid:
+            return None
+        try:
+            resp = await self.http_client.get(
+                f"{EPMC_REST_BASE}/search",
+                params={
+                    "query": f"EXT_ID:{ids.pmid} AND SRC:MED",
+                    "format": "json",
+                    "resultType": "core",
+                },
+            )
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            results = data.get("resultList", {}).get("result", [])
+            if not results:
+                return None
+            rec = results[0]
+            authors: list[str] = []
+            author_str = rec.get("authorString", "")
+            if author_str:
+                authors = [a.strip() for a in author_str.split(",") if a.strip()]
+            return PaperMetadata(
+                title=rec.get("title", "").rstrip("."),
+                authors=authors,
+                year=str(rec.get("pubYear") or ""),
+                venue=rec.get("journalTitle") or "",
+                doi=rec.get("doi"),
+                pmid=str(rec.get("pmid") or ids.pmid),
+                pmcid=rec.get("pmcid"),
+                abstract=rec.get("abstractText") or "",
+            )
+        except Exception:
+            return None
+
     async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
         pmcid = ids.pmcid
         if pmcid:
