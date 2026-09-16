@@ -593,3 +593,30 @@ def test_idconv_receives_api_key():
     assert "api_key=k123" in url
     # No request made: the httpx AsyncClient never opened a connection, so
     # nothing to close from this sync test.
+
+
+def test_pmc_article_download_does_not_receive_credentials():
+    """Credentials belong to E-utilities, not to every NCBI-hosted file.
+
+    ``resolver.py`` fetches whatever OA location Unpaywall reports, and PMC
+    locations are routinely ``www.ncbi.nlm.nih.gov/pmc/articles/PMC.../pdf/``.
+    Those endpoints ignore ``api_key``, so appending it only widens where the
+    key is transmitted.
+    """
+    client = AsyncHttpClient(
+        Settings(
+            pubmed_api_key="k123",
+            pubmed_email="e@example.com",
+            pubmed_tool="TestApp",
+        )
+    )
+    url = client._inject_credentials(
+        "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123456/pdf/main.pdf"
+    )
+    assert "api_key" not in url
+    assert "tool" not in url
+    assert "email" not in url
+
+    # A PubMed record page is likewise not an E-utilities endpoint.
+    record = client._inject_credentials("https://pubmed.ncbi.nlm.nih.gov/12345/")
+    assert "api_key" not in record

@@ -292,12 +292,26 @@ class AsyncHttpClient:
         new_query = urllib.parse.urlencode(query_dict, doseq=True)
         return urllib.parse.urlunparse(parsed._replace(query=new_query))
 
+    @staticmethod
+    def _takes_eutils_params(parsed: urllib.parse.ParseResult) -> bool:
+        """Whether ``parsed`` names an endpoint that reads api_key/email/tool.
+
+        Only E-utilities and the PMC ID converter accept these. Every other
+        NCBI host serves ordinary pages and files that ignore them -- and the
+        resolver hands this client whatever OA location Unpaywall reports,
+        which for PMC is routinely ``www.ncbi.nlm.nih.gov/pmc/articles/...``.
+        Matching the whole domain would append the API key to those downloads
+        for no benefit, so the match stays on the endpoints that use it.
+        """
+        hostname = (parsed.hostname or "").lower()
+        if hostname == "eutils.ncbi.nlm.nih.gov":
+            return True
+        is_ncbi = hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov")
+        return is_ncbi and "/pmc/utils/idconv/" in parsed.path
+
     def _inject_credentials(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
-        hostname = (parsed.hostname or "").lower()
-        # Any *.ncbi.nlm.nih.gov host accepts the E-utilities parameters,
-        # including idconv at www.ncbi.nlm.nih.gov/pmc/utils/idconv/.
-        if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
+        if self._takes_eutils_params(parsed):
             query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if self.settings.pubmed_api_key and "api_key" not in query_dict:
                 query_dict["api_key"] = [self.settings.pubmed_api_key]
