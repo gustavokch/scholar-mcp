@@ -886,3 +886,62 @@ async def test_camoufox_waits_on_results_not_the_clock(tmp_path: Path, monkeypat
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "challenge_html",
+    [
+        # Localised title, but the body still carries the platform markers.
+        "<html><head><title>Un momento...</title></head>"
+        "<body><div id='challenge-platform'></div></body></html>",
+        "<html><head><title>Einen Moment bitte...</title></head>"
+        "<body><div class='cf-browser-verification'></div></body></html>",
+    ],
+)
+@respx.mock
+async def test_camoufox_detects_localized_challenge(
+    tmp_path: Path, monkeypatch, challenge_html
+):
+    """A challenge page whose title is localised must still trigger
+    re-navigation; detection keys off the platform markers, not the English
+    title text."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+    </div></div></body></html>
+    """
+    # Clean first landing URL, but the served page is still the challenge:
+    # only the content check can catch this.
+    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html,
+        challenge_html=challenge_html,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, "localized challenge did not trigger re-navigation"
+        assert guidelines, "results on the second navigation were not returned"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()

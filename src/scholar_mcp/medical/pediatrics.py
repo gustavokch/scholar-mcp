@@ -255,7 +255,7 @@ class PediatricsEngine:
                 first = self._parse_guideline_items(
                     content, item_selectors, base_url, source
                 )
-                if page.url == target and "just a moment" not in content.lower():
+                if page.url == target and not _looks_like_challenge(content):
                     return first
                 await page.goto(
                     target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
