@@ -29,12 +29,20 @@ from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
 from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.text import truncate_content as _truncate_content
 
 
 class WaterfallResolver:
     """Multi-tier waterfall resolver for academic paper discovery and full-text retrieval."""
+
+    # Per-backend status from the current request's search(): "ok" (>=1 result),
+    # "empty" (0 results, no provider error), "blocked" (403/429), or "failed"
+    # (other error or raised). Context-scoped, not a plain attribute: server.py
+    # holds one resolver for the whole process, so two concurrent MCP calls
+    # would otherwise overwrite each other's map between the write and the read.
+    last_search_sources: dict[str, str] = ContextScoped(dict)
 
     def __init__(
         self,
@@ -61,10 +69,6 @@ class WaterfallResolver:
         self.crossref = CrossRefProvider(self.http_client)
         self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
         self.s2 = SemanticScholarProvider(self.http_client, api_key=self.settings.s2_api_key)
-        # Per-backend status from the most recent search(): "ok" (>=1 result),
-        # "empty" (0 results, no provider error), "blocked" (403/429), or
-        # "failed" (other error or raised). Rebuilt on every search() call.
-        self.last_search_sources: dict[str, str] = {}
         self.ranking_pipeline = RankingPipeline(
             openalex=self.openalex,
             europe_pmc=self.europe_pmc,

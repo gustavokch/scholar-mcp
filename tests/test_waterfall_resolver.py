@@ -284,6 +284,46 @@ async def test_last_search_sources_empty_when_no_error():
     assert r.last_search_sources["pubmed"] == "empty"
 
 
+async def test_last_search_sources_is_per_request():
+    """The resolver is a module-level singleton in server.py, so two concurrent
+    MCP calls share the instance. Each must read back only its own map.
+
+    The fast call finishes first but reads its map only after the slow call has
+    written its own status — a plain instance attribute hands it the slow
+    call's value.
+    """
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    started = asyncio.Event()
+    slow_done = asyncio.Event()
+
+    async def slow_search(*args, **kwargs):
+        started.set()
+        await asyncio.sleep(0.05)
+        return [PaperMetadata(title="A")]
+
+    async def fast_search(*args, **kwargs):
+        return []
+
+    async def run_slow():
+        r.pubmed.search = slow_search
+        try:
+            await r.search("slow", source="pubmed", rerank=False)
+            return dict(r.last_search_sources)
+        finally:
+            slow_done.set()
+
+    async def run_fast():
+        await started.wait()
+        r.pubmed.search = fast_search
+        await r.search("fast", source="pubmed", rerank=False)
+        await slow_done.wait()
+        return dict(r.last_search_sources)
+
+    slow_map, fast_map = await asyncio.gather(run_slow(), run_fast())
+    assert slow_map == {"pubmed": "ok"}
+    assert fast_map == {"pubmed": "empty"}
+
+
 async def test_waterfall_resolver_search_with_rerank():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     mock_papers = [
