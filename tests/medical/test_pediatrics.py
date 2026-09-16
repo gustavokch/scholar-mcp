@@ -785,3 +785,38 @@ async def test_camoufox_keeps_first_pass_when_renavigation_is_empty(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_scrape_is_time_bounded(tmp_path: Path, monkeypatch):
+    """The browser fallback must not run unbounded: a hung navigation is cut
+    off by a total timeout and the browser context is still torn down."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical import pediatrics as pediatrics_mod
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    monkeypatch.setattr(pediatrics_mod, "_CAMOUFOX_TOTAL_TIMEOUT_S", 0.05)
+    _attempts, _captured, exits = _install_fake_camoufox(
+        monkeypatch, rendered_html="<html></html>", hang_s=5.0
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert guidelines == []
+        assert meta.error is True
+        assert exits, "browser context was not torn down after the timeout"
+    finally:
+        await cache.close()
+        await http_client.aclose()

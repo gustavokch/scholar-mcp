@@ -30,6 +30,15 @@ AGE_TERM_RE = re.compile(
 )
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
+# Browser-fallback budget. The AAP host sits behind Cloudflare, so the
+# challenge needs time to settle, but search_aap_guidelines is an MCP tool
+# with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
+_NAV_TIMEOUT_MS = 15000
+_NETWORKIDLE_TIMEOUT_MS = 15000
+_CHALLENGE_SETTLE_MS = 5000
+_POST_RENAV_SETTLE_MS = 3000
+_CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,31 +193,41 @@ class PediatricsEngine:
         from camoufox.async_api import AsyncCamoufox
 
         target = f"{url}?{urlencode({'q': query})}"
-        async with AsyncCamoufox(headless=True) as browser:
-            page = await browser.new_page()
-            await page.goto(target, wait_until="domcontentloaded")
-            # The Cloudflare interstitial auto-redirects to a mangled URL
-            # ("?autologincheck=redirected" appended to the query) that 404s.
-            # Once the challenge clears, its cookie is set and a clean
-            # re-navigation reaches the real results page.
-            await page.wait_for_timeout(5000)
-            content = await page.content()
-            first = self._parse_guideline_items(
-                content, item_selectors, base_url, source
-            )
-            if page.url == target and "just a moment" not in content.lower():
-                return first
-            await page.goto(target, wait_until="domcontentloaded")
-            try:
-                await page.wait_for_load_state("networkidle", timeout=15000)
-            except Exception:
-                pass
-            await page.wait_for_timeout(3000)
-            content = await page.content()
-            second = self._parse_guideline_items(
-                content, item_selectors, base_url, source
-            )
-        return second or first
+
+        async def _run() -> list[PediatricGuideline]:
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                await page.goto(
+                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+                )
+                # The Cloudflare interstitial auto-redirects to a mangled URL
+                # ("?autologincheck=redirected" appended to the query) that
+                # 404s. Once the challenge clears, its cookie is set and a
+                # clean re-navigation reaches the real results page.
+                await page.wait_for_timeout(_CHALLENGE_SETTLE_MS)
+                content = await page.content()
+                first = self._parse_guideline_items(
+                    content, item_selectors, base_url, source
+                )
+                if page.url == target and "just a moment" not in content.lower():
+                    return first
+                await page.goto(
+                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+                )
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle", timeout=_NETWORKIDLE_TIMEOUT_MS
+                    )
+                except Exception:
+                    pass
+                await page.wait_for_timeout(_POST_RENAV_SETTLE_MS)
+                content = await page.content()
+                second = self._parse_guideline_items(
+                    content, item_selectors, base_url, source
+                )
+            return second or first
+
+        return await asyncio.wait_for(_run(), timeout=_CAMOUFOX_TOTAL_TIMEOUT_S)
 
     async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:
         """AAP-filtered guideline search over PubMed publication types.
