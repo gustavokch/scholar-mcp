@@ -945,3 +945,41 @@ async def test_camoufox_detects_localized_challenge(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_anchor_without_href_falls_back_to_item_link():
+    """A title anchor carrying only a name attribute must not short-circuit
+    the URL to base_url; the first href-bearing anchor in the item wins."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a name="anchor">Ibuprofen Safety in Infants 2024</a></h4>
+      <a href="/pediatrics/article/9">Read more</a>
+    </div></div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].url.endswith("/pediatrics/article/9")
+
+
+def test_title_highlight_inside_word_not_split():
+    """Solr highlights a partial token mid-word (<strong>Oppo</strong>sitional);
+    the separator must not inject a space there."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a href="/pediatrics/article/9"><strong>Oppo</strong>sitional
+      Defiant Disorder 2024</a></h4>
+    </div></div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].title == "Oppositional Defiant Disorder 2024"

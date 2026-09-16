@@ -37,6 +37,17 @@ def _select_title_el(item):
     return None
 
 
+def _first_href_anchor(*scopes):
+    """First anchor that actually carries an href, in scope order."""
+    for scope in scopes:
+        if scope is None:
+            continue
+        for anchor in scope.find_all("a"):
+            if anchor.get("href"):
+                return anchor
+    return None
+
+
 def _looks_like_challenge(content: str) -> bool:
     lowered = content.lower()
     return any(marker in lowered for marker in _CHALLENGE_MARKERS)
@@ -137,14 +148,21 @@ class PediatricsEngine:
 
         for item in soup.select(item_selectors):
             title_el = _select_title_el(item)
-            # " " separator: Solr highlight markup (<strong> around matched
-            # terms) nests nodes inside titles; strip=True alone concatenates
-            # them into one token and the query-overlap filter drops the item.
-            title = title_el.get_text(" ", strip=True) if title_el else ""
+            # Raw get_text() keeps the document whitespace between nested
+            # Solr highlight nodes (so <strong>Oppositional</strong>
+            # <strong>Defiant</strong> stays separated) without inventing a
+            # space where a highlight splits a word mid-token
+            # (<strong>Oppo</strong>sitional); the collapse below tidies
+            # newlines and indentation.
+            title = (
+                re.sub(r"\s+", " ", title_el.get_text()).strip()
+                if title_el
+                else ""
+            )
             if not title or len(title) <= 10:
                 continue
 
-            link = (title_el.find("a") if title_el else None) or item.find("a")
+            link = _first_href_anchor(title_el, item)
             href = link.get("href", "") if link else ""
             if href:
                 item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
