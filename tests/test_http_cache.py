@@ -528,3 +528,42 @@ async def test_429_throttle_pushes_limiter_into_the_future():
     # Retry-After was 0.2s, so the pause must extend past the request start.
     assert limiter.throttled_until >= baseline + 0.2
     await client.aclose()
+
+
+async def test_limiter_registry_shared_across_client_instances():
+    s = Settings(pubmed_api_key=None)
+    a = AsyncHttpClient(s)
+    b = AsyncHttpClient(s)
+    try:
+        # Two clients built from the same settings must share one NCBI
+        # bucket; per-instance registries doubled the effective rate.
+        assert a._limiter_for("eutils.ncbi.nlm.nih.gov") is b._limiter_for(
+            "www.ncbi.nlm.nih.gov"
+        )
+    finally:
+        await a.aclose()
+        await b.aclose()
+
+
+def test_ncbi_api_key_env_alias(monkeypatch):
+    # Subject IS env loading — sanctioned Settings.load() exception.
+    monkeypatch.setenv("NCBI_API_KEY", "k123")
+    monkeypatch.delenv("PUBMED_API_KEY", raising=False)
+    assert Settings.load().pubmed_api_key == "k123"
+
+
+def test_pubmed_key_wins_over_ncbi_alias(monkeypatch):
+    monkeypatch.setenv("PUBMED_API_KEY", "p1")
+    monkeypatch.setenv("NCBI_API_KEY", "k123")
+    assert Settings.load().pubmed_api_key == "p1"
+
+
+def test_idconv_receives_api_key():
+    s = Settings(pubmed_api_key="k123")
+    client = AsyncHttpClient(s)
+    url = client._inject_credentials(
+        "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
+    )
+    assert "api_key=k123" in url
+    # No request made: the httpx AsyncClient never opened a connection, so
+    # nothing to close from this sync test.

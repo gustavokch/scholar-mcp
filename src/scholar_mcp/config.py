@@ -102,7 +102,7 @@ class Settings:
         )
 
         return cls(
-            pubmed_api_key=os.getenv("PUBMED_API_KEY"),
+            pubmed_api_key=os.getenv("PUBMED_API_KEY") or os.getenv("NCBI_API_KEY"),
             pubmed_email=os.getenv("PUBMED_EMAIL"),
             pubmed_tool=os.getenv("PUBMED_TOOL", "ScholarMCP"),
             unpaywall_email=os.getenv("UNPAYWALL_EMAIL") or os.getenv("PUBMED_EMAIL"),

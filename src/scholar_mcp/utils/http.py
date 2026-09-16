@@ -164,6 +164,20 @@ class FetchError(RuntimeError):
 class AsyncHttpClient:
     """Shared HTTP client with rate-limiting, retries, and NCBI credential injection."""
 
+    # Process-global limiter registry. A second client built from the same
+    # settings (the resolver's fallback path) must not double the effective
+    # rate against a host — limiters are keyed by (host, rate) so clients
+    # with different rates (keyed vs unkeyed NCBI, S2 tiers) keep separate
+    # buckets while same-settings clients share one.
+    #
+    # Known limitation: a shared AsyncRateLimiter carries an asyncio.Lock
+    # that binds to the first event loop that waits on it; cross-loop sharing
+    # within one process would need per-loop buckets. Not a scenario here —
+    # every client in this codebase agrees on rate and the lock is almost
+    # never contended.
+    _limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
+    _limiters_lock = threading.Lock()
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -186,8 +200,6 @@ class AsyncHttpClient:
                 "User-Agent": f"ScholarMCP/1.0.0 (mailto:{self.settings.pubmed_email or 'scholar-mcp@example.com'})"
             },
         )
-        self._limiters: dict[str, AsyncRateLimiter] = {}
-        self._limiters_lock = threading.Lock()
 
     def _limiter_for_url(self, url: str) -> AsyncRateLimiter:
         """Limiter for ``url``'s host, with the port and any userinfo stripped."""
@@ -195,18 +207,19 @@ class AsyncHttpClient:
         return self._limiter_for(parsed.hostname or parsed.netloc)
 
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
-        key = _host_key(host)
+        host_key = _host_key(host)
+        if host_key == "ncbi.nlm.nih.gov":
+            rate = self.settings.ncbi_rate_limit
+        elif host_key == "api.semanticscholar.org":
+            # S2 shared pool without a key; dedicated quota with one.
+            rate = 5.0 if self.settings.s2_api_key else 1.0
+        elif host_key in DEFAULT_HOST_RATES:
+            rate = DEFAULT_HOST_RATES[host_key]
+        else:
+            rate = DEFAULT_FALLBACK_RATE
+        key = (host_key, rate)
         with self._limiters_lock:
             if key not in self._limiters:
-                if key == "ncbi.nlm.nih.gov":
-                    rate = self.settings.ncbi_rate_limit
-                elif key == "api.semanticscholar.org":
-                    # S2 shared pool without a key; dedicated quota with one.
-                    rate = 5.0 if self.settings.s2_api_key else 1.0
-                elif key in DEFAULT_HOST_RATES:
-                    rate = DEFAULT_HOST_RATES[key]
-                else:
-                    rate = DEFAULT_FALLBACK_RATE
                 self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
             return self._limiters[key]
 
@@ -235,7 +248,9 @@ class AsyncHttpClient:
     def _inject_credentials(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or "").lower()
-        if hostname == "eutils.ncbi.nlm.nih.gov":
+        # Any *.ncbi.nlm.nih.gov host accepts the E-utilities parameters,
+        # including idconv at www.ncbi.nlm.nih.gov/pmc/utils/idconv/.
+        if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
             query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if self.settings.pubmed_api_key and "api_key" not in query_dict:
                 query_dict["api_key"] = [self.settings.pubmed_api_key]
