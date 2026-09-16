@@ -731,3 +731,57 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_keeps_first_pass_when_renavigation_is_empty(
+    tmp_path: Path, monkeypatch
+):
+    """A re-navigation that lands on another challenge must not discard results
+    the first pass already parsed."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    # First pass has real results but a mangled landing URL, so the code
+    # re-navigates; the second pass comes back as a bare challenge page.
+    good_html = """
+    <html><body>
+      <div class="item-container"><div class="sri-title">
+        <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+      </div></div>
+    </body></html>
+    """
+    challenge_html = (
+        "<html><head><title>Just a moment...</title></head><body></body></html>"
+    )
+
+    # rendered_html is what nav>=2 serves; challenge_html is nav 1. Swap them so
+    # nav 1 is good and nav 2 is the challenge.
+    _attempts, captured, _exits = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html=challenge_html,
+        first_landing_url=f"{AAP_URL}?q=ibuprofen?autologincheck=redirected",
+        challenge_html=good_html,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, "expected a re-navigation attempt"
+        assert guidelines, "first-pass results were discarded by the empty retry"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()

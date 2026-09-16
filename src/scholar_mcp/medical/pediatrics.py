@@ -193,15 +193,22 @@ class PediatricsEngine:
             # re-navigation reaches the real results page.
             await page.wait_for_timeout(5000)
             content = await page.content()
-            if page.url != target or "just a moment" in content.lower():
-                await page.goto(target, wait_until="domcontentloaded")
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(3000)
-                content = await page.content()
-        return self._parse_guideline_items(content, item_selectors, base_url, source)
+            first = self._parse_guideline_items(
+                content, item_selectors, base_url, source
+            )
+            if page.url == target and "just a moment" not in content.lower():
+                return first
+            await page.goto(target, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(3000)
+            content = await page.content()
+            second = self._parse_guideline_items(
+                content, item_selectors, base_url, source
+            )
+        return second or first
 
     async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:
         """AAP-filtered guideline search over PubMed publication types.
