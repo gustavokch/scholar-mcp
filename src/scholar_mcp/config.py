@@ -76,6 +76,10 @@ class Settings:
     # the 30 s request timeout would otherwise blow the 45 s waterfall budget.
     scihub_mirror_timeout_s: float = 12.0
     enable_browser_fallback: bool = True
+    # BVS-specific gate for the camoufox tier in brazil_moh, independent of
+    # the pediatrics scrapers. pesquisa.bvsalud.org 403s plain HTTP clients
+    # behind a Bunny CDN shield; the browser tier is the last-resort answer.
+    brazil_browser_fallback: bool = True
     enable_medical_tools: bool = True
 
     @property
@@ -176,6 +180,7 @@ class Settings:
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
             brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
             scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
+            brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

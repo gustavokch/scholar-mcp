@@ -1,4 +1,13 @@
+import json
+from unittest.mock import AsyncMock
+
+import httpx
+import respx
+
+from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
+    BVS_SEARCH_URL,
+    BrazilMoHEngine,
     _as_list,
     _derive_fulltext_id,
     _first,
@@ -6,6 +15,8 @@ from scholar_mcp.medical.brazil_moh import (
     _parse_issued,
 )
 from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 def test_first_returns_first_list_element():
@@ -589,6 +600,9 @@ async def test_search_clamps_limit_inside_engine(tmp_path: Path):
 @respx.mock
 async def test_search_network_failure_is_error_and_not_cached(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
+    # Keep the browser tier out: this test asserts the pure-HTTP failure path,
+    # and a real camoufox launch would leave the respx mock and hit the network.
+    engine.settings.enable_browser_fallback = False
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=httpx.ConnectError("reset by peer")
@@ -1432,6 +1446,9 @@ async def _slow_response(request: httpx.Request) -> httpx.Response:
 async def test_search_stage_timeout_returns_error_instead_of_hanging(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_stage_timeout_s = 0.05
+    # This test exercises stage stalls, not the browser tier: a real camoufox
+    # launch would exceed the elapsed bound below.
+    engine.settings.enable_browser_fallback = False
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
         # No PCDT seed match for this query, so a stage stall must surface as
@@ -1624,6 +1641,9 @@ async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
     do not keep looping through relaxations; degrade gracefully."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
+    # Browser tier off: the respx mock cannot intercept camoufox, and this
+    # test asserts the pure-HTTP degradation chain.
+    engine.settings.enable_browser_fallback = False
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
@@ -1665,6 +1685,117 @@ async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
         assert 'db:"BRISA"' in q2
         assert "ti:dengue AND ti:manejo" in q2
         assert "ti:intratavel" not in q2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def _install_fake_camoufox(monkeypatch, rendered_html=""):
+    """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
+
+    Copied from tests/medical/test_pediatrics.py — no conftest exists to
+    share it through. ``rendered_html`` is what page.content() returns.
+    """
+    import asyncio
+    import sys
+    import types
+
+    attempts: list[bool] = []
+    captured_urls: list[str] = []
+    exits: list[bool] = []
+    sleeps: list[int] = []
+
+    class _FakePage:
+        def __init__(self):
+            self.url = ""
+
+        async def goto(self, url, *a, **k):
+            captured_urls.append(url)
+            self.url = url
+            return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            sleeps.append(ms)
+            return None
+
+        async def content(self):
+            return rendered_html
+
+    class _FakeBrowser:
+        async def new_page(self, *a, **k):
+            return _FakePage()
+
+    class _FakeCamoufoxContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _FakeBrowser()
+
+        async def __aexit__(self, *exc):
+            exits.append(True)
+            return False
+
+    def _fake_async_camoufox(**launch_options):
+        return _FakeCamoufoxContext()
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = _fake_async_camoufox
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    return attempts, captured_urls, exits, sleeps
+
+
+async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
+    tmp_path, monkeypatch
+):
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    # Fast retry ladder: the BVS 403 is retried as a bot-shield 429, and the
+    # default backoff would add real seconds per stage.
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "1", "ti": "Manejo da dengue",
+                         "pais_publicacao": "^eBrasil", "da": "202401",
+                         "ur": ["https://bvsms.saude.gov.br/x.pdf"]},
+                        {"id": "2", "ti": "Dengue en Peru",
+                         "pais_publicacao": "^ePeru", "da": "202401",
+                         "ur": ["https://example.org/y.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, json.dumps(payload)
+    )
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert [r.title for r in records] == ["Manejo da dengue"]
+        assert meta.error is False
+        assert attempts == [True]  # one browser launch
     finally:
         await cache.close()
         await http_client.aclose()
