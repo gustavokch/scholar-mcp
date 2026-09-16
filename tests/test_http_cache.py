@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import time
 
@@ -543,6 +544,31 @@ async def test_limiter_registry_shared_across_client_instances():
     finally:
         await a.aclose()
         await b.aclose()
+
+
+def test_limiter_registry_drops_buckets_when_loop_dies():
+    """A finished event loop must not stay pinned by the limiter registry.
+
+    The registry is process-global, so a strong reference to the loop inside a
+    key would retain every loop the process ever ran. zimqa builds a client per
+    engine call, which makes that growth unbounded rather than theoretical.
+    """
+
+    async def _touch(client: AsyncHttpClient) -> None:
+        client._limiter_for("api.crossref.org")
+        await client.aclose()
+
+    before = AsyncHttpClient.limiter_bucket_count()
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_touch(AsyncHttpClient(Settings())))
+    finally:
+        loop.close()
+    assert AsyncHttpClient.limiter_bucket_count() > before
+
+    del loop
+    gc.collect()
+    assert AsyncHttpClient.limiter_bucket_count() == before
 
 
 def test_ncbi_api_key_env_alias(monkeypatch):
