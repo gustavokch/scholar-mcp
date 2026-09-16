@@ -108,6 +108,17 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
 
+# English function words plus the ubiquitous "children"/"child", which appear
+# in nearly every AAP title and so carry zero discriminating power. The
+# scrape-junk filter subtracts these before requiring token overlap.
+ENGLISH_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a", "an", "the", "and", "or", "of", "in", "on", "for", "to",
+        "with", "by", "is", "are", "was", "were", "be", "been", "at",
+        "from", "as", "it", "its", "per", "vs", "children", "child",
+    }
+)
+
 
 class PediatricsEngine:
     def __init__(
@@ -132,9 +143,27 @@ class PediatricsEngine:
     def _filter_matches(
         self, results: list[PediatricGuideline], query: str
     ) -> list[PediatricGuideline]:
-        """Drop SPA navigation junk whose title shares no word with the query."""
+        """Drop SPA navigation junk whose title shares no substantive word with the query.
+
+        Scrape pages render static navigation items regardless of the query,
+        and titles like "Care of Children in Practice Settings" share only
+        stopwords ("of", "in", "children") with any query. A result is kept
+        only when its title overlaps the query's substantive tokens (stopwords
+        stripped, tokens under 3 chars dropped) by at least two, or by all of
+        them when fewer than two remain. When nothing substantive survives,
+        the old any-token rule applies.
+        """
         query_tokens = set(re.findall(r"\w+", query.lower()))
-        return [g for g in results if self._matches_query(g.title, query_tokens)]
+        substantive = {t for t in query_tokens if t not in ENGLISH_STOPWORDS and len(t) >= 3}
+        if not substantive:
+            return [g for g in results if self._matches_query(g.title, query_tokens)]
+        threshold = min(2, len(substantive))
+        kept: list[PediatricGuideline] = []
+        for g in results:
+            title_tokens = set(re.findall(r"\w+", g.title.lower()))
+            if len(title_tokens & substantive) >= threshold:
+                kept.append(g)
+        return kept
 
     def _parse_guideline_items(
         self,
@@ -335,11 +364,15 @@ class PediatricsEngine:
             )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        await self.cache.set(
-            cache_key,
-            [g.to_dict() for g in results],
-            source="bright_futures",
-        )
+        # An empty result is a valid answer but must not be cached as success:
+        # a transient scrape failure indistinguishable from "no match" would
+        # otherwise poison the TTL.
+        if results:
+            await self.cache.set(
+                cache_key,
+                [g.to_dict() for g in results],
+                source="bright_futures",
+            )
         return results, CacheMetadata(cached=False, cache_age=0)
 
     async def search_aap_policy(
@@ -363,11 +396,13 @@ class PediatricsEngine:
         if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        await self.cache.set(
-            cache_key,
-            [g.to_dict() for g in results],
-            source="aap_policy",
-        )
+        # No empty caching: see search_bright_futures.
+        if results:
+            await self.cache.set(
+                cache_key,
+                [g.to_dict() for g in results],
+                source="aap_policy",
+            )
         return results, CacheMetadata(cached=False, cache_age=0)
 
     async def search_aap_guidelines(
@@ -383,6 +418,12 @@ class PediatricsEngine:
             self.search_bright_futures(query),
             self.search_aap_policy(query),
             return_exceptions=True,
+        )
+        # The bright-futures route IS the PubMed organization=AAP search (its
+        # own ?q= endpoint is dead), so its unfiltered list is the PubMed
+        # fallback pool: reusing it here costs no extra NCBI round-trip.
+        bf_list: list[PediatricGuideline] = (
+            bf_res[0] if isinstance(bf_res, tuple) else []
         )
 
         all_items: list[PediatricGuideline] = []
@@ -410,19 +451,14 @@ class PediatricsEngine:
         # block the PubMed fallback below.
         deduped = self._filter_matches(deduped, query)
 
-        # Fallback chain when both scrapes came up empty: PubMed
-        # publication-type search filtered to AAP first (reliable, no
-        # anti-bot wall), Playwright last resort.
-        if not deduped:
-            try:
-                deduped = await self._pubmed_guidelines(query)
-                if deduped:
-                    errored = False
-            except Exception:
-                logger.warning(
-                    "PubMed pediatric guideline fallback failed for %r", query,
-                    exc_info=True,
-                )
+        # Fallback chain when both scrapes came up empty: reuse the unfiltered
+        # bright-futures (PubMed) results captured above. PubMed's own
+        # relevance is the filter — a valid hit titled "Acute Otitis Media"
+        # shares no token with "ear infection in children", so the token
+        # filter must NOT run on this list. The pubmed-aap-only block below
+        # clears the stale scrape error when these land.
+        if not deduped and bf_list:
+            deduped = list(bf_list)
 
         if not deduped and self.settings.enable_browser_fallback:
             try:
@@ -452,11 +488,13 @@ class PediatricsEngine:
         if errored and not deduped:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        await self.cache.set(
-            cache_key,
-            [g.to_dict() for g in deduped],
-            source="guidelines",
-        )
+        # No empty caching: see search_bright_futures.
+        if deduped:
+            await self.cache.set(
+                cache_key,
+                [g.to_dict() for g in deduped],
+                source="guidelines",
+            )
         return deduped, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def search_pediatric_literature(

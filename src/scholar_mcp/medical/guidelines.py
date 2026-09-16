@@ -233,6 +233,12 @@ class GuidelinesEngine:
                 art_text = f"{extracted_org} {art.title.lower()} {art.abstract.lower()} {art.journal.lower()}"
                 if any(alias in art_text for alias in aliases):
                     filtered_candidates.append((art, has_pub, from_kw))
+                    continue
+                # AAP policy statements carry collective authors ("COMMITTEE
+                # ON INFECTIOUS DISEASES") and no "AAP" string anywhere, but
+                # they publish in Pediatrics — the journal is the org signal.
+                if "aap" in aliases and art.journal.strip().lower() == "pediatrics":
+                    filtered_candidates.append((art, has_pub, from_kw))
             candidates = filtered_candidates
 
         # Score and build guidelines

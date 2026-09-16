@@ -380,3 +380,37 @@ async def test_search_clinical_guidelines_marks_error_on_pubmed_failure(tmp_path
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_aap_org_filter_matches_journal_pediatrics(tmp_path: Path):
+    # Collective authors ("COMMITTEE ON INFECTIOUS DISEASES") publishing in
+    # Pediatrics carry no "AAP"/"American Academy" string anywhere, so the
+    # substring alias filter wiped them. Journal "Pediatrics" must keep them
+    # when organization="AAP".
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+
+    respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["2001"]}})
+    respx.get(EFETCH_URL).respond(
+        content=(
+            "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>2001</PMID>"
+            "<Article><Journal><Title>Pediatrics</Title></Journal>"
+            "<ArticleTitle>Clinical practice guideline for infectious diseases</ArticleTitle>"
+            "<Abstract><AbstractText>Guideline recommendations.</AbstractText></Abstract>"
+            "<AuthorList><CollectiveName>COMMITTEE ON INFECTIOUS DISEASES</CollectiveName></AuthorList>"
+            "</Article></MedlineCitation></PubmedArticleSet>"
+        ).encode()
+    )
+
+    try:
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "infectious diseases", organization="AAP"
+        )
+        assert [g.pmid for g in guidelines] == ["2001"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
