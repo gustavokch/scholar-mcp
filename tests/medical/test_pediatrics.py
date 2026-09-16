@@ -9,7 +9,7 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
 BF_URL = "https://brightfutures.aap.org/Search"
-AAP_URL = "https://publications.aap.org/pediatrics/search"
+AAP_URL = "https://publications.aap.org/pediatrics/search-results"
 
 
 async def _engine(tmp_path: Path):
@@ -22,21 +22,68 @@ async def _engine(tmp_path: Path):
     return engine, cache, http_client
 
 
-def _install_fake_camoufox(monkeypatch, rendered_html=""):
-    """Fake camoufox.async_api; returns (attempts, captured_urls)."""
+def _install_fake_camoufox(
+    monkeypatch,
+    rendered_html="",
+    first_landing_url=None,
+    challenge_html=None,
+    hang_s=0.0,
+):
+    """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
+
+    ``first_landing_url`` simulates the Cloudflare interstitial: the first
+    goto lands on a mangled redirect URL, later gotos land clean.
+    ``challenge_html`` is served for the first navigation only, so a scrape
+    that reads content before re-navigating sees the challenge page, not the
+    results.
+    ``hang_s`` makes every goto sleep, to exercise the total-timeout guard.
+    ``sleeps`` records every wait_for_timeout(ms) call, so tests can assert
+    the scrape keys off rendered content instead of fixed sleeps.
+    """
+    import asyncio
     import sys
     import types
 
+    from bs4 import BeautifulSoup
+
     attempts: list[bool] = []
     captured_urls: list[str] = []
+    exits: list[bool] = []
+    sleeps: list[int] = []
 
     class _FakePage:
+        def __init__(self):
+            self.url = ""
+            self._nav = 0
+
+        def _html(self):
+            if challenge_html is not None and self._nav <= 1:
+                return challenge_html
+            return rendered_html
+
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
+            self._nav += 1
+            if hang_s:
+                await asyncio.sleep(hang_s)
+            self.url = (first_landing_url if self._nav == 1 else None) or url
+            return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            el = BeautifulSoup(self._html(), "html.parser").select_one(selector)
+            if el is None:
+                raise TimeoutError(f"no element matching {selector}")
+            return el
+
+        async def wait_for_timeout(self, ms):
+            sleeps.append(ms)
+            return None
+
+        async def wait_for_load_state(self, *a, **k):
             return None
 
         async def content(self):
-            return rendered_html
+            return self._html()
 
     class _FakeBrowser:
         async def new_page(self, *a, **k):
@@ -48,6 +95,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html=""):
             return _FakeBrowser()
 
         async def __aexit__(self, *exc):
+            exits.append(True)
             return False
 
     def _fake_async_camoufox(**launch_options):
@@ -59,7 +107,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html=""):
     camoufox_mod.async_api = api_mod
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
-    return attempts, captured_urls
+    return attempts, captured_urls, exits, sleeps
 
 
 def _install_fake_playwright(monkeypatch):
@@ -475,7 +523,7 @@ async def test_search_aap_guidelines_browser_is_last_resort(tmp_path: Path, monk
     </body></html>
     """
 
-    attempts, _urls = _install_fake_camoufox(monkeypatch, rendered_html)
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch, rendered_html)
     # Block the legacy playwright path so the pre-camoufox source cannot open
     # a real browser during this test.
     _install_fake_playwright(monkeypatch)
@@ -513,7 +561,7 @@ async def test_last_resort_browser_scrape_uses_camoufox_and_encodes_query(
     )
     engine.pubmed = mock_pubmed
 
-    camoufox_attempts, captured = _install_fake_camoufox(monkeypatch)
+    camoufox_attempts, captured, _exits, _sleeps = _install_fake_camoufox(monkeypatch)
     pw_attempts = _install_fake_playwright(monkeypatch)
 
     try:
@@ -558,7 +606,7 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
     )
     engine.pubmed = mock_pubmed
 
-    camoufox_attempts, _urls = _install_fake_camoufox(monkeypatch)
+    camoufox_attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch)
 
     try:
         guidelines, meta = await engine.search_aap_guidelines("ibuprofen children")
@@ -569,3 +617,369 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_parse_new_search_results_markup(tmp_path: Path, monkeypatch):
+    """AAP moved search to /pediatrics/search-results (Solr). Result items
+    are div.item-container with the title in h4 > a under .sri-title; the old
+    /pediatrics/search endpoint 404s. The parser must extract these items."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body>
+      <div class="sr-list al-article-box al-normal">
+        <div class="item-container">
+          <div class="item-info">
+            <div class="sri-title customLink al-title">
+              <h4><a href="/pediatrics/article/155/2/e2024068415/200612/There-Are-No-Bad-Kids?searchresult=1">
+                There Are No Bad Kids: An Antiracist Approach to
+                <strong>Oppositional</strong> <strong>Defiant</strong> Disorder 2024</a></h4>
+            </div>
+            <div class="badge-bar"><div class="resource-links-info">
+              <div class="item"><a href="/pediatrics/article-pdf/1756741/peds.2024-068415.pdf">PDF</a></div>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    </body></html>
+    """
+
+    _install_fake_camoufox(monkeypatch, rendered_html)
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("oppositional defiant")
+        assert guidelines, "new search-results markup not parsed"
+        g = guidelines[0]
+        assert "Oppositional Defiant Disorder" in g.title, (
+            "nested highlight nodes must be space-separated, not concatenated"
+        )
+        assert "/pediatrics/article/" in g.url
+        assert "article-pdf" not in g.url, "link must be the article, not the PDF badge"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_scrape_renavigates_when_challenge_redirects(
+    tmp_path: Path, monkeypatch
+):
+    """The Cloudflare interstitial redirects to a mangled URL
+    (?autologincheck=redirected appended to the query) that 404s. Once the
+    challenge clears, the scrape must re-navigate to the clean target URL
+    before grabbing content."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body>
+      <div class="item-container">
+        <div class="item-info">
+          <div class="sri-title al-title">
+            <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+          </div>
+        </div>
+      </div>
+    </body></html>
+    """
+    mangled = (
+        f"{AAP_URL}?q=ibuprofen?autologincheck=redirected"
+    )
+    challenge_html = (
+        "<html><head><title>Just a moment...</title></head>"
+        "<body><div id='challenge-platform'></div></body></html>"
+    )
+    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html,
+        first_landing_url=mangled,
+        challenge_html=challenge_html,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, (
+            "no re-navigation after the challenge mangled the first landing"
+        )
+        assert captured[-1] == f"{AAP_URL}?q=ibuprofen"
+        assert guidelines, "content was read before re-navigation: got the challenge page"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_keeps_first_pass_when_renavigation_is_empty(
+    tmp_path: Path, monkeypatch
+):
+    """A re-navigation that lands on another challenge must not discard results
+    the first pass already parsed."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    # First pass has real results but a mangled landing URL, so the code
+    # re-navigates; the second pass comes back as a bare challenge page.
+    good_html = """
+    <html><body>
+      <div class="item-container"><div class="sri-title">
+        <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+      </div></div>
+    </body></html>
+    """
+    challenge_html = (
+        "<html><head><title>Just a moment...</title></head><body></body></html>"
+    )
+
+    # rendered_html is what nav>=2 serves; challenge_html is nav 1. Swap them so
+    # nav 1 is good and nav 2 is the challenge.
+    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html=challenge_html,
+        first_landing_url=f"{AAP_URL}?q=ibuprofen?autologincheck=redirected",
+        challenge_html=good_html,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, "expected a re-navigation attempt"
+        assert guidelines, "first-pass results were discarded by the empty retry"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_scrape_is_time_bounded(tmp_path: Path, monkeypatch):
+    """The browser fallback must not run unbounded: a hung navigation is cut
+    off by a total timeout and the browser context is still torn down."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.medical import pediatrics as pediatrics_mod
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    monkeypatch.setattr(pediatrics_mod, "_CAMOUFOX_TOTAL_TIMEOUT_S", 0.05)
+    _attempts, _captured, exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, rendered_html="<html></html>", hang_s=5.0
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert guidelines == []
+        assert meta.error is True
+        assert exits, "browser context was not torn down after the timeout"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_title_selection_prefers_article_heading_over_section_heading():
+    """select_one with a comma list matches in document order, not selector
+    order: an h2 before the h4 must not win the title."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container">
+      <h2>Search Results For Your Query</h2>
+      <div class="sri-title">
+        <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+      </div>
+    </div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].title == "Ibuprofen Safety in Infants 2024"
+    assert items[0].url.endswith("/pediatrics/article/9")
+
+
+@respx.mock
+async def test_camoufox_waits_on_results_not_the_clock(tmp_path: Path, monkeypatch):
+    """When result items are already rendered on the first navigation, the
+    scrape must key off the selector instead of burning the fixed
+    challenge-settle sleep."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+    </div></div></body></html>
+    """
+    _attempts, _captured, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch, rendered_html
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert guidelines, "rendered results were not parsed"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+        assert sleeps == [], f"fixed sleeps burned on the happy path: {sleeps}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    "challenge_html",
+    [
+        # Localised title, but the body still carries the platform markers.
+        "<html><head><title>Un momento...</title></head>"
+        "<body><div id='challenge-platform'></div></body></html>",
+        "<html><head><title>Einen Moment bitte...</title></head>"
+        "<body><div class='cf-browser-verification'></div></body></html>",
+    ],
+)
+@respx.mock
+async def test_camoufox_detects_localized_challenge(
+    tmp_path: Path, monkeypatch, challenge_html
+):
+    """A challenge page whose title is localised must still trigger
+    re-navigation; detection keys off the platform markers, not the English
+    title text."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+    </div></div></body></html>
+    """
+    # Clean first landing URL, but the served page is still the challenge:
+    # only the content check can catch this.
+    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html,
+        challenge_html=challenge_html,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, "localized challenge did not trigger re-navigation"
+        assert guidelines, "results on the second navigation were not returned"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_anchor_without_href_falls_back_to_item_link():
+    """A title anchor carrying only a name attribute must not short-circuit
+    the URL to base_url; the first href-bearing anchor in the item wins."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a name="anchor">Ibuprofen Safety in Infants 2024</a></h4>
+      <a href="/pediatrics/article/9">Read more</a>
+    </div></div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].url.endswith("/pediatrics/article/9")
+
+
+def test_title_highlight_inside_word_not_split():
+    """Solr highlights a partial token mid-word (<strong>Oppo</strong>sitional);
+    the separator must not inject a space there."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container"><div class="sri-title">
+      <h4><a href="/pediatrics/article/9"><strong>Oppo</strong>sitional
+      Defiant Disorder 2024</a></h4>
+    </div></div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].title == "Oppositional Defiant Disorder 2024"

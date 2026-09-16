@@ -12,10 +12,45 @@ from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 AAP_BASE = "https://publications.aap.org"
-AAP_URL = "https://publications.aap.org/pediatrics/search"
+# AAP moved search to a Solr-backed /search-results page; the old
+# /pediatrics/search endpoint 404s.
+AAP_URL = "https://publications.aap.org/pediatrics/search-results"
 
-AAP_ITEM_SELECTORS = ".search-result, .result-item, .article-item, article, .publication-item"
-TITLE_SELECTORS = "h2, h3, .title, a.title"
+AAP_ITEM_SELECTORS = ".item-container, .search-result, .result-item, .article-item, article, .publication-item"
+# select_one() with a comma list matches in document order, not selector
+# order, so priority has to be expressed by trying one selector at a time.
+TITLE_SELECTORS: tuple[str, ...] = (
+    ".sri-title h4",
+    "h4",
+    "h2",
+    "h3",
+    ".title",
+    "a.title",
+)
+
+
+def _select_title_el(item):
+    for selector in TITLE_SELECTORS:
+        el = item.select_one(selector)
+        if el is not None:
+            return el
+    return None
+
+
+def _first_href_anchor(*scopes):
+    """First anchor that actually carries an href, in scope order."""
+    for scope in scopes:
+        if scope is None:
+            continue
+        for anchor in scope.find_all("a"):
+            if anchor.get("href"):
+                return anchor
+    return None
+
+
+def _looks_like_challenge(content: str) -> bool:
+    lowered = content.lower()
+    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
 DESC_SELECTORS = ".description, .summary, .abstract, p"
 
 AGE_RANGE_RE = re.compile(
@@ -27,6 +62,22 @@ AGE_TERM_RE = re.compile(
     re.IGNORECASE,
 )
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+# Browser-fallback budget. The AAP host sits behind Cloudflare, so the
+# challenge needs time to settle, but search_aap_guidelines is an MCP tool
+# with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
+_NAV_TIMEOUT_MS = 15000
+_CHALLENGE_SETTLE_MS = 5000
+_POST_RENAV_SETTLE_MS = 3000
+_CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
+
+# Cloudflare interstitial markers. The title text is localised; the body
+# carries stable platform divs.
+_CHALLENGE_MARKERS = (
+    "just a moment",
+    "challenge-platform",
+    "cf-browser-verification",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +147,22 @@ class PediatricsEngine:
         guidelines: list[PediatricGuideline] = []
 
         for item in soup.select(item_selectors):
-            title_el = item.select_one(TITLE_SELECTORS)
-            title = title_el.get_text(strip=True) if title_el else ""
+            title_el = _select_title_el(item)
+            # Raw get_text() keeps the document whitespace between nested
+            # Solr highlight nodes (so <strong>Oppositional</strong>
+            # <strong>Defiant</strong> stays separated) without inventing a
+            # space where a highlight splits a word mid-token
+            # (<strong>Oppo</strong>sitional); the collapse below tidies
+            # newlines and indentation.
+            title = (
+                re.sub(r"\s+", " ", title_el.get_text()).strip()
+                if title_el
+                else ""
+            )
             if not title or len(title) <= 10:
                 continue
 
-            link = item.find("a")
+            link = _first_href_anchor(title_el, item)
             href = link.get("href", "") if link else ""
             if href:
                 item_url = href if href.startswith("http") else (base_url.rstrip("/") + "/" + href.lstrip("/"))
@@ -109,7 +170,7 @@ class PediatricsEngine:
                 item_url = base_url
 
             desc_el = item.select_one(DESC_SELECTORS)
-            description = (desc_el.get_text(strip=True) if desc_el else "")[:300]
+            description = (desc_el.get_text(" ", strip=True) if desc_el else "")[:300]
 
             age_group = _extract_age_group(title) or _extract_age_group(description)
 
@@ -163,6 +224,23 @@ class PediatricsEngine:
 
         return self._parse_guideline_items(html_text, item_selectors, base_url, source), False
 
+    @staticmethod
+    async def _settle(page, result_selector: str, timeout_ms: int) -> None:
+        """Block until result items render.
+
+        wait_for_selector already blocks for up to timeout_ms, so a miss needs
+        no extra sleep: it means a challenge page or markup we do not
+        recognise, which the caller detects from the content itself."""
+        try:
+            await page.wait_for_selector(result_selector, timeout=timeout_ms)
+        except Exception:
+            logger.debug(
+                "No %s within %dms; treating the page as unrendered",
+                result_selector,
+                timeout_ms,
+                exc_info=True,
+            )
+
     async def _camoufox_scrape(
         self,
         url: str,
@@ -178,14 +256,36 @@ class PediatricsEngine:
         fingerprint, so no custom user agent is sent."""
         from camoufox.async_api import AsyncCamoufox
 
-        async with AsyncCamoufox(headless=True) as browser:
-            page = await browser.new_page()
-            await page.goto(
-                f"{url}?{urlencode({'q': query})}",
-                wait_until="domcontentloaded",
-            )
-            content = await page.content()
-        return self._parse_guideline_items(content, item_selectors, base_url, source)
+        target = f"{url}?{urlencode({'q': query})}"
+
+        async def _run() -> list[PediatricGuideline]:
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                await page.goto(
+                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+                )
+                # The Cloudflare interstitial auto-redirects to a mangled URL
+                # ("?autologincheck=redirected" appended to the query) that
+                # 404s. Once the challenge clears, its cookie is set and a
+                # clean re-navigation reaches the real results page.
+                await self._settle(page, item_selectors, _CHALLENGE_SETTLE_MS)
+                content = await page.content()
+                first = self._parse_guideline_items(
+                    content, item_selectors, base_url, source
+                )
+                if page.url == target and not _looks_like_challenge(content):
+                    return first
+                await page.goto(
+                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+                )
+                await self._settle(page, item_selectors, _POST_RENAV_SETTLE_MS)
+                content = await page.content()
+                second = self._parse_guideline_items(
+                    content, item_selectors, base_url, source
+                )
+            return second or first
+
+        return await asyncio.wait_for(_run(), timeout=_CAMOUFOX_TOTAL_TIMEOUT_S)
 
     async def _pubmed_guidelines(self, query: str) -> list[PediatricGuideline]:
         """AAP-filtered guideline search over PubMed publication types.
