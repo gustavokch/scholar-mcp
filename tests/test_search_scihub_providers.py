@@ -846,3 +846,49 @@ async def test_pubmed_fetch_abstract_parses_own_pmcid(client):
     assert meta is not None
     assert meta.pmcid == "PMC11676342"
 
+
+
+async def test_provider_last_error_is_per_request(client):
+    """Providers are module-level singletons in server.py. A failing search
+    running concurrently with a successful one must not leave its error on the
+    attribute the successful call reads."""
+    provider = CrossRefProvider(client)
+    started = asyncio.Event()
+    failed_done = asyncio.Event()
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"message": {"items": []}}
+
+    async def slow_ok(url, **kwargs):
+        started.set()
+        await asyncio.sleep(0.05)
+        return _Resp()
+
+    async def fast_fail(url, **kwargs):
+        return None
+
+    async def run_ok():
+        client.get = slow_ok
+        try:
+            await provider.search("ok query")
+            await failed_done.wait()
+            return provider.last_error
+        finally:
+            pass
+
+    async def run_fail():
+        await started.wait()
+        client.get = fast_fail
+        try:
+            await provider.search("fail query")
+            return provider.last_error
+        finally:
+            failed_done.set()
+
+    ok_err, fail_err = await asyncio.gather(run_ok(), run_fail())
+    assert fail_err == "transport"
+    assert ok_err is None

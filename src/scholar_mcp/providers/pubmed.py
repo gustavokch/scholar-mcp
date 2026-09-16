@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
 from scholar_mcp.ranking import classify_evidence_grade
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -17,13 +18,15 @@ ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
 class PubMedProvider:
     """PubMed discovery and abstract provider via NCBI E-utilities."""
 
+    # Set to a short reason immediately before failure returns in search();
+    # None after success or a genuine empty result. Read by the resolver's
+    # per-source degradation map. Context-scoped so one request's failure is
+    # invisible to a concurrent request sharing this singleton provider.
+    last_error: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient, settings: Settings | None = None) -> None:
         self.http_client = http_client
         self.settings = settings or Settings.load()
-        # Set to a short reason immediately before failure returns in search();
-        # None after success or a genuine empty result. Read by the resolver's
-        # per-source degradation map.
-        self.last_error: str | None = None
 
     @staticmethod
     def build_query(

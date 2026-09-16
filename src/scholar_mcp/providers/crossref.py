@@ -3,6 +3,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from scholar_mcp.models import PaperMetadata, ReferenceItem
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
 
@@ -24,12 +25,14 @@ def _clean_abstract(raw: str) -> str:
 class CrossRefProvider:
     """CrossRef search and metadata provider."""
 
+    # Set to a short reason immediately before failure returns in search();
+    # None after success or a genuine empty result. Read by the resolver's
+    # per-source degradation map. Context-scoped so one request's failure is
+    # invisible to a concurrent request sharing this singleton provider.
+    last_error: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient) -> None:
         self.http_client = http_client
-        # Set to a short reason immediately before failure returns in search();
-        # None after success or a genuine empty result. Read by the resolver's
-        # per-source degradation map.
-        self.last_error: str | None = None
 
     async def search(
         self,

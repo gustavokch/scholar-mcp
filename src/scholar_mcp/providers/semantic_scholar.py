@@ -2,6 +2,7 @@ from typing import Any
 import urllib.parse
 
 from scholar_mcp.models import PaperMetadata, RelatedPaper
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
@@ -43,13 +44,15 @@ def _paper_to_metadata(p: dict[str, Any]) -> PaperMetadata:
 class SemanticScholarProvider:
     """Semantic Scholar topic search and embedding-based recommendations."""
 
+    # Set to a short reason immediately before failure returns in search();
+    # None after success or a genuine empty result. Read by the resolver's
+    # per-source degradation map. Context-scoped so one request's failure is
+    # invisible to a concurrent request sharing this singleton provider.
+    last_error: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient, api_key: str | None = None) -> None:
         self.http_client = http_client
         self.api_key = api_key
-        # Set to a short reason immediately before failure returns in search();
-        # None after success or a genuine empty result. Read by the resolver's
-        # per-source degradation map.
-        self.last_error: str | None = None
 
     def _headers(self) -> dict[str, str] | None:
         return {"x-api-key": self.api_key} if self.api_key else None
