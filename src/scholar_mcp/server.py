@@ -101,14 +101,18 @@ async def search_papers(
             journal=journal,
         )
         payload = [r.to_dict() for r in results]
-        # Per-source degradation signal: when a backend was blocked or failed,
-        # append a sentinel element (list-typed return cannot take a true
-        # envelope). Consumers without identifiers drop it silently.
+        # Per-source degradation signal: the tool's return type is a list, not
+        # an envelope, so the status rides along as a trailing element. It
+        # carries the full PaperMetadata key set (empty values) so a consumer
+        # iterating the list and reading paper fields cannot hit a KeyError;
+        # `status == "degraded"` is the discriminator for filtering it out.
         sources = getattr(resolver, "last_search_sources", None)
         if isinstance(sources, dict) and any(
             v in ("blocked", "failed") for v in sources.values()
         ):
-            payload.append({"_sources": sources, "degraded": True})
+            sentinel = PaperMetadata(title="").to_dict()
+            sentinel.update({"status": "degraded", "_sources": sources, "degraded": True})
+            payload.append(sentinel)
         return payload
     except Exception as ex:
         return [{"status": "error", "error": str(ex)}]

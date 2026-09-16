@@ -70,6 +70,25 @@ async def test_search_papers_appends_sources_sentinel_when_backend_fails(resolve
     assert sentinel["_sources"] == {"pubmed": "blocked", "crossref": "ok"}
 
 
+async def test_degradation_sentinel_is_shape_compatible(resolver):
+    """The tool returns a homogeneous list, so a consumer iterating it and
+    reading paper keys must not hit a KeyError on the sentinel."""
+    resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
+    resolver.last_search_sources = {"pubmed": "failed"}
+    result = await srv.search_papers("dengue")
+
+    paper_keys = set(PaperMetadata(title="A").to_dict())
+    for row in result:
+        assert paper_keys <= set(row), f"missing paper keys: {paper_keys - set(row)}"
+
+    sentinels = [r for r in result if r.get("status") == "degraded"]
+    assert len(sentinels) == 1
+    assert sentinels[0]["title"] == ""
+    assert [r for r in result if r.get("status") != "degraded"] == [
+        PaperMetadata(title="A", doi="10.1/a").to_dict()
+    ]
+
+
 async def test_search_papers_no_sentinel_when_all_ok(resolver):
     resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
     resolver.last_search_sources = {"pubmed": "ok", "crossref": "empty"}
