@@ -20,6 +20,10 @@ class PubMedProvider:
     def __init__(self, http_client: AsyncHttpClient, settings: Settings | None = None) -> None:
         self.http_client = http_client
         self.settings = settings or Settings.load()
+        # Set to a short reason immediately before failure returns in search();
+        # None after success or a genuine empty result. Read by the resolver's
+        # per-source degradation map.
+        self.last_error: str | None = None
 
     @staticmethod
     def build_query(
@@ -51,6 +55,7 @@ class PubMedProvider:
         sort: str = "relevance",
     ) -> list[PaperMetadata]:
         term = self.build_query(query, author, journal, year_start, year_end)
+        self.last_error = None
         search_params: dict[str, Any] = {
             "db": "pubmed",
             "term": term,
@@ -68,6 +73,9 @@ class PubMedProvider:
         try:
             resp = await self.http_client.get(ESEARCH_URL, params=search_params)
             if resp is None or resp.status_code != 200:
+                self.last_error = (
+                    "transport" if resp is None else f"http_{resp.status_code}"
+                )
                 return []
 
             data = resp.json()
@@ -82,6 +90,9 @@ class PubMedProvider:
             }
             sum_resp = await self.http_client.get(ESUMMARY_URL, params=summary_params)
             if sum_resp is None or sum_resp.status_code != 200:
+                self.last_error = (
+                    "transport" if sum_resp is None else f"http_{sum_resp.status_code}"
+                )
                 return []
 
             sum_data = sum_resp.json()
@@ -141,7 +152,8 @@ class PubMedProvider:
                 )
 
             return papers
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"exception:{type(exc).__name__}"
             return []
 
     @staticmethod

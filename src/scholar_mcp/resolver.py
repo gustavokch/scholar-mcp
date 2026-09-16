@@ -61,6 +61,10 @@ class WaterfallResolver:
         self.crossref = CrossRefProvider(self.http_client)
         self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
         self.s2 = SemanticScholarProvider(self.http_client, api_key=self.settings.s2_api_key)
+        # Per-backend status from the most recent search(): "ok" (>=1 result),
+        # "empty" (0 results, no provider error), "blocked" (403/429), or
+        # "failed" (other error or raised). Rebuilt on every search() call.
+        self.last_search_sources: dict[str, str] = {}
         self.ranking_pipeline = RankingPipeline(
             openalex=self.openalex,
             europe_pmc=self.europe_pmc,
@@ -379,6 +383,28 @@ class WaterfallResolver:
                 message=f"Failed to write file: {ex}",
             )
 
+    async def _run_backend(self, name: str, provider: Any, coro: Any) -> list[PaperMetadata]:
+        """Run one backend search and record its degradation status.
+
+        Genuine empty results are "empty", not "failed" — a narrow query with
+        zero hits is a valid answer, and crying wolf would flag every such query.
+        """
+        try:
+            papers = await coro
+        except Exception:
+            self.last_search_sources[name] = "failed"
+            return []
+        err = getattr(provider, "last_error", None)
+        if papers:
+            self.last_search_sources[name] = "ok"
+        elif err and any(c in err for c in ("403", "429")):
+            self.last_search_sources[name] = "blocked"
+        elif err:
+            self.last_search_sources[name] = "failed"
+        else:
+            self.last_search_sources[name] = "empty"
+        return papers
+
     async def search(
         self,
         query: str,
@@ -392,6 +418,7 @@ class WaterfallResolver:
     ) -> list[PaperMetadata]:
         limit = min(num_results, 50)
         source_mode = source.lower().strip()
+        self.last_search_sources = {}
 
         # Compute candidate pool depth if reranking is enabled
         should_rerank = rerank and self.settings.ranking_enabled
@@ -408,56 +435,77 @@ class WaterfallResolver:
             fetch_limit = limit
 
         if source_mode == "pubmed":
-            papers = await self.pubmed.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-                sort="relevance",
-            )
-        elif source_mode == "crossref":
-            papers = await self.crossref.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-            )
-        elif source_mode in ("s2", "semanticscholar"):
-            if not self.settings.enable_s2:
-                return []
-            papers = await self.s2.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-            )
-        else:  # auto
-            # 1. Query PubMed for fetch_limit
-            papers = await self.pubmed.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-                sort="relevance",
-            )
-            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
-            if len(papers) < fetch_limit:
-                needed = fetch_limit - len(papers)
-                crossref_papers = await self.crossref.search(
+            papers = await self._run_backend(
+                "pubmed",
+                self.pubmed,
+                self.pubmed.search(
                     query,
-                    num_results=needed * 2,
+                    num_results=fetch_limit,
                     author=author,
                     journal=journal,
                     year_start=year_start,
                     year_end=year_end,
+                    sort="relevance",
+                ),
+            )
+        elif source_mode == "crossref":
+            papers = await self._run_backend(
+                "crossref",
+                self.crossref,
+                self.crossref.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                ),
+            )
+        elif source_mode in ("s2", "semanticscholar"):
+            if not self.settings.enable_s2:
+                self.last_search_sources["s2"] = "empty"
+                return []
+            papers = await self._run_backend(
+                "s2",
+                self.s2,
+                self.s2.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                ),
+            )
+        else:  # auto
+            # 1. Query PubMed for fetch_limit
+            papers = await self._run_backend(
+                "pubmed",
+                self.pubmed,
+                self.pubmed.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                    sort="relevance",
+                ),
+            )
+            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
+            if len(papers) < fetch_limit:
+                needed = fetch_limit - len(papers)
+                crossref_papers = await self._run_backend(
+                    "crossref",
+                    self.crossref,
+                    self.crossref.search(
+                        query,
+                        num_results=needed * 2,
+                        author=author,
+                        journal=journal,
+                        year_start=year_start,
+                        year_end=year_end,
+                    ),
                 )
                 # Deduplicate: PubMed records win on conflict
                 seen_dois = {p.doi.lower() for p in papers if p.doi}

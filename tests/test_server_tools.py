@@ -57,6 +57,40 @@ async def test_search_papers_tool_forwards_rerank(resolver):
 
 
 
+async def test_search_papers_appends_sources_sentinel_when_backend_fails(resolver):
+    resolver.search.return_value = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    resolver.last_search_sources = {"pubmed": "blocked", "crossref": "ok"}
+    result = await srv.search_papers("dengue")
+    assert [r["title"] for r in result[:2]] == ["A", "B"]
+    sentinel = result[-1]
+    assert sentinel["degraded"] is True
+    assert sentinel["_sources"] == {"pubmed": "blocked", "crossref": "ok"}
+
+
+async def test_search_papers_no_sentinel_when_all_ok(resolver):
+    resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
+    resolver.last_search_sources = {"pubmed": "ok", "crossref": "empty"}
+    result = await srv.search_papers("dengue")
+    assert len(result) == 1 and result[0]["title"] == "A"
+
+
+async def test_brazil_moh_tool_marks_degraded_on_partial(monkeypatch):
+    from scholar_mcp.medical.models import BrazilGuideline
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    mock_engine = AsyncMock()
+    mock_engine.search_guidelines.return_value = (
+        [BrazilGuideline(title="x")],
+        CacheMetadata(cached=False, cache_age=0, error=True),
+    )
+    monkeypatch.setattr(srv, "brazil_moh_engine", mock_engine)
+    result = await srv.search_brazil_moh_guidelines("dengue")
+    assert result.get("degraded") is True
+
+
 async def test_search_papers_clamps_num_results(resolver):
     resolver.search.return_value = []
     await srv.search_papers("crispr", num_results=500)

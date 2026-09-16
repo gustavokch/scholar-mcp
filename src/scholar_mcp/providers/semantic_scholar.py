@@ -46,6 +46,10 @@ class SemanticScholarProvider:
     def __init__(self, http_client: AsyncHttpClient, api_key: str | None = None) -> None:
         self.http_client = http_client
         self.api_key = api_key
+        # Set to a short reason immediately before failure returns in search();
+        # None after success or a genuine empty result. Read by the resolver's
+        # per-source degradation map.
+        self.last_error: str | None = None
 
     def _headers(self) -> dict[str, str] | None:
         return {"x-api-key": self.api_key} if self.api_key else None
@@ -61,6 +65,7 @@ class SemanticScholarProvider:
     ) -> list[PaperMetadata]:
         # S2 graph search has no author/journal filter, so the caller's constraint
         # is applied to the returned page instead of being silently dropped.
+        self.last_error = None
         params: dict[str, Any] = {
             "query": query,
             "limit": min(max(1, num_results), 100),
@@ -74,9 +79,13 @@ class SemanticScholarProvider:
                 f"{S2_BASE}/paper/search", params=params, headers=self._headers()
             )
             if resp is None or resp.status_code != 200:
+                self.last_error = (
+                    "transport" if resp is None else f"http_{resp.status_code}"
+                )
                 return []
             papers = [_paper_to_metadata(p) for p in resp.json().get("data", [])]
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"exception:{type(exc).__name__}"
             return []
 
         if author:

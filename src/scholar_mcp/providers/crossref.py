@@ -26,6 +26,10 @@ class CrossRefProvider:
 
     def __init__(self, http_client: AsyncHttpClient) -> None:
         self.http_client = http_client
+        # Set to a short reason immediately before failure returns in search();
+        # None after success or a genuine empty result. Read by the resolver's
+        # per-source degradation map.
+        self.last_error: str | None = None
 
     async def search(
         self,
@@ -40,6 +44,7 @@ class CrossRefProvider:
             "query.bibliographic": query.strip(),
             "rows": min(num_results, 50),
         }
+        self.last_error = None
         if author:
             params["query.author"] = author.strip()
         if journal:
@@ -56,6 +61,9 @@ class CrossRefProvider:
         try:
             resp = await self.http_client.get(CROSSREF_BASE, params=params)
             if resp is None or resp.status_code != 200:
+                self.last_error = (
+                    "transport" if resp is None else f"http_{resp.status_code}"
+                )
                 return []
 
             data = resp.json()
@@ -102,7 +110,8 @@ class CrossRefProvider:
                 )
 
             return papers
-        except Exception:
+        except Exception as exc:
+            self.last_error = f"exception:{type(exc).__name__}"
             return []
 
     async def fetch_metadata(self, doi: str) -> PaperMetadata | None:

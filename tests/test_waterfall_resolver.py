@@ -261,6 +261,29 @@ async def test_full_text_hit_backfills_title():
     assert res.title == "X"
 
 
+async def test_last_search_sources_blocked_on_provider_error():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = "http_429"
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "blocked"
+
+
+async def test_last_search_sources_failed_on_provider_raise():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(side_effect=RuntimeError("boom"))
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "failed"
+
+
+async def test_last_search_sources_empty_when_no_error():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = None
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "empty"
+
+
 async def test_waterfall_resolver_search_with_rerank():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     mock_papers = [
