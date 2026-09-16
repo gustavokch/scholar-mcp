@@ -17,7 +17,24 @@ AAP_BASE = "https://publications.aap.org"
 AAP_URL = "https://publications.aap.org/pediatrics/search-results"
 
 AAP_ITEM_SELECTORS = ".item-container, .search-result, .result-item, .article-item, article, .publication-item"
-TITLE_SELECTORS = "h4, h2, h3, .title, a.title"
+# select_one() with a comma list matches in document order, not selector
+# order, so priority has to be expressed by trying one selector at a time.
+TITLE_SELECTORS: tuple[str, ...] = (
+    ".sri-title h4",
+    "h4",
+    "h2",
+    "h3",
+    ".title",
+    "a.title",
+)
+
+
+def _select_title_el(item):
+    for selector in TITLE_SELECTORS:
+        el = item.select_one(selector)
+        if el is not None:
+            return el
+    return None
 DESC_SELECTORS = ".description, .summary, .abstract, p"
 
 AGE_RANGE_RE = re.compile(
@@ -107,7 +124,7 @@ class PediatricsEngine:
         guidelines: list[PediatricGuideline] = []
 
         for item in soup.select(item_selectors):
-            title_el = item.select_one(TITLE_SELECTORS)
+            title_el = _select_title_el(item)
             # " " separator: Solr highlight markup (<strong> around matched
             # terms) nests nodes inside titles; strip=True alone concatenates
             # them into one token and the query-overlap filter drops the item.

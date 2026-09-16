@@ -820,3 +820,25 @@ async def test_camoufox_scrape_is_time_bounded(tmp_path: Path, monkeypatch):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_title_selection_prefers_article_heading_over_section_heading():
+    """select_one with a comma list matches in document order, not selector
+    order: an h2 before the h4 must not win the title."""
+    from scholar_mcp.medical.pediatrics import PediatricsEngine
+
+    html = """
+    <html><body><div class="item-container">
+      <h2>Search Results For Your Query</h2>
+      <div class="sri-title">
+        <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+      </div>
+    </div></body></html>
+    """
+    items = PediatricsEngine._parse_guideline_items(
+        None, html, ".item-container", "https://publications.aap.org",
+        "aap-policy",
+    )
+    assert items
+    assert items[0].title == "Ibuprofen Safety in Infants 2024"
+    assert items[0].url.endswith("/pediatrics/article/9")
