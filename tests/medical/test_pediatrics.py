@@ -22,27 +22,55 @@ async def _engine(tmp_path: Path):
     return engine, cache, http_client
 
 
-def _install_fake_camoufox(monkeypatch, rendered_html="", first_landing_url=None):
-    """Fake camoufox.async_api; returns (attempts, captured_urls).
+def _install_fake_camoufox(
+    monkeypatch,
+    rendered_html="",
+    first_landing_url=None,
+    challenge_html=None,
+    hang_s=0.0,
+):
+    """Fake camoufox.async_api; returns (attempts, captured_urls, exits).
 
     ``first_landing_url`` simulates the Cloudflare interstitial: the first
     goto lands on a mangled redirect URL, later gotos land clean.
+    ``challenge_html`` is served for the first navigation only, so a scrape
+    that reads content before re-navigating sees the challenge page, not the
+    results.
+    ``hang_s`` makes every goto sleep, to exercise the total-timeout guard.
     """
+    import asyncio
     import sys
     import types
 
+    from bs4 import BeautifulSoup
+
     attempts: list[bool] = []
     captured_urls: list[str] = []
+    exits: list[bool] = []
 
     class _FakePage:
         def __init__(self):
             self.url = ""
+            self._nav = 0
+
+        def _html(self):
+            if challenge_html is not None and self._nav <= 1:
+                return challenge_html
+            return rendered_html
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
-            self.url = first_landing_url if len(captured_urls) == 1 else url
-            self.url = self.url or url
+            self._nav += 1
+            if hang_s:
+                await asyncio.sleep(hang_s)
+            self.url = (first_landing_url if self._nav == 1 else None) or url
             return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            el = BeautifulSoup(self._html(), "html.parser").select_one(selector)
+            if el is None:
+                raise TimeoutError(f"no element matching {selector}")
+            return el
 
         async def wait_for_timeout(self, ms):
             return None
@@ -51,7 +79,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", first_landing_url=None
             return None
 
         async def content(self):
-            return rendered_html
+            return self._html()
 
     class _FakeBrowser:
         async def new_page(self, *a, **k):
@@ -63,6 +91,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", first_landing_url=None
             return _FakeBrowser()
 
         async def __aexit__(self, *exc):
+            exits.append(True)
             return False
 
     def _fake_async_camoufox(**launch_options):
@@ -74,7 +103,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", first_landing_url=None
     camoufox_mod.async_api = api_mod
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
-    return attempts, captured_urls
+    return attempts, captured_urls, exits
 
 
 def _install_fake_playwright(monkeypatch):
@@ -490,7 +519,7 @@ async def test_search_aap_guidelines_browser_is_last_resort(tmp_path: Path, monk
     </body></html>
     """
 
-    attempts, _urls = _install_fake_camoufox(monkeypatch, rendered_html)
+    attempts, _urls, _exits = _install_fake_camoufox(monkeypatch, rendered_html)
     # Block the legacy playwright path so the pre-camoufox source cannot open
     # a real browser during this test.
     _install_fake_playwright(monkeypatch)
@@ -528,7 +557,7 @@ async def test_last_resort_browser_scrape_uses_camoufox_and_encodes_query(
     )
     engine.pubmed = mock_pubmed
 
-    camoufox_attempts, captured = _install_fake_camoufox(monkeypatch)
+    camoufox_attempts, captured, _exits = _install_fake_camoufox(monkeypatch)
     pw_attempts = _install_fake_playwright(monkeypatch)
 
     try:
@@ -573,7 +602,7 @@ async def test_browser_fallback_skipped_when_pubmed_yields_results(tmp_path: Pat
     )
     engine.pubmed = mock_pubmed
 
-    camoufox_attempts, _urls = _install_fake_camoufox(monkeypatch)
+    camoufox_attempts, _urls, _exits = _install_fake_camoufox(monkeypatch)
 
     try:
         guidelines, meta = await engine.search_aap_guidelines("ibuprofen children")
@@ -678,8 +707,15 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
     mangled = (
         f"{AAP_URL}?q=ibuprofen?autologincheck=redirected"
     )
-    _attempts, captured = _install_fake_camoufox(
-        monkeypatch, rendered_html, first_landing_url=mangled
+    challenge_html = (
+        "<html><head><title>Just a moment...</title></head>"
+        "<body><div id='challenge-platform'></div></body></html>"
+    )
+    _attempts, captured, _exits = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html,
+        first_landing_url=mangled,
+        challenge_html=challenge_html,
     )
     _install_fake_playwright(monkeypatch)
 
@@ -689,7 +725,8 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
             "no re-navigation after the challenge mangled the first landing"
         )
         assert captured[-1] == f"{AAP_URL}?q=ibuprofen"
-        assert guidelines
+        assert guidelines, "content was read before re-navigation: got the challenge page"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
         assert meta.error is False
     finally:
         await cache.close()
