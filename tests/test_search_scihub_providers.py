@@ -1,3 +1,5 @@
+import asyncio
+import time
 from typing import NamedTuple
 
 import httpx
@@ -417,6 +419,65 @@ def test_scihub_extract_pdf_url_resolves_relative_path():
 
 
 @respx.mock
+@respx.mock
+async def test_failing_mirror_deprioritized_on_next_call(client):
+    """A mirror that fails gets a penalty; the next call tries healthy
+    mirrors first (stable sort keeps config order among zero penalties)."""
+    respx.get(url__startswith="https://m1.org").mock(side_effect=httpx.ConnectError("down"))
+    respx.get(url__startswith="https://m2.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://cyber.sci-hub.se/deprio.pdf"></iframe></html>',
+        )
+    )
+    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-deprio")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(
+        client, mirrors=["https://m1.org", "https://m2.org"], settings=settings
+    )
+    ids = IdentifierMap(doi="10.1/deprio")
+    b1, _ = await provider.fetch_pdf_bytes(ids)
+    assert b1
+    first_call_calls = len(respx.calls)
+    b2, _ = await provider.fetch_pdf_bytes(ids)
+    assert b2
+    later_hosts = [str(c.request.url.host) for c in respx.calls[first_call_calls:]]
+    assert later_hosts[0] == "m2.org"
+    if "m1.org" in later_hosts:
+        assert later_hosts.index("m2.org") < later_hosts.index("m1.org")
+
+
+@respx.mock
+async def test_mirror_attempt_respects_per_mirror_timeout(client):
+    """Each mirror gets at most scihub_mirror_timeout_s; a slow mirror must
+    not burn the whole waterfall budget before the next mirror is tried."""
+    async def _slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, text="too late")
+
+    respx.get(url__startswith="https://slow.org").mock(side_effect=_slow)
+    respx.get(url__startswith="https://fast.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://cyber.sci-hub.se/fast.pdf"></iframe></html>',
+        )
+    )
+    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-fast")
+    )
+    settings = Settings(enable_browser_fallback=False, scihub_mirror_timeout_s=0.2)
+    provider = SciHubProvider(
+        client, mirrors=["https://slow.org", "https://fast.org"], settings=settings
+    )
+    start = time.monotonic()
+    b, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/slow"))
+    elapsed = time.monotonic() - start
+    assert b
+    assert elapsed < 2.0
+
+
 async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(503))
     settings = Settings(enable_browser_fallback=False)

@@ -214,6 +214,17 @@ class WaterfallResolver:
                 attempts.append(FetchAttempt(tier=in_flight_tier, outcome="timeout", reason="Total budget exceeded"))
 
         if winning_resp is not None:
+            # Producers like scihub/pmc/arxiv/unpaywall omit title; backfill
+            # it from the metadata chain, bounded so a slow metadata tier
+            # cannot outlive the waterfall budget.
+            if not winning_resp.title:
+                try:
+                    meta = await asyncio.wait_for(self.fetch_abstract(ids), timeout=5.0)
+                except Exception:
+                    meta = None
+                if meta and meta.title:
+                    winning_resp.title = meta.title
+
             content = winning_resp.content
             if sections:
                 content = select_sections(content, sections)

@@ -4,12 +4,12 @@ from pathlib import Path
 
 DEFAULT_SCIHUB_MIRRORS = [
     "https://sci-hub.mksa.top",
-    "https://sci-hub.hkvisa.net",
     "https://sci-hub.ru",
-    "https://sci-hub.st",
-    "https://sci-hub.se",
     "https://sci-hub.ren",
     "https://sci-hub.ee",
+    "https://sci-hub.hkvisa.net",
+    "https://sci-hub.st",
+    "https://sci-hub.se",
 ]
 
 
@@ -72,6 +72,9 @@ class Settings:
     # timeout. Ten seconds per stage keeps the worst case inside a 60s caller
     # ceiling while leaving room for the HTTP layer's own retries.
     brazil_stage_timeout_s: float = 10.0
+    # Per-mirror ceiling inside the scihub tier: 7 mirrors x httpx retries x
+    # the 30 s request timeout would otherwise blow the 45 s waterfall budget.
+    scihub_mirror_timeout_s: float = 12.0
     enable_browser_fallback: bool = True
     enable_medical_tools: bool = True
 
@@ -172,6 +175,7 @@ class Settings:
             cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
             brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
+            scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

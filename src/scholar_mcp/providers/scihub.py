@@ -89,6 +89,10 @@ class SciHubProvider(BaseProvider):
         super().__init__(http_client)
         self.settings = settings or Settings.load()
         self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
+        # Failure memory: a mirror that fails gets +1; iteration order is a
+        # stable sort on penalties, so known-bad mirrors sink to the tail
+        # while zero-penalty mirrors keep config order. Success pops the entry.
+        self._mirror_penalties: dict[str, int] = {}
 
     async def _get_pdf_bytes(
         self, pdf_url: str, referer: str | None, *, allow_bare_retry: bool = True
@@ -191,23 +195,35 @@ class SciHubProvider(BaseProvider):
             return None, None
 
         clean_doi = ids.doi.strip()
-        for mirror in self.mirrors:
+
+        async def _try_mirror(mirror: str) -> tuple[bytes, str] | None:
             mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
+            resp = await self.http_client.get(mirror_url)
+            if resp is None or resp.status_code != 200 or not resp.text:
+                return None
+
+            final_page_url = _landing_url(str(resp.url), mirror_url)
+            pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
+            if not pdf_url:
+                return None
+
+            pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
+                return pdf_bytes, pdf_url
+            return None
+
+        ordered = sorted(self.mirrors, key=lambda m: self._mirror_penalties.get(m, 0))
+        for mirror in ordered:
             try:
-                resp = await self.http_client.get(mirror_url)
-                if resp is None or resp.status_code != 200 or not resp.text:
-                    continue
-
-                final_page_url = _landing_url(str(resp.url), mirror_url)
-                pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
-                if not pdf_url:
-                    continue
-
-                pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
-                if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
-                    return pdf_bytes, pdf_url
-            except Exception:
-                continue
+                result = await asyncio.wait_for(
+                    _try_mirror(mirror), timeout=self.settings.scihub_mirror_timeout_s
+                )
+            except (asyncio.TimeoutError, Exception):
+                result = None
+            if result is not None:
+                self._mirror_penalties.pop(mirror, None)
+                return result
+            self._mirror_penalties[mirror] = self._mirror_penalties.get(mirror, 0) + 1
 
         if self.settings.enable_browser_fallback:
             camoufox_bytes, camoufox_url = await self._fetch_via_camoufox(clean_doi)

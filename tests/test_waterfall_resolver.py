@@ -250,6 +250,17 @@ async def test_fetch_abstract_falls_back_to_arxiv():
     r.arxiv.fetch_metadata.assert_awaited_once_with("2305.18290")
 
 
+async def test_full_text_hit_backfills_title():
+    """Producers that omit title (scihub, pmc, arxiv, unpaywall) leave
+    FullTextResponse.title empty; the resolver backfills it from metadata."""
+    r = make_resolver(Settings())
+    r.scihub.fetch_full_text.return_value = hit("scihub")
+    assert r.scihub.fetch_full_text.return_value.title == ""
+    r.fetch_abstract = AsyncMock(return_value=PaperMetadata(title="X"))
+    res = await r.resolve_full_text("10.1038/xyz")
+    assert res.title == "X"
+
+
 async def test_waterfall_resolver_search_with_rerank():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     mock_papers = [
