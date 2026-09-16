@@ -35,6 +35,11 @@ def _select_title_el(item):
         if el is not None:
             return el
     return None
+
+
+def _looks_like_challenge(content: str) -> bool:
+    lowered = content.lower()
+    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
 DESC_SELECTORS = ".description, .summary, .abstract, p"
 
 AGE_RANGE_RE = re.compile(
@@ -51,10 +56,17 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # challenge needs time to settle, but search_aap_guidelines is an MCP tool
 # with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
 _NAV_TIMEOUT_MS = 15000
-_NETWORKIDLE_TIMEOUT_MS = 15000
 _CHALLENGE_SETTLE_MS = 5000
 _POST_RENAV_SETTLE_MS = 3000
 _CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
+
+# Cloudflare interstitial markers. The title text is localised; the body
+# carries stable platform divs.
+_CHALLENGE_MARKERS = (
+    "just a moment",
+    "challenge-platform",
+    "cf-browser-verification",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +206,23 @@ class PediatricsEngine:
 
         return self._parse_guideline_items(html_text, item_selectors, base_url, source), False
 
+    @staticmethod
+    async def _settle(page, result_selector: str, timeout_ms: int) -> None:
+        """Block until result items render.
+
+        wait_for_selector already blocks for up to timeout_ms, so a miss needs
+        no extra sleep: it means a challenge page or markup we do not
+        recognise, which the caller detects from the content itself."""
+        try:
+            await page.wait_for_selector(result_selector, timeout=timeout_ms)
+        except Exception:
+            logger.debug(
+                "No %s within %dms; treating the page as unrendered",
+                result_selector,
+                timeout_ms,
+                exc_info=True,
+            )
+
     async def _camoufox_scrape(
         self,
         url: str,
@@ -221,7 +250,7 @@ class PediatricsEngine:
                 # ("?autologincheck=redirected" appended to the query) that
                 # 404s. Once the challenge clears, its cookie is set and a
                 # clean re-navigation reaches the real results page.
-                await page.wait_for_timeout(_CHALLENGE_SETTLE_MS)
+                await self._settle(page, item_selectors, _CHALLENGE_SETTLE_MS)
                 content = await page.content()
                 first = self._parse_guideline_items(
                     content, item_selectors, base_url, source
@@ -231,13 +260,7 @@ class PediatricsEngine:
                 await page.goto(
                     target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
                 )
-                try:
-                    await page.wait_for_load_state(
-                        "networkidle", timeout=_NETWORKIDLE_TIMEOUT_MS
-                    )
-                except Exception:
-                    pass
-                await page.wait_for_timeout(_POST_RENAV_SETTLE_MS)
+                await self._settle(page, item_selectors, _POST_RENAV_SETTLE_MS)
                 content = await page.content()
                 second = self._parse_guideline_items(
                     content, item_selectors, base_url, source
