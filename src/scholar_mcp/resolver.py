@@ -210,10 +210,12 @@ class WaterfallResolver:
             return None
 
         winning_resp: FullTextResponse | None = None
+        budget = float(self.settings.total_budget_seconds)
+        waterfall_start = time.monotonic()
         try:
             winning_resp = await asyncio.wait_for(
                 _execute_waterfall(),
-                timeout=float(self.settings.total_budget_seconds),
+                timeout=budget,
             )
         except asyncio.TimeoutError:
             # Mark remaining in-flight tier as timeout
@@ -222,12 +224,16 @@ class WaterfallResolver:
                 attempts.append(FetchAttempt(tier=in_flight_tier, outcome="timeout", reason="Total budget exceeded"))
 
         if winning_resp is not None:
-            # Producers like scihub/pmc/arxiv/unpaywall omit title; backfill
-            # it from the metadata chain, bounded so a slow metadata tier
-            # cannot outlive the waterfall budget.
-            if not winning_resp.title:
+            # Producers like scihub/pmc/arxiv/unpaywall omit title; backfill it
+            # from the metadata chain. The backfill runs after the waterfall, so
+            # its ceiling comes out of what the waterfall left of the same
+            # budget — capped at 5 s, skipped entirely when nothing remains.
+            remaining = budget - (time.monotonic() - waterfall_start)
+            if not winning_resp.title and remaining > 0:
                 try:
-                    meta = await asyncio.wait_for(self.fetch_abstract(ids), timeout=5.0)
+                    meta = await asyncio.wait_for(
+                        self.fetch_abstract(ids), timeout=min(5.0, remaining)
+                    )
                 except Exception:
                     meta = None
                 if meta and meta.title:

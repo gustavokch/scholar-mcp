@@ -261,6 +261,32 @@ async def test_full_text_hit_backfills_title():
     assert res.title == "X"
 
 
+async def test_title_backfill_bounded_by_remaining_budget():
+    """The backfill runs after the waterfall, so its ceiling must come out of
+    what the waterfall left of the same budget — not a fresh 5 s on top.
+
+    Here the waterfall burns almost the whole budget, so a metadata chain that
+    needs more than the remainder must be abandoned, leaving the title empty.
+    """
+    settings = Settings(total_budget_seconds=1)
+    r = make_resolver(settings)
+
+    async def slow_hit(_ids):
+        await asyncio.sleep(0.9)
+        return hit("scihub")
+
+    async def slow_meta(_ids):
+        await asyncio.sleep(0.5)
+        return PaperMetadata(title="X")
+
+    r.scihub.fetch_full_text = slow_hit
+    r.fetch_abstract = slow_meta
+    res = await r.resolve_full_text("10.1038/xyz")
+    assert res.source == "scihub"
+    assert res.title == ""
+
+
+
 async def test_last_search_sources_blocked_on_provider_error():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     r.pubmed.search = AsyncMock(return_value=[])
