@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -218,7 +219,16 @@ class SciHubProvider(BaseProvider):
             return None
 
         ordered = sorted(self.mirrors, key=lambda m: self._mirror_penalties.get(m, 0))
+        # The tier as a whole is bounded, not only each mirror: 7 mirrors x
+        # the per-mirror ceiling would outlast the 45 s waterfall budget.
+        # Once the tier deadline passes, no new mirror is started.
+        tier_budget = float(
+            getattr(self.settings, "scihub_tier_timeout_s", 0.0) or 0.0
+        )
+        tier_start = time.monotonic()
         for mirror in ordered:
+            if tier_budget > 0 and time.monotonic() - tier_start >= tier_budget:
+                break
             try:
                 result = await asyncio.wait_for(
                     _try_mirror(mirror), timeout=self.settings.scihub_mirror_timeout_s

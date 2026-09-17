@@ -419,7 +419,6 @@ def test_scihub_extract_pdf_url_resolves_relative_path():
 
 
 @respx.mock
-@respx.mock
 async def test_failing_mirror_deprioritized_on_next_call(client):
     """A mirror that fails gets a penalty; the next call tries healthy
     mirrors first (stable sort keeps config order among zero penalties)."""
@@ -447,6 +446,30 @@ async def test_failing_mirror_deprioritized_on_next_call(client):
     assert later_hosts[0] == "m2.org"
     if "m1.org" in later_hosts:
         assert later_hosts.index("m2.org") < later_hosts.index("m1.org")
+
+
+@respx.mock
+async def test_mirror_tier_respects_tier_deadline(client):
+    """The whole mirror tier is bounded, not just each mirror: 7 mirrors x a
+    slow per-mirror timeout must not add up past scihub_tier_timeout_s."""
+    async def _slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)
+        return httpx.Response(503)
+
+    mirrors = [f"https://t{i}.org" for i in range(7)]
+    for m in mirrors:
+        respx.get(url__startswith=m).mock(side_effect=_slow)
+    settings = Settings(
+        enable_browser_fallback=False,
+        scihub_mirror_timeout_s=1.0,
+        scihub_tier_timeout_s=2.0,
+    )
+    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    start = time.monotonic()
+    b, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/tier"))
+    elapsed = time.monotonic() - start
+    assert b is None
+    assert elapsed < 5.0, f"mirror tier outlived its deadline: {elapsed:.1f}s"
 
 
 @respx.mock
@@ -478,6 +501,7 @@ async def test_mirror_attempt_respects_per_mirror_timeout(client):
     assert elapsed < 2.0
 
 
+@respx.mock
 async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(503))
     settings = Settings(enable_browser_fallback=False)
@@ -848,11 +872,10 @@ async def test_pubmed_fetch_abstract_parses_own_pmcid(client):
 
 
 
-async def test_provider_last_error_is_per_request(client):
+async def test_provider_last_error_is_per_request():
     """Providers are module-level singletons in server.py. A failing search
     running concurrently with a successful one must not leave its error on the
     attribute the successful call reads."""
-    provider = CrossRefProvider(client)
     started = asyncio.Event()
     failed_done = asyncio.Event()
 
@@ -872,18 +895,28 @@ async def test_provider_last_error_is_per_request(client):
         return None
 
     async def run_ok():
-        client.get = slow_ok
+        # Each task gets its own client: reassigning client.get from two
+        # concurrent tasks races one patch over the other.
+        client = AsyncHttpClient(
+            settings=Settings(), max_retries=1, backoff_base=0.01
+        )
         try:
+            client.get = slow_ok
+            provider = CrossRefProvider(client)
             await provider.search("ok query")
             await failed_done.wait()
             return provider.last_error
         finally:
-            pass
+            await client.aclose()
 
     async def run_fail():
         await started.wait()
-        client.get = fast_fail
+        client = AsyncHttpClient(
+            settings=Settings(), max_retries=1, backoff_base=0.01
+        )
         try:
+            client.get = fast_fail
+            provider = CrossRefProvider(client)
             await provider.search("fail query")
             return provider.last_error
         finally:
