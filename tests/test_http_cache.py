@@ -584,18 +584,32 @@ def test_pubmed_key_wins_over_ncbi_alias(monkeypatch):
     assert Settings.load().pubmed_api_key == "p1"
 
 
-def test_idconv_receives_api_key():
-    s = Settings(pubmed_api_key="k123")
-    client = AsyncHttpClient(s)
-    url = client._inject_credentials(
-        "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
-    )
-    assert "api_key=k123" in url
-    # No request made: the httpx AsyncClient never opened a connection, so
-    # nothing to close from this sync test.
+def test_blank_pubmed_key_falls_through_to_ncbi_alias(monkeypatch):
+    # A key of spaces is a misconfiguration, not a choice: without stripping it
+    # beats a good NCBI_API_KEY and ships to E-utilities as "api_key=+".
+    monkeypatch.setenv("PUBMED_API_KEY", "   ")
+    monkeypatch.setenv("NCBI_API_KEY", " k123 ")
+    assert Settings.load().pubmed_api_key == "k123"
 
 
-def test_pmc_article_download_does_not_receive_credentials():
+def test_both_ncbi_keys_blank_resolve_to_none(monkeypatch):
+    monkeypatch.setenv("PUBMED_API_KEY", "  ")
+    monkeypatch.setenv("NCBI_API_KEY", "")
+    assert Settings.load().pubmed_api_key is None
+
+
+async def test_idconv_receives_api_key():
+    client = AsyncHttpClient(Settings(pubmed_api_key="k123"))
+    try:
+        url = client._inject_credentials(
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
+        )
+        assert "api_key=k123" in url
+    finally:
+        await client.aclose()
+
+
+async def test_pmc_article_download_does_not_receive_credentials():
     """Credentials belong to E-utilities, not to every NCBI-hosted file.
 
     ``resolver.py`` fetches whatever OA location Unpaywall reports, and PMC
@@ -610,13 +624,16 @@ def test_pmc_article_download_does_not_receive_credentials():
             pubmed_tool="TestApp",
         )
     )
-    url = client._inject_credentials(
-        "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123456/pdf/main.pdf"
-    )
-    assert "api_key" not in url
-    assert "tool" not in url
-    assert "email" not in url
+    try:
+        url = client._inject_credentials(
+            "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123456/pdf/main.pdf"
+        )
+        assert "api_key" not in url
+        assert "tool" not in url
+        assert "email" not in url
 
-    # A PubMed record page is likewise not an E-utilities endpoint.
-    record = client._inject_credentials("https://pubmed.ncbi.nlm.nih.gov/12345/")
-    assert "api_key" not in record
+        # A PubMed record page is likewise not an E-utilities endpoint.
+        record = client._inject_credentials("https://pubmed.ncbi.nlm.nih.gov/12345/")
+        assert "api_key" not in record
+    finally:
+        await client.aclose()

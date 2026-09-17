@@ -101,8 +101,24 @@ class Settings:
             else list(DEFAULT_SCIHUB_MIRRORS)
         )
 
+        # NCBI_API_KEY is the name NCBI itself documents, so accept it as an
+        # alias. Both values are stripped first: a key of spaces is a
+        # misconfiguration, and unstripped it would both beat a good alias and
+        # reach E-utilities as "api_key=+".
+        ncbi_key = next(
+            (
+                stripped
+                for stripped in (
+                    (os.getenv(name) or "").strip()
+                    for name in ("PUBMED_API_KEY", "NCBI_API_KEY")
+                )
+                if stripped
+            ),
+            None,
+        )
+
         return cls(
-            pubmed_api_key=os.getenv("PUBMED_API_KEY") or os.getenv("NCBI_API_KEY"),
+            pubmed_api_key=ncbi_key,
             pubmed_email=os.getenv("PUBMED_EMAIL"),
             pubmed_tool=os.getenv("PUBMED_TOOL", "ScholarMCP"),
             unpaywall_email=os.getenv("UNPAYWALL_EMAIL") or os.getenv("PUBMED_EMAIL"),
