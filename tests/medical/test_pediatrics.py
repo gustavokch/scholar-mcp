@@ -1003,6 +1003,22 @@ async def test_filter_matches_drops_stopword_only_overlap(tmp_path):
         await http_client.aclose()
 
 
+async def test_filter_matches_keeps_rare_single_token_title(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # "tubes" is the only substantive overlap, but it is rare and
+        # discriminating: dropping it loses the right guideline entirely.
+        keep = [PediatricGuideline(
+            title="Tympanostomy Tubes",
+            organization="AAP", url="https://x", source="aap-policy",
+        )]
+        kept = engine._filter_matches(keep, "ear tubes in children")
+        assert [g.title for g in kept] == ["Tympanostomy Tubes"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_pubmed_tier_reuses_unfiltered_bright_futures_results(tmp_path, monkeypatch):
     # AAP scrape returns only stopword junk; BF (PubMed) returns a guideline
     # titled "Acute Otitis Media" for query "ear infection in children".

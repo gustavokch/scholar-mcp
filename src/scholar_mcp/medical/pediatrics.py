@@ -119,6 +119,18 @@ ENGLISH_STOPWORDS: frozenset[str] = frozenset(
     }
 )
 
+# High-frequency clinical vocabulary: a title sharing exactly ONE such token
+# with the query (e.g. only "health") still matches half the index, so the
+# two-token rule must keep applying. A rare single token ("tubes",
+# "tympanostomy") is discriminating and a 1-token match on it is kept.
+COMMON_CLINICAL_TOKENS: frozenset[str] = frozenset(
+    {
+        "care", "health", "clinical", "pediatric", "management", "disease",
+        "disorder", "disorders", "treatment", "guideline", "guidelines",
+        "practice", "screening", "prevention", "diagnosis",
+    }
+)
+
 
 class PediatricsEngine:
     def __init__(
@@ -161,7 +173,14 @@ class PediatricsEngine:
         kept: list[PediatricGuideline] = []
         for g in results:
             title_tokens = set(re.findall(r"\w+", g.title.lower()))
-            if len(title_tokens & substantive) >= threshold:
+            overlap = title_tokens & substantive
+            if len(overlap) >= threshold:
+                kept.append(g)
+            elif len(overlap) == 1 and not (overlap & COMMON_CLINICAL_TOKENS):
+                # Single rare-token matches ("Tympanostomy Tubes" for "ear
+                # tubes in children") are the whole result for short
+                # queries; dropping them loses the right guideline. Generic
+                # single tokens ("health") still require the full threshold.
                 kept.append(g)
         return kept
 
