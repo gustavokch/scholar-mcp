@@ -6,7 +6,6 @@ import random
 import re
 import threading
 import urllib.parse
-import weakref
 from datetime import datetime, timezone
 from typing import Any
 
@@ -165,27 +164,17 @@ class FetchError(RuntimeError):
 class AsyncHttpClient:
     """Shared HTTP client with rate-limiting, retries, and NCBI credential injection."""
 
-    # Process-global limiter registry. A second client built from the same
-    # settings (the resolver's fallback path) must not double the effective
-    # rate against a host — limiters are keyed by (host, rate) inside a
-    # per-event-loop table, so clients with different rates (keyed vs unkeyed
-    # NCBI, S2 tiers) keep separate buckets while same-settings clients on the
-    # same event loop share one.
+    # Process-global limiter registry, bounded by the number of distinct hosts.
+    # A second client built from the same settings (the resolver's fallback
+    # path) must not double the effective rate against a host, and a caller
+    # that builds a client per request in its own asyncio.run (zimqa) must
+    # still share the process-wide budget rather than mint a fresh bucket per
+    # call. Both shapes need one map keyed by (host, rate).
     #
-    # The loop is the outer key because AsyncRateLimiter carries an
-    # asyncio.Lock that binds to the first loop that contends it: sharing one
-    # limiter across loops would raise RuntimeError on the second loop. The
-    # production server runs a single loop, so this costs nothing there; it
-    # keeps each test's loop isolated the way per-instance limiters did.
-    #
-    # The table is weak-keyed: a pytest session creates one loop per test, and
-    # a strong key would keep every closed loop (and its limiters) alive for
-    # the life of the process.
-    _limiters: "weakref.WeakKeyDictionary[Any, dict[tuple[str, float], AsyncRateLimiter]]" = (
-        weakref.WeakKeyDictionary()
-    )
-    # Sync callers have no loop to key on; they all share this one table.
-    _loopless_limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
+    # The limiter carries no loop-bound state (its lock is a threading.Lock
+    # held across arithmetic only), so loops, threads, and client instances
+    # can all share one bucket safely.
+    _limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
     def __init__(
@@ -228,26 +217,22 @@ class AsyncHttpClient:
         else:
             rate = DEFAULT_FALLBACK_RATE
         key = (host_key, rate)
-        loop = self._current_loop()
         with self._limiters_lock:
-            if loop is None:
-                table = self._loopless_limiters
-            else:
-                table = self._limiters.get(loop)
-                if table is None:
-                    table = {}
-                    self._limiters[loop] = table
-            if key not in table:
-                table[key] = AsyncRateLimiter(rate_per_sec=rate)
-            return table[key]
+            if key not in self._limiters:
+                self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
+            return self._limiters[key]
 
-    @staticmethod
-    def _current_loop() -> Any:
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            # Sync caller (no running loop): all such callers share one bucket.
-            return None
+    @classmethod
+    def limiter_bucket_count(cls) -> int:
+        """Total live limiters. For tests and diagnostics."""
+        with cls._limiters_lock:
+            return len(cls._limiters)
+
+    @classmethod
+    def reset_limiters(cls) -> None:
+        """Drop every limiter bucket. For tests; never call it on a live server."""
+        with cls._limiters_lock:
+            cls._limiters.clear()
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.

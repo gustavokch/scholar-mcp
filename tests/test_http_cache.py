@@ -545,6 +545,36 @@ async def test_limiter_registry_shared_across_client_instances():
         await b.aclose()
 
 
+def test_limiter_registry_shared_across_event_loops():
+    """zimqa runs every engine call in its own asyncio.run; buckets must
+    outlive the loop that created them or the burst is unchanged."""
+    boxes: list[object] = []
+
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            boxes.append(client._limiter_for("eutils.ncbi.nlm.nih.gov"))
+        finally:
+            await client.aclose()
+
+    asyncio.run(grab())
+    asyncio.run(grab())
+    assert boxes[0] is boxes[1]
+
+
+def test_registry_is_bounded_by_host_count():
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            client._limiter_for("eutils.ncbi.nlm.nih.gov")
+        finally:
+            await client.aclose()
+
+    for _ in range(5):
+        asyncio.run(grab())
+    assert AsyncHttpClient.limiter_bucket_count() == 1
+
+
 def test_ncbi_api_key_env_alias(monkeypatch):
     # Subject IS env loading — sanctioned Settings.load() exception.
     monkeypatch.setenv("NCBI_API_KEY", "k123")
