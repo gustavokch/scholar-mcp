@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -101,9 +103,10 @@ async def test_resolution_is_cached():
 
 
 @respx.mock
-async def test_failed_idconv_resolution_is_not_cached():
-    """A failed idconv enrichment must not be cached: the next call retries
-    upstream instead of serving the poisoned map for cache_ttl_seconds."""
+async def test_failed_idconv_resolution_is_negative_cached():
+    """A failed idconv enrichment is cached under the input key only, with a
+    short negative TTL: an in-TTL retry serves the unenriched map instead of
+    re-hammering a failing upstream, and no cross-key aliases are written."""
     route = respx.get(url__startswith=IDCONV).mock(
         side_effect=[
             httpx.Response(500),
@@ -112,14 +115,48 @@ async def test_failed_idconv_resolution_is_not_cached():
             ),
         ]
     )
+    settings = Settings(cache_ttl_idmap_failure=3600)  # in-test retry must NOT re-hit
     client = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
     cache = TTLCache()
     try:
-        res1 = await resolve_identifiers("32000000", client, cache, Settings())
+        res1 = await resolve_identifiers("32000000", client, cache, settings)
         assert res1.pmid == "32000000"  # input is preserved even when enrichment fails
-        res2 = await resolve_identifiers("32000000", client, cache, Settings())
-        assert route.call_count == 2  # first failure was NOT cached
-        assert res2.doi == "10.1/x"
+        assert res1.doi is None
+        res2 = await resolve_identifiers("32000000", client, cache, settings)
+        assert route.call_count == 1  # negative cache absorbed the retry
+        assert res2.doi is None
+        # The cross-key alias was NOT written: a pmcid-keyed resolve misses the
+        # cache and retries upstream, which now succeeds.
+        res3 = await resolve_identifiers("PMC7000000", client, cache, settings)
+        assert route.call_count == 2
+        assert res3.pmid == "32000000"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_failed_idconv_negative_cache_expires_and_recovers():
+    """Past the negative TTL the next resolve retries upstream and a success
+    still enriches."""
+    route = respx.get(url__startswith=IDCONV).mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(
+                200, json={"records": [{"pmid": "32000000", "pmcid": "PMC7000000", "doi": "10.1/x"}]}
+            ),
+        ]
+    )
+    settings = Settings(cache_ttl_idmap_failure=0.1)
+    client = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
+    cache = TTLCache()
+    try:
+        await resolve_identifiers("32000000", client, cache, settings)
+        await resolve_identifiers("32000000", client, cache, settings)
+        assert route.call_count == 1  # still within the negative TTL
+        await asyncio.sleep(0.2)
+        res = await resolve_identifiers("32000000", client, cache, settings)
+        assert route.call_count == 2
+        assert res.doi == "10.1/x"
     finally:
         await client.aclose()
 

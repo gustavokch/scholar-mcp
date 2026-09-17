@@ -31,6 +31,10 @@ class Settings:
     max_concurrency: int = 5
     cache_size: int = 500
     cache_ttl_seconds: int = 3600
+    # Negative-cache TTL for a failed idconv enrichment: short enough that a
+    # transient NCBI outage recovers on the next call after it, long enough
+    # that a failing upstream is not re-hammered on every resolve.
+    cache_ttl_idmap_failure: int = 60
     max_chars: int = 50_000
     title_match_threshold: float = 80.0
     download_dir: Path = field(default_factory=lambda: Path("./downloads"))
@@ -132,6 +136,7 @@ class Settings:
             max_concurrency=int(os.getenv("SCHOLAR_MAX_CONCURRENCY", "5")),
             cache_size=int(os.getenv("SCHOLAR_CACHE_SIZE", "500")),
             cache_ttl_seconds=int(os.getenv("SCHOLAR_CACHE_TTL", "3600")),
+            cache_ttl_idmap_failure=int(os.getenv("CACHE_TTL_IDMAP_FAILURE", "60")),
             max_chars=int(os.getenv("SCHOLAR_MAX_CHARS", "50000")),
             title_match_threshold=float(os.getenv("SCHOLAR_TITLE_MATCH_THRESHOLD", "80")),
             download_dir=Path(os.getenv("SCHOLAR_DOWNLOAD_DIR", "./downloads")),

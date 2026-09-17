@@ -158,5 +158,16 @@ async def resolve_identifiers(
     if enrichment_ok:
         for k in keys_to_cache:
             await cache.set(k, id_map)
+    else:
+        # Negative cache: a failed enrichment is remembered under the input
+        # key only, with a short TTL, so a failing upstream is not re-hit on
+        # every resolve. Cross-key aliases are deliberately NOT written — an
+        # idconv outage must not turn one failed lookup into poisoned
+        # resolutions by every other identifier of the same paper.
+        await cache.set(
+            cache_key,
+            id_map,
+            ttl_seconds=getattr(settings, "cache_ttl_idmap_failure", 60),
+        )
 
     return id_map
