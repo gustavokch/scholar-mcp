@@ -1,5 +1,4 @@
 import asyncio
-import gc
 import logging
 import time
 
@@ -546,29 +545,34 @@ async def test_limiter_registry_shared_across_client_instances():
         await b.aclose()
 
 
-def test_limiter_registry_drops_buckets_when_loop_dies():
-    """A finished event loop must not stay pinned by the limiter registry.
+def test_limiter_registry_shared_across_event_loops():
+    """zimqa runs every engine call in its own asyncio.run; buckets must
+    outlive the loop that created them or the burst is unchanged."""
+    boxes: list[object] = []
 
-    The registry is process-global, so a strong reference to the loop inside a
-    key would retain every loop the process ever ran. zimqa builds a client per
-    engine call, which makes that growth unbounded rather than theoretical.
-    """
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            boxes.append(client._limiter_for("eutils.ncbi.nlm.nih.gov"))
+        finally:
+            await client.aclose()
 
-    async def _touch(client: AsyncHttpClient) -> None:
-        client._limiter_for("api.crossref.org")
-        await client.aclose()
+    asyncio.run(grab())
+    asyncio.run(grab())
+    assert boxes[0] is boxes[1]
 
-    before = AsyncHttpClient.limiter_bucket_count()
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_touch(AsyncHttpClient(Settings())))
-    finally:
-        loop.close()
-    assert AsyncHttpClient.limiter_bucket_count() > before
 
-    del loop
-    gc.collect()
-    assert AsyncHttpClient.limiter_bucket_count() == before
+def test_registry_is_bounded_by_host_count():
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            client._limiter_for("eutils.ncbi.nlm.nih.gov")
+        finally:
+            await client.aclose()
+
+    for _ in range(5):
+        asyncio.run(grab())
+    assert AsyncHttpClient.limiter_bucket_count() == 1
 
 
 def test_ncbi_api_key_env_alias(monkeypatch):
