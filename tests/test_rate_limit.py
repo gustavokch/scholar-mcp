@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 import pytest
 
@@ -76,5 +77,53 @@ def test_rate_limiter_throttle_sanitizes_non_finite():
 
     limiter.throttle(-10.0)
     assert limiter.throttled_until >= baseline
+
+
+def test_limiter_survives_a_second_event_loop():
+    """One limiter, two sequential loops. An asyncio.Lock binds to the first
+    loop that awaits it, so the old limiter raised RuntimeError here once a
+    waiter had to block: its future was created on the first loop."""
+    limiter = AsyncRateLimiter(rate_per_sec=100.0)
+
+    async def contend() -> None:
+        # Throttle so the first acquire sleeps while holding the bucket and
+        # the second blocks on the lock -- the path that used to bind an
+        # asyncio.Lock to whichever loop ran first.
+        limiter.throttle(0.01)
+        await asyncio.gather(*(limiter.acquire() for _ in range(2)))
+
+    asyncio.run(contend())  # burst 1 + 1 refill interval; binds the old lock
+    asyncio.run(contend())  # must not raise "is bound to a different event loop"
+
+
+def test_spacing_holds_across_loops():
+    limiter = AsyncRateLimiter(rate_per_sec=5.0)  # 0.2s per token, burst 1
+    start = time.monotonic()
+    for _ in range(3):
+        asyncio.run(limiter.acquire())
+    # First call spends the burst token; the next two each pay an interval.
+    assert time.monotonic() - start >= 0.4
+
+
+def test_concurrent_acquires_are_spaced_not_stacked():
+    limiter = AsyncRateLimiter(rate_per_sec=5.0)
+
+    async def main() -> float:
+        start = time.monotonic()
+        await asyncio.gather(*(limiter.acquire() for _ in range(3)))
+        return time.monotonic() - start
+
+    assert asyncio.run(main()) >= 0.4
+
+
+def test_throttle_from_another_thread_is_observed():
+    limiter = AsyncRateLimiter(rate_per_sec=100.0)
+    t = threading.Thread(target=limiter.throttle, args=(0.3,))
+    t.start()
+    t.join()
+
+    start = time.monotonic()
+    asyncio.run(limiter.acquire())
+    assert time.monotonic() - start >= 0.25
 
 
