@@ -575,6 +575,20 @@ def test_registry_is_bounded_by_host_count():
     assert AsyncHttpClient.limiter_bucket_count() == 1
 
 
+async def test_ncbi_bucket_is_shared_by_keyed_and_unkeyed_clients():
+    """NCBI counts per IP. Two buckets (9.0/s keyed + 2.8/s unkeyed) put
+    11.8 req/s against a 10/s ceiling."""
+    keyed = AsyncHttpClient(Settings(pubmed_api_key="k123"))
+    plain = AsyncHttpClient(Settings(pubmed_api_key=None))
+    try:
+        shared = keyed._limiter_for("eutils.ncbi.nlm.nih.gov")
+        assert shared is plain._limiter_for("eutils.ncbi.nlm.nih.gov")
+        assert shared.rate_per_sec == 2.8
+    finally:
+        await keyed.aclose()
+        await plain.aclose()
+
+
 def test_ncbi_api_key_env_alias(monkeypatch):
     # Subject IS env loading — sanctioned Settings.load() exception.
     monkeypatch.setenv("NCBI_API_KEY", "k123")
