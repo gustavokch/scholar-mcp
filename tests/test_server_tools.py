@@ -116,6 +116,28 @@ async def test_search_papers_clamps_num_results(resolver):
     assert resolver.search.await_args.kwargs["num_results"] == 50
 
 
+async def test_search_papers_error_row_matches_paper_shape(resolver):
+    """The tool returns a homogeneous list: even a total failure row must carry
+    the full PaperMetadata key set so iterating consumers never hit KeyError."""
+    resolver.search.side_effect = RuntimeError("backend exploded")
+    result = await srv.search_papers("crispr")
+    assert len(result) == 1
+    paper_keys = set(PaperMetadata(title="").to_dict())
+    assert paper_keys <= set(result[0])
+    assert result[0]["status"] == "error"
+    assert "backend exploded" in result[0]["error"]
+
+
+async def test_search_papers_sentinel_respects_num_results_clamp(resolver):
+    """The degradation sentinel reserves its slot inside the clamp, not after
+    it: num_results=50 must return at most 50 rows total."""
+    resolver.search.return_value = [PaperMetadata(title=f"P{i}") for i in range(50)]
+    resolver.last_search_sources = {"pubmed": "blocked"}
+    result = await srv.search_papers("crispr", num_results=50)
+    assert len(result) <= 50
+    assert result[-1]["status"] == "degraded"
+
+
 async def test_get_metadata_tool_does_not_run_waterfall(resolver):
     resolver.get_metadata.return_value = PaperMetadata(title="Meta", pmid="1", abstract="abs")
     result = await srv.get_metadata("1")

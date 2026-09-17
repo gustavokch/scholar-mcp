@@ -106,16 +106,24 @@ async def search_papers(
         # carries the full PaperMetadata key set (empty values) so a consumer
         # iterating the list and reading paper fields cannot hit a KeyError;
         # `status == "degraded"` is the discriminator for filtering it out.
+        # The sentinel reserves its slot inside the num_results clamp, so the
+        # total row count never exceeds what the caller asked for.
         sources = getattr(resolver, "last_search_sources", None)
         if isinstance(sources, dict) and any(
             v in ("blocked", "failed") for v in sources.values()
         ):
+            payload = payload[: max(clamped_num - 1, 0)]
             sentinel = PaperMetadata(title="").to_dict()
             sentinel.update({"status": "degraded", "_sources": sources, "degraded": True})
             payload.append(sentinel)
         return payload
     except Exception as ex:
-        return [{"status": "error", "error": str(ex)}]
+        # Same contract as the sentinel: one row, the full PaperMetadata key
+        # set, `status` as the discriminator. A bare {"status": "error"} row
+        # would KeyError any consumer iterating paper fields.
+        row = PaperMetadata(title="").to_dict()
+        row.update({"status": "error", "error": str(ex)})
+        return [row]
 
 
 def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, Any]:
