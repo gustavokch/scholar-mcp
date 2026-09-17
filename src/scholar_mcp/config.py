@@ -71,21 +71,32 @@ class Settings:
     cache_ttl_clinical_trials: int = 86400
     cache_ttl_who_iris: int = 2592000
     cache_ttl_brazil_moh: int = 2592000
-    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to three BVS stages
+    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to five BVS stages
     # run sequentially, and callers wrap the whole chain in their own hard
-    # timeout. Ten seconds per stage keeps the worst case inside a 60s caller
-    # ceiling while leaving room for the HTTP layer's own retries.
+    # timeout. Ten seconds per stage keeps one stalled stage from eating the
+    # share of the ceiling the remaining stages need.
     brazil_stage_timeout_s: float = 10.0
-    # Per-mirror ceiling inside the scihub tier: 7 mirrors x httpx retries x
-    # the 30 s request timeout would otherwise blow the 45 s waterfall budget.
+    # Whole-chain ceiling for BrazilMoHEngine, matching the 60 s hard timeout
+    # callers document. Real arithmetic: every stage (PCDT + each BVS variant)
+    # burns at most brazil_stage_timeout_s, and the browser tier gets
+    # min(brazil_browser_timeout_s, chain time still left), so
+    # PCDT + stages + browser can never outlast 60 s. <= 0 disables the bound.
+    brazil_chain_timeout_s: float = 60.0
+    # Per-mirror ceiling inside the scihub tier: without it one slow mirror
+    # burns the whole waterfall budget before the next mirror is tried.
     scihub_mirror_timeout_s: float = 12.0
+    # Whole-tier ceiling for the scihub mirror loop: 7 mirrors x 12 s would
+    # be 84 s against the 45 s total_budget_seconds the waterfall enforces.
+    # The loop stops starting new mirrors once the tier deadline passes.
+    scihub_tier_timeout_s: float = 20.0
     enable_browser_fallback: bool = True
     # BVS-specific gate for the camoufox tier in brazil_moh, independent of
     # the pediatrics scrapers. pesquisa.bvsalud.org 403s plain HTTP clients
     # behind a Bunny CDN shield; the browser tier is the last-resort answer.
     brazil_browser_fallback: bool = True
     # Hard ceiling on the BVS browser tier. It is the last stage of an already
-    # staged chain, so it must not be free to outlast everything before it.
+    # staged chain, so the effective ceiling is the smaller of this and the
+    # chain budget still left when the tier starts (see _browser_ceiling).
     brazil_browser_timeout_s: float = 30.0
     enable_medical_tools: bool = True
 
@@ -187,7 +198,9 @@ class Settings:
             cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
             brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
+            brazil_chain_timeout_s=float(os.getenv("BRAZIL_CHAIN_TIMEOUT_S", "60.0")),
             scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
+            scihub_tier_timeout_s=float(os.getenv("SCIHUB_TIER_TIMEOUT_S", "20.0")),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=float(
                 os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "30.0")
