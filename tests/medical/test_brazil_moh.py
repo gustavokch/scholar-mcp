@@ -1807,6 +1807,118 @@ async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
         await http_client.aclose()
 
 
+async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, monkeypatch):
+    """The browser tier answers BVS failures (CDN 403s), not a PCDT outage.
+    A PCDT error with a healthy BVS that legitimately returned zero records
+    must not launch a real browser."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=True))),
+    )
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch)
+    empty_payload = {"diaServerResponse": [{"response": {"docs": []}}]}
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(
+                return_value=httpx.Response(200, json=empty_payload)
+            )
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert attempts == []  # BVS was healthy; no browser launch
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
+    """Worst case must stay inside the documented 60 s caller ceiling: a
+    browser tier on a flat 30 s ceiling after five stalled 10 s stages is
+    ~90 s. The browser gets only the chain budget that is still left."""
+    import time as _time
+
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+        brazil_stage_timeout_s=0.05,
+        brazil_chain_timeout_s=0.5,
+        brazil_browser_timeout_s=30.0,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    attempts: list[bool] = []
+
+    class _SlowPage:
+        url = ""
+
+        async def goto(self, url, *a, **k):
+            return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(5.0)  # far past any remaining chain budget
+            return None
+
+        async def content(self):
+            return ""
+
+    class _SlowBrowser:
+        async def new_page(self, *a, **k):
+            return _SlowPage()
+
+    class _SlowContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _SlowBrowser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    import sys as _sys
+    import types as _types
+
+    api_mod = _types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _SlowContext()
+    camoufox_mod = _types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(_sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", api_mod)
+
+    try:
+        with respx.mock:
+            # BVS shield 403s every stage, so the browser tier is attempted...
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            start = _time.monotonic()
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+            elapsed = _time.monotonic() - start
+        # ...but only with the chain budget left: ~0.5 s ceiling, not 30 s.
+        assert attempts == [True]
+        assert elapsed < 2.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch):
     """The browser tier returned docs, but _is_brazilian dropped every one.
 
