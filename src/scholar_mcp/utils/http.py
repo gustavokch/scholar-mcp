@@ -169,12 +169,18 @@ class AsyncHttpClient:
     # path) must not double the effective rate against a host, and a caller
     # that builds a client per request in its own asyncio.run (zimqa) must
     # still share the process-wide budget rather than mint a fresh bucket per
-    # call. Both shapes need one map keyed by (host, rate).
+    # call. Both shapes need one map keyed by host.
     #
     # The limiter carries no loop-bound state (its lock is a threading.Lock
     # held across arithmetic only), so loops, threads, and client instances
     # can all share one bucket safely.
-    _limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
+    #
+    # Keyed and unkeyed NCBI callers share one bucket at the most conservative
+    # rate seen for the host: NCBI counts requests per IP, not per client or
+    # per key, so two buckets would put the sum of both rates against one
+    # ceiling. Flooring the rate loses throughput only in a process mixing
+    # credentials, which is not a deployment shape we ship.
+    _limiters: dict[str, AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
     def __init__(
@@ -216,11 +222,14 @@ class AsyncHttpClient:
             rate = DEFAULT_HOST_RATES[host_key]
         else:
             rate = DEFAULT_FALLBACK_RATE
-        key = (host_key, rate)
         with self._limiters_lock:
-            if key not in self._limiters:
-                self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
-            return self._limiters[key]
+            limiter = self._limiters.get(host_key)
+            if limiter is None:
+                limiter = AsyncRateLimiter(rate_per_sec=rate)
+                self._limiters[host_key] = limiter
+            elif limiter.rate_per_sec > rate:
+                limiter.rate_per_sec = rate
+            return limiter
 
     @classmethod
     def limiter_bucket_count(cls) -> int:
