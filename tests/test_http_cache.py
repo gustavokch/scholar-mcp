@@ -558,15 +558,17 @@ def test_pubmed_key_wins_over_ncbi_alias(monkeypatch):
     assert Settings.load().pubmed_api_key == "p1"
 
 
-def test_idconv_receives_api_key():
+async def test_idconv_receives_api_key():
     s = Settings(pubmed_api_key="k123")
     client = AsyncHttpClient(s)
-    url = client._inject_credentials(
-        "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
-    )
-    assert "api_key=k123" in url
-    # No request made: the httpx AsyncClient never opened a connection, so
-    # nothing to close from this sync test.
+    try:
+        url = client._inject_credentials(
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
+        )
+        assert "api_key=k123" in url
+        # No request made: the httpx AsyncClient never opened a connection.
+    finally:
+        await client.aclose()
 
 
 def test_limiter_registry_does_not_pin_dead_event_loops():
@@ -576,21 +578,23 @@ def test_limiter_registry_does_not_pin_dead_event_loops():
     import weakref
 
     client = AsyncHttpClient(settings=Settings())
-
-    loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(
-            asyncio.sleep(0)
-        )  # make it a real running loop at least once
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                asyncio.sleep(0)
+            )  # make it a real running loop at least once
 
-        async def _touch():
-            client._limiter_for("api.crossref.org")
+            async def _touch():
+                client._limiter_for("api.crossref.org")
 
-        loop.run_until_complete(_touch())
+            loop.run_until_complete(_touch())
+        finally:
+            loop.close()
+
+        ref = weakref.ref(loop)
+        del loop
+        gc.collect()
+        assert ref() is None, "limiter registry is keeping a closed event loop alive"
     finally:
-        loop.close()
-
-    ref = weakref.ref(loop)
-    del loop
-    gc.collect()
-    assert ref() is None, "limiter registry is keeping a closed event loop alive"
+        asyncio.run(client.aclose())
