@@ -17,7 +17,7 @@ DEFAULT_SCIHUB_MIRRORS = [
 class Settings:
     pubmed_api_key: str | None = None
     pubmed_email: str | None = None
-    pubmed_tool: str = "ScholarMCP"
+    pubmed_tool: str | None = "ScholarMCP"
     unpaywall_email: str | None = None
     s2_api_key: str | None = None
     openalex_email: str | None = None
@@ -94,6 +94,10 @@ class Settings:
                 return default
             return val.strip().lower() in ("1", "true", "yes", "on")
 
+        def _env(name: str) -> str | None:
+            """Env value as a stripped string, or None when unset/blank."""
+            return (os.getenv(name) or "").strip() or None
+
         mirrors_env = os.getenv("SCIHUB_MIRRORS")
         mirrors = (
             [m.strip() for m in mirrors_env.split(",") if m.strip()]
@@ -102,30 +106,24 @@ class Settings:
         )
 
         # NCBI_API_KEY is the name NCBI itself documents, so accept it as an
-        # alias. Both values are stripped first: a key of spaces is a
+        # alias. All values go through _env: a key of spaces is a
         # misconfiguration, and unstripped it would both beat a good alias and
         # reach E-utilities as "api_key=+".
         ncbi_key = next(
-            (
-                stripped
-                for stripped in (
-                    (os.getenv(name) or "").strip()
-                    for name in ("PUBMED_API_KEY", "NCBI_API_KEY")
-                )
-                if stripped
-            ),
+            (value for name in ("PUBMED_API_KEY", "NCBI_API_KEY") if (value := _env(name))),
             None,
         )
 
+        pubmed_email = _env("PUBMED_EMAIL")
+        unpaywall_email = _env("UNPAYWALL_EMAIL") or pubmed_email
+
         return cls(
             pubmed_api_key=ncbi_key,
-            pubmed_email=os.getenv("PUBMED_EMAIL"),
-            pubmed_tool=os.getenv("PUBMED_TOOL", "ScholarMCP"),
-            unpaywall_email=os.getenv("UNPAYWALL_EMAIL") or os.getenv("PUBMED_EMAIL"),
-            s2_api_key=os.getenv("S2_API_KEY"),
-            openalex_email=os.getenv("OPENALEX_MAILTO")
-            or os.getenv("UNPAYWALL_EMAIL")
-            or os.getenv("PUBMED_EMAIL"),
+            pubmed_email=pubmed_email,
+            pubmed_tool="ScholarMCP" if os.getenv("PUBMED_TOOL") is None else _env("PUBMED_TOOL"),
+            unpaywall_email=unpaywall_email,
+            s2_api_key=_env("S2_API_KEY"),
+            openalex_email=_env("OPENALEX_MAILTO") or unpaywall_email,
             enable_openalex=_bool(os.getenv("ENABLE_OPENALEX"), True),
             enable_s2=_bool(os.getenv("ENABLE_S2"), True),
             enable_scihub=_bool(os.getenv("ENABLE_SCIHUB"), True),
