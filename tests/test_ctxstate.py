@@ -1,4 +1,5 @@
 import asyncio
+import gc
 
 import pytest
 
@@ -61,3 +62,35 @@ async def test_value_written_in_callee_visible_to_awaiting_caller():
 
     await callee()
     assert h.label == "ok"
+
+
+async def test_freed_instance_id_reuse_does_not_leak_stale_value():
+    """`id()` is reused after GC: a new instance that lands on a freed id
+    must read its default, not the dead instance's value."""
+    dead = Holder()
+    dead.label = "stale"
+    dead_id = id(dead)
+    del dead  # refcount drop fires the weakref cleanup; no gc.collect(): it
+    # would release the whole arena and the freed block would never be reused
+
+    recycled = None
+    for _ in range(10_000):
+        candidate = Holder()
+        if id(candidate) == dead_id:
+            recycled = candidate
+            break
+        del candidate
+    assert recycled is not None, "test setup: could not recycle the freed id"
+    assert recycled.label is None
+
+
+async def test_backing_map_does_not_grow_across_short_lived_instances():
+    """Entries must be dropped with their instance, not accumulate forever."""
+    descriptor = Holder.value
+    holders = [Holder() for _ in range(500)]
+    for h in holders:
+        h.value["x"] = 1
+    del holders
+    del h  # the loop variable still pins the last instance
+    gc.collect()
+    assert len(descriptor._values()) == 0
