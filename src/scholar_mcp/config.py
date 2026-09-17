@@ -80,6 +80,9 @@ class Settings:
     # the pediatrics scrapers. pesquisa.bvsalud.org 403s plain HTTP clients
     # behind a Bunny CDN shield; the browser tier is the last-resort answer.
     brazil_browser_fallback: bool = True
+    # Hard ceiling on the BVS browser tier. It is the last stage of an already
+    # staged chain, so it must not be free to outlast everything before it.
+    brazil_browser_timeout_s: float = 30.0
     enable_medical_tools: bool = True
 
     @property
@@ -181,6 +184,9 @@ class Settings:
             brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
             scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
+            brazil_browser_timeout_s=float(
+                os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "30.0")
+            ),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

@@ -89,9 +89,9 @@ MAX_FULL_TEXT_CHARS = 50_000
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
-# caller's own timeout.
+# caller's own timeout. The total ceiling comes from
+# ``settings.brazil_browser_timeout_s``.
 _CAMOUFOX_NAV_TIMEOUT_MS = 15000
-_CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
@@ -665,7 +665,9 @@ class BrazilMoHEngine:
             return _extract_docs(data)
 
         try:
-            return await asyncio.wait_for(_run(), timeout=_CAMOUFOX_TOTAL_TIMEOUT_S)
+            return await asyncio.wait_for(
+                _run(), timeout=self.settings.brazil_browser_timeout_s
+            )
         except Exception:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
             return []

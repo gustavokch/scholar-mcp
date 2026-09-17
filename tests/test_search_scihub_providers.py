@@ -892,3 +892,21 @@ async def test_provider_last_error_is_per_request(client):
     ok_err, fail_err = await asyncio.gather(run_ok(), run_fail())
     assert fail_err == "transport"
     assert ok_err is None
+
+
+async def test_mirror_penalty_is_capped(client, monkeypatch):
+    """Penalties order the mirror list; they must not grow without bound as a
+    long-lived process keeps retrying a dead mirror."""
+    from scholar_mcp.providers.scihub import MAX_MIRROR_PENALTY
+
+    provider = SciHubProvider(
+        client, mirrors=["https://m1.example"], settings=Settings(enable_browser_fallback=False)
+    )
+
+    async def always_none(url, **kwargs):
+        return None
+
+    monkeypatch.setattr(client, "get", always_none)
+    for _ in range(MAX_MIRROR_PENALTY + 5):
+        await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/x"))
+    assert provider._mirror_penalties["https://m1.example"] == MAX_MIRROR_PENALTY

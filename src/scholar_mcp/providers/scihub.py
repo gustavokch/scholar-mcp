@@ -13,6 +13,11 @@ from scholar_mcp.utils.http import AsyncHttpClient
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
 
+# Ceiling on a mirror's failure count. The count only orders the mirror list, so
+# anything above "worse than every healthy mirror" buys nothing and just delays
+# a recovered mirror's climb back to the head.
+MAX_MIRROR_PENALTY = 5
+
 # Statuses that mean "this host looked at the Referer and said no". Anything else
 # (transport error, timeout, 5xx, 429, other 4xx) is a failed request, not a
 # rejected header, and must not buy a second retry ladder.
@@ -218,12 +223,19 @@ class SciHubProvider(BaseProvider):
                 result = await asyncio.wait_for(
                     _try_mirror(mirror), timeout=self.settings.scihub_mirror_timeout_s
                 )
-            except (asyncio.TimeoutError, Exception):
+            except Exception:
+                # asyncio.TimeoutError included: this is ordering metadata, not
+                # an error channel, so every failure mode demotes the mirror.
                 result = None
             if result is not None:
                 self._mirror_penalties.pop(mirror, None)
                 return result
-            self._mirror_penalties[mirror] = self._mirror_penalties.get(mirror, 0) + 1
+            # Capped: the penalty only has to order the list, and an uncapped
+            # counter in a long-lived server climbs forever while a mirror that
+            # comes back still has to claw its way down from that count.
+            self._mirror_penalties[mirror] = min(
+                self._mirror_penalties.get(mirror, 0) + 1, MAX_MIRROR_PENALTY
+            )
 
         if self.settings.enable_browser_fallback:
             camoufox_bytes, camoufox_url = await self._fetch_via_camoufox(clean_doi)

@@ -57,6 +57,17 @@ LAYER_THRESHOLD = 5
 MAX_RELAXATION_STEPS = 3
 
 
+def _is_aap_journal(journal: str) -> bool:
+    """True for the AAP's own journal family, false for lookalikes.
+
+    The AAP publishes *Pediatrics* and *Pediatrics in Review*, and indexes carry
+    variants like "Pediatrics (Evanston)". ``JAMA Pediatrics`` and the many
+    other journals ending in "Pediatrics" are not AAP, so the match anchors at
+    the start of the name rather than anywhere in it.
+    """
+    return journal.strip().lower().startswith("pediatrics")
+
+
 def _relaxed_queries(query: str) -> list[str]:
     """Ladder of successively relaxed variants of a natural-language query:
     the full query, then the trailing token dropped each step, floored at
@@ -237,7 +248,7 @@ class GuidelinesEngine:
                 # AAP policy statements carry collective authors ("COMMITTEE
                 # ON INFECTIOUS DISEASES") and no "AAP" string anywhere, but
                 # they publish in Pediatrics — the journal is the org signal.
-                if "aap" in aliases and art.journal.strip().lower() == "pediatrics":
+                if "aap" in aliases and _is_aap_journal(art.journal):
                     filtered_candidates.append((art, has_pub, from_kw))
             candidates = filtered_candidates
 

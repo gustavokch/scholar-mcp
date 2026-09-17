@@ -414,3 +414,16 @@ async def test_aap_org_filter_matches_journal_pediatrics(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_aap_journal_signal_matches_pediatrics_family():
+    """The AAP journal signal must not be an exact-string match: AAP statements
+    also land in Pediatrics in Review and in the journal's indexed variants."""
+    from scholar_mcp.medical.guidelines import _is_aap_journal
+
+    assert _is_aap_journal("Pediatrics")
+    assert _is_aap_journal("pediatrics")
+    assert _is_aap_journal("Pediatrics in Review")
+    assert _is_aap_journal("Pediatrics (Evanston)")
+    assert not _is_aap_journal("JAMA Pediatrics")
+    assert not _is_aap_journal("Lancet")
