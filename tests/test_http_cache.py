@@ -602,6 +602,31 @@ def test_pubmed_key_wins_over_ncbi_alias(monkeypatch):
     assert Settings.load().pubmed_api_key == "p1"
 
 
+def test_blank_pubmed_key_falls_through_to_ncbi_alias(monkeypatch):
+    # A key of spaces is a misconfiguration, not a choice: without stripping it
+    # beats a good NCBI_API_KEY and ships to E-utilities as "api_key=+".
+    monkeypatch.setenv("PUBMED_API_KEY", "   ")
+    monkeypatch.setenv("NCBI_API_KEY", " k123 ")
+    assert Settings.load().pubmed_api_key == "k123"
+
+
+def test_blank_pubmed_tool_and_email_resolve_to_none(monkeypatch):
+    # Subject IS env loading — sanctioned Settings.load() exception.
+    monkeypatch.setenv("PUBMED_TOOL", "   ")
+    monkeypatch.setenv("PUBMED_EMAIL", " ")
+    monkeypatch.setenv("S2_API_KEY", "\t")
+    s = Settings.load()
+    assert s.pubmed_tool is None
+    assert s.pubmed_email is None
+    assert s.s2_api_key is None
+
+
+def test_both_ncbi_keys_blank_resolve_to_none(monkeypatch):
+    monkeypatch.setenv("PUBMED_API_KEY", "  ")
+    monkeypatch.setenv("NCBI_API_KEY", "")
+    assert Settings.load().pubmed_api_key is None
+
+
 async def test_idconv_receives_api_key():
     s = Settings(pubmed_api_key="k123")
     client = AsyncHttpClient(s)
