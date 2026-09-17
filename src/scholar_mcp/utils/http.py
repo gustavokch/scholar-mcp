@@ -6,6 +6,7 @@ import random
 import re
 import threading
 import urllib.parse
+import weakref
 from datetime import datetime, timezone
 from typing import Any
 
@@ -166,16 +167,25 @@ class AsyncHttpClient:
 
     # Process-global limiter registry. A second client built from the same
     # settings (the resolver's fallback path) must not double the effective
-    # rate against a host — limiters are keyed by (host, rate, loop) so clients
-    # with different rates (keyed vs unkeyed NCBI, S2 tiers) keep separate
-    # buckets while same-settings clients on the same event loop share one.
+    # rate against a host — limiters are keyed by (host, rate) inside a
+    # per-event-loop table, so clients with different rates (keyed vs unkeyed
+    # NCBI, S2 tiers) keep separate buckets while same-settings clients on the
+    # same event loop share one.
     #
-    # The loop is part of the key because AsyncRateLimiter carries an
+    # The loop is the outer key because AsyncRateLimiter carries an
     # asyncio.Lock that binds to the first loop that contends it: sharing one
     # limiter across loops would raise RuntimeError on the second loop. The
     # production server runs a single loop, so this costs nothing there; it
     # keeps each test's loop isolated the way per-instance limiters did.
-    _limiters: dict[tuple[str, float, Any], AsyncRateLimiter] = {}
+    #
+    # The table is weak-keyed: a pytest session creates one loop per test, and
+    # a strong key would keep every closed loop (and its limiters) alive for
+    # the life of the process.
+    _limiters: "weakref.WeakKeyDictionary[Any, dict[tuple[str, float], AsyncRateLimiter]]" = (
+        weakref.WeakKeyDictionary()
+    )
+    # Sync callers have no loop to key on; they all share this one table.
+    _loopless_limiters: dict[tuple[str, float], AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
     def __init__(
@@ -217,11 +227,19 @@ class AsyncHttpClient:
             rate = DEFAULT_HOST_RATES[host_key]
         else:
             rate = DEFAULT_FALLBACK_RATE
-        key = (host_key, rate, self._current_loop())
+        key = (host_key, rate)
+        loop = self._current_loop()
         with self._limiters_lock:
-            if key not in self._limiters:
-                self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
-            return self._limiters[key]
+            if loop is None:
+                table = self._loopless_limiters
+            else:
+                table = self._limiters.get(loop)
+                if table is None:
+                    table = {}
+                    self._limiters[loop] = table
+            if key not in table:
+                table[key] = AsyncRateLimiter(rate_per_sec=rate)
+            return table[key]
 
     @staticmethod
     def _current_loop() -> Any:

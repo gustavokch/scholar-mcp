@@ -567,3 +567,30 @@ def test_idconv_receives_api_key():
     assert "api_key=k123" in url
     # No request made: the httpx AsyncClient never opened a connection, so
     # nothing to close from this sync test.
+
+
+def test_limiter_registry_does_not_pin_dead_event_loops():
+    """The registry is process-global and keyed by event loop. It must not keep
+    a finished loop alive: a long pytest session creates one loop per test."""
+    import gc
+    import weakref
+
+    client = AsyncHttpClient(settings=Settings())
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            asyncio.sleep(0)
+        )  # make it a real running loop at least once
+
+        async def _touch():
+            client._limiter_for("api.crossref.org")
+
+        loop.run_until_complete(_touch())
+    finally:
+        loop.close()
+
+    ref = weakref.ref(loop)
+    del loop
+    gc.collect()
+    assert ref() is None, "limiter registry is keeping a closed event loop alive"
