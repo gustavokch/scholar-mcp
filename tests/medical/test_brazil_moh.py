@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from unittest.mock import AsyncMock
 
@@ -388,7 +389,12 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 async def _engine(tmp_path: Path):
-    settings = Settings.load()
+    # The browser tier is pinned off here: it is not what these tests exercise,
+    # and left on it launches a REAL camoufox against the live BVS host as soon
+    # as every HTTP stage errors — which silently turns an assertion about an
+    # empty result into an assertion about today's network. The dedicated
+    # camoufox tests enable it explicitly and install a fake.
+    settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
@@ -1796,6 +1802,59 @@ async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
         assert [r.title for r in records] == ["Manejo da dengue"]
         assert meta.error is False
         assert attempts == [True]  # one browser launch
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch):
+    """The browser tier returned docs, but _is_brazilian dropped every one.
+
+    That is not a success: every HTTP stage still 403'd, so the error flag must
+    survive and nothing may be written under the 30-day TTL.
+    """
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "2", "ti": "Dengue en Peru",
+                         "pais_publicacao": "^ePeru", "da": "202401",
+                         "ur": ["https://example.org/y.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert records == []
+        assert meta.error is True
+        # Nothing cached: a second call must not be served a cached empty list.
+        from scholar_mcp.medical.brazil_moh import _build_query
+
+        composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
+        _cached, cached_meta = await cache.get(f"brazil_moh_search:all:10:{composed}")
+        assert not cached_meta.cached
     finally:
         await cache.close()
         await http_client.aclose()

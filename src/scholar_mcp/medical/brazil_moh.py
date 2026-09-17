@@ -586,12 +586,18 @@ class BrazilMoHEngine:
             )
             docs = await self._camoufox_search(all_composed, count)
             if docs:
-                records = [
+                browser_records = [
                     r
                     for r in (_build_record(d) for d in _dedupe_by_id(docs))
                     if _is_brazilian(r)
                 ]
-                errored_any = False
+                # Only a non-empty Brazilian slice counts as the shield being
+                # beaten. Docs that all fail the Brazil assertion leave us
+                # exactly where the 403s did, and clearing the flag here would
+                # cache an empty list under the 30-day TTL.
+                if browser_records:
+                    records = browser_records
+                    errored_any = False
 
         if not records and errored_any:
             if pcdt_records:
