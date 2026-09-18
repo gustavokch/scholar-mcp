@@ -34,8 +34,9 @@ async def test_get_full_text_forwards_max_chars_and_sections(resolver):
 async def test_search_papers_tool(resolver):
     resolver.search.return_value = [PaperMetadata(title="A Paper", doi="10.1/a", oa_status="oa")]
     results = await srv.search_papers("crispr", num_results=5)
-    assert results[0]["title"] == "A Paper"
-    assert results[0]["oa_status"] == "oa"
+    assert results["papers"][0]["title"] == "A Paper"
+    assert results["papers"][0]["oa_status"] == "oa"
+    assert results["degraded"] is False
 
 
 async def test_search_papers_tool_forwards_rerank(resolver):
@@ -48,8 +49,8 @@ async def test_search_papers_tool_forwards_rerank(resolver):
         )
     ]
     results = await srv.search_papers("crispr", num_results=5, rerank=True)
-    assert results[0]["score"] == 1.5
-    assert results[0]["ranking_metrics"] == {"z_citation": 0.5}
+    assert results["papers"][0]["score"] == 1.5
+    assert results["papers"][0]["ranking_metrics"] == {"z_citation": 0.5}
     assert resolver.search.await_args.kwargs["rerank"] is True
 
     await srv.search_papers("crispr", num_results=5, rerank=False)
@@ -57,43 +58,36 @@ async def test_search_papers_tool_forwards_rerank(resolver):
 
 
 
-async def test_search_papers_appends_sources_sentinel_when_backend_fails(resolver):
+async def test_search_papers_envelope_reports_degraded_sources(resolver):
     resolver.search.return_value = [
         PaperMetadata(title="A", doi="10.1/a"),
         PaperMetadata(title="B", doi="10.1/b"),
     ]
     resolver.last_search_sources = {"pubmed": "blocked", "crossref": "ok"}
     result = await srv.search_papers("dengue")
-    assert [r["title"] for r in result[:2]] == ["A", "B"]
-    sentinel = result[-1]
-    assert sentinel["degraded"] is True
-    assert sentinel["_sources"] == {"pubmed": "blocked", "crossref": "ok"}
+    assert [p["title"] for p in result["papers"]] == ["A", "B"]
+    assert result["sources"] == {"pubmed": "blocked", "crossref": "ok"}
+    assert result["degraded"] is True
 
 
-async def test_degradation_sentinel_is_shape_compatible(resolver):
-    """The tool returns a homogeneous list, so a consumer iterating it and
-    reading paper keys must not hit a KeyError on the sentinel."""
-    resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
-    resolver.last_search_sources = {"pubmed": "failed"}
+async def test_search_papers_sources_is_a_snapshot(resolver):
+    """The envelope must embed a copy of the resolver's status map, not the
+    live ContextScoped dict, so a later request cannot mutate this result."""
+    live = {"pubmed": "blocked"}
+    resolver.search.return_value = []
+    resolver.last_search_sources = live
     result = await srv.search_papers("dengue")
-
-    paper_keys = set(PaperMetadata(title="A").to_dict())
-    for row in result:
-        assert paper_keys <= set(row), f"missing paper keys: {paper_keys - set(row)}"
-
-    sentinels = [r for r in result if r.get("status") == "degraded"]
-    assert len(sentinels) == 1
-    assert sentinels[0]["title"] == ""
-    assert [r for r in result if r.get("status") != "degraded"] == [
-        PaperMetadata(title="A", doi="10.1/a").to_dict()
-    ]
+    live["pubmed"] = "ok"
+    assert result["sources"] == {"pubmed": "blocked"}
+    assert result["degraded"] is True
 
 
-async def test_search_papers_no_sentinel_when_all_ok(resolver):
+async def test_search_papers_degraded_false_on_ok_or_empty(resolver):
     resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
-    resolver.last_search_sources = {"pubmed": "ok", "crossref": "empty"}
+    resolver.last_search_sources = {"pubmed": "ok", "crossref": "empty", "s2": "disabled"}
     result = await srv.search_papers("dengue")
-    assert len(result) == 1 and result[0]["title"] == "A"
+    assert result["degraded"] is False
+    assert len(result["papers"]) == 1
 
 
 async def test_brazil_moh_tool_marks_degraded_on_partial(monkeypatch):
@@ -116,26 +110,30 @@ async def test_search_papers_clamps_num_results(resolver):
     assert resolver.search.await_args.kwargs["num_results"] == 50
 
 
-async def test_search_papers_error_row_matches_paper_shape(resolver):
-    """The tool returns a homogeneous list: even a total failure row must carry
-    the full PaperMetadata key set so iterating consumers never hit KeyError."""
+async def test_search_papers_error_envelope(resolver):
+    """A total failure returns the same envelope shape, flagged error."""
     resolver.search.side_effect = RuntimeError("backend exploded")
     result = await srv.search_papers("crispr")
-    assert len(result) == 1
-    paper_keys = set(PaperMetadata(title="").to_dict())
-    assert paper_keys <= set(result[0])
-    assert result[0]["status"] == "error"
-    assert "backend exploded" in result[0]["error"]
+    assert result["papers"] == []
+    assert result["sources"] == {}
+    assert result["degraded"] is True
+    assert result["status"] == "error"
+    assert "backend exploded" in result["error"]
 
 
-async def test_search_papers_sentinel_respects_num_results_clamp(resolver):
-    """The degradation sentinel reserves its slot inside the clamp, not after
-    it: num_results=50 must return at most 50 rows total."""
+async def test_search_papers_payload_never_drops_results_for_degradation(resolver):
+    """The degradation signal lives in the envelope, not in a reserved row, so
+    every paper survives: num_results=50 with a degraded backend returns all
+    50 papers, and the papers list is bounded only by the clamp."""
     resolver.search.return_value = [PaperMetadata(title=f"P{i}") for i in range(50)]
     resolver.last_search_sources = {"pubmed": "blocked"}
     result = await srv.search_papers("crispr", num_results=50)
-    assert len(result) <= 50
-    assert result[-1]["status"] == "degraded"
+    assert len(result["papers"]) == 50
+    assert result["degraded"] is True
+
+    resolver.search.return_value = [PaperMetadata(title=f"P{i}") for i in range(20)]
+    result = await srv.search_papers("crispr", num_results=10)
+    assert [p["title"] for p in result["papers"]] == [f"P{i}" for i in range(10)]
 
 
 async def test_get_metadata_tool_does_not_run_waterfall(resolver):

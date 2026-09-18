@@ -8,7 +8,6 @@ from scholar_mcp.models import (
     DownloadResult,
     FullTextResponse,
     FullTextSummary,
-    PaperMetadata,
 )
 from scholar_mcp.resolver import WaterfallResolver
 from scholar_mcp.utils.cache import TTLCache
@@ -75,7 +74,7 @@ async def search_papers(
     year_end: int | None = None,
     author: str | None = None,
     journal: str | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Search for academic papers across PubMed and CrossRef with smart re-ranking.
 
     Args:
@@ -87,6 +86,14 @@ async def search_papers(
         year_end: Filter papers published in or before this year.
         author: Filter by author name.
         journal: Filter by journal name.
+
+    Returns:
+        Envelope: {"papers": [...], "sources": {...}, "degraded": bool}.
+        ``sources`` maps each backend to one SourceStatus ("ok", "empty",
+        "blocked", "failed", "disabled") and is a snapshot copy. ``degraded``
+        is True when any backend reported "blocked" or "failed". On a total
+        failure the envelope is {"papers": [], "sources": {}, "degraded": True,
+        "status": "error", "error": str}.
     """
     clamped_num = min(max(1, num_results), 50)
     try:
@@ -101,29 +108,26 @@ async def search_papers(
             journal=journal,
         )
         payload = [r.to_dict() for r in results]
-        # Per-source degradation signal: the tool's return type is a list, not
-        # an envelope, so the status rides along as a trailing element. It
-        # carries the full PaperMetadata key set (empty values) so a consumer
-        # iterating the list and reading paper fields cannot hit a KeyError;
-        # `status == "degraded"` is the discriminator for filtering it out.
-        # The sentinel reserves its slot inside the num_results clamp, so the
-        # total row count never exceeds what the caller asked for.
         sources = getattr(resolver, "last_search_sources", None)
-        if isinstance(sources, dict) and any(
-            v in ("blocked", "failed") for v in sources.values()
-        ):
-            payload = payload[: max(clamped_num - 1, 0)]
-            sentinel = PaperMetadata(title="").to_dict()
-            sentinel.update({"status": "degraded", "_sources": sources, "degraded": True})
-            payload.append(sentinel)
-        return payload
+        if not isinstance(sources, dict):
+            sources = {}
+        # dict(...) copy is mandatory: the resolver's map is a live
+        # ContextScoped attribute — embedding it would let a later request
+        # mutate what this call returned.
+        snapshot = dict(sources)
+        return {
+            "papers": payload[:clamped_num],
+            "sources": snapshot,
+            "degraded": any(v in ("blocked", "failed") for v in snapshot.values()),
+        }
     except Exception as ex:
-        # Same contract as the sentinel: one row, the full PaperMetadata key
-        # set, `status` as the discriminator. A bare {"status": "error"} row
-        # would KeyError any consumer iterating paper fields.
-        row = PaperMetadata(title="").to_dict()
-        row.update({"status": "error", "error": str(ex)})
-        return [row]
+        return {
+            "papers": [],
+            "sources": {},
+            "degraded": True,
+            "status": "error",
+            "error": str(ex),
+        }
 
 
 def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, Any]:
