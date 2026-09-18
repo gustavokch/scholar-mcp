@@ -24,13 +24,14 @@ class TTLCache:
             self._cache.move_to_end(key)
             return value
 
-    async def set(self, key: str, value: Any) -> None:
+    async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> None:
+        ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
         async with self._lock:
             if key in self._cache:
                 del self._cache[key]
             elif len(self._cache) >= self.maxsize:
                 self._cache.popitem(last=False)
-            self._cache[key] = (value, time.monotonic() + self.ttl_seconds)
+            self._cache[key] = (value, time.monotonic() + ttl)
 
     async def delete(self, key: str) -> None:
         async with self._lock:

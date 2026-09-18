@@ -1,5 +1,11 @@
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+# One shared vocabulary for per-backend search status, consumed by the
+# resolver's degradation map and the search_papers envelope. "ok" (>=1
+# result), "empty" (0 results, no provider error), "blocked" (403/429),
+# "failed" (other error or raised), "disabled" (never queried: configured off).
+SourceStatus = Literal["ok", "empty", "blocked", "failed", "disabled"]
 
 
 @dataclass

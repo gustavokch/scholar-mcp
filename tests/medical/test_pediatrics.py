@@ -1,12 +1,14 @@
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import respx
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.models import PediatricGuideline
 from scholar_mcp.medical.pediatrics import PediatricsEngine
 from scholar_mcp.utils.http import AsyncHttpClient
-from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 BF_URL = "https://brightfutures.aap.org/Search"
 AAP_URL = "https://publications.aap.org/pediatrics/search-results"
@@ -983,3 +985,94 @@ def test_title_highlight_inside_word_not_split():
     )
     assert items
     assert items[0].title == "Oppositional Defiant Disorder 2024"
+
+
+async def test_filter_matches_drops_stopword_only_overlap(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # Every shared token ("of", "in", "children") is a stopword: the old
+        # 1-token-OR rule kept this navigation junk.
+        junk = [PediatricGuideline(
+            title="Care of Children in Practice Settings",
+            organization="AAP", url="https://x", source="aap-policy",
+        )]
+        kept = engine._filter_matches(junk, "management of otitis media in children")
+        assert kept == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_filter_matches_keeps_rare_single_token_title(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # "tubes" is the only substantive overlap, but it is rare and
+        # discriminating: dropping it loses the right guideline entirely.
+        keep = [PediatricGuideline(
+            title="Tympanostomy Tubes",
+            organization="AAP", url="https://x", source="aap-policy",
+        )]
+        kept = engine._filter_matches(keep, "ear tubes in children")
+        assert [g.title for g in kept] == ["Tympanostomy Tubes"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pubmed_tier_reuses_unfiltered_bright_futures_results(tmp_path, monkeypatch):
+    # AAP scrape returns only stopword junk; BF (PubMed) returns a guideline
+    # titled "Acute Otitis Media" for query "ear infection in children".
+    # The result must surface despite zero token overlap (the PubMed tier is
+    # not token-filtered), and _pubmed_guidelines must be called exactly once
+    # (by search_bright_futures; the old re-call is gone).
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        real = PediatricGuideline(
+            title="Acute Otitis Media", organization="American Academy of Pediatrics",
+            url="https://pubmed.ncbi.nlm.nih.gov/1/", source="pubmed-aap",
+        )
+        calls = 0
+
+        async def fake_pubmed(query):
+            nonlocal calls
+            calls += 1
+            return [real]
+
+        monkeypatch.setattr(engine, "_pubmed_guidelines", fake_pubmed)
+        monkeypatch.setattr(
+            engine,
+            "search_aap_policy",
+            AsyncMock(return_value=([PediatricGuideline(
+                title="Care of Children in Practice Settings",
+                organization="AAP", url="https://x", source="aap-policy",
+            )], CacheMetadata(cached=False, cache_age=0, error=False))),
+        )
+        results, meta = await engine.search_aap_guidelines("ear infection in children")
+        assert [g.title for g in results] == ["Acute Otitis Media"]
+        assert meta.error is False
+        assert calls == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_cache_if_any_parity(tmp_path: Path):
+    """The shared no-empty-cache guard caches a non-empty list under the given
+    source and writes nothing for an empty one."""
+    from scholar_mcp.medical.pediatrics import _cache_if_any
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = PediatricGuideline(title="G", url="u", organization="AAP", source="aap-policy")
+        await _cache_if_any(cache, "k:hit", [item], "bright_futures")
+        cached, meta = await cache.get("k:hit")
+        assert meta.cached
+        assert cached == [item.to_dict()]
+
+        await _cache_if_any(cache, "k:empty", [], "bright_futures")
+        cached, meta = await cache.get("k:empty")
+        assert not meta.cached
+        assert cached is None
+    finally:
+        await cache.close()
+        await http_client.aclose()

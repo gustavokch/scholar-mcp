@@ -6,12 +6,14 @@ import random
 import re
 import threading
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from scholar_mcp.config import Settings
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,23 @@ BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 # misconfigured host can park a request -- and, via limiter.throttle, every
 # other request to that host -- for hours.
 MAX_RETRY_AFTER = 60.0
+
+
+@dataclass(frozen=True)
+class FetchFailure:
+    """Typed record of why ``AsyncHttpClient.get`` returned ``None``.
+
+    ``kind`` discriminates the terminal failure: an HTTP status (``"http"``),
+    a transport/timeout error after retries (``"transport"``), or any other
+    unexpected exception (``"exception"``). ``status`` carries the HTTP status
+    for ``"http"`` failures only; ``detail`` is the reason phrase or the
+    exception class name. Consumers map this to vocabulary like
+    "blocked"/"failed" instead of sniffing free-form strings.
+    """
+
+    kind: Literal["transport", "http", "exception"]
+    status: int | None
+    detail: str
 
 
 def _host_key(host: str | None) -> str:
@@ -164,6 +183,30 @@ class FetchError(RuntimeError):
 class AsyncHttpClient:
     """Shared HTTP client with rate-limiting, retries, and NCBI credential injection."""
 
+    # Process-global limiter registry, bounded by the number of distinct hosts.
+    # A second client built from the same settings (the resolver's fallback
+    # path) must not double the effective rate against a host, and a caller
+    # that builds a client per request in its own asyncio.run (zimqa) must
+    # still share the process-wide budget rather than mint a fresh bucket per
+    # call. Both shapes need one map keyed by host.
+    #
+    # The limiter carries no loop-bound state (its lock is a threading.Lock
+    # held across arithmetic only), so loops, threads, and client instances
+    # can all share one bucket safely.
+    #
+    # Keyed and unkeyed NCBI callers share one bucket at the most conservative
+    # rate seen for the host: NCBI counts requests per IP, not per client or
+    # per key, so two buckets would put the sum of both rates against one
+    # ceiling. Flooring the rate loses throughput only in a process mixing
+    # credentials, which is not a deployment shape we ship.
+    _limiters: dict[str, AsyncRateLimiter] = {}
+    _limiters_lock = threading.Lock()
+
+    # Typed record of the most recent terminal failure, per requesting task.
+    # ContextScoped: the client is a shared singleton, so a plain attribute
+    # would leak one request's failure into every concurrent call.
+    last_failure: ContextScoped[FetchFailure | None] = ContextScoped(lambda: None)
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -186,8 +229,6 @@ class AsyncHttpClient:
                 "User-Agent": f"ScholarMCP/1.0.0 (mailto:{self.settings.pubmed_email or 'scholar-mcp@example.com'})"
             },
         )
-        self._limiters: dict[str, AsyncRateLimiter] = {}
-        self._limiters_lock = threading.Lock()
 
     def _limiter_for_url(self, url: str) -> AsyncRateLimiter:
         """Limiter for ``url``'s host, with the port and any userinfo stripped."""
@@ -195,20 +236,36 @@ class AsyncHttpClient:
         return self._limiter_for(parsed.hostname or parsed.netloc)
 
     def _limiter_for(self, host: str) -> AsyncRateLimiter:
-        key = _host_key(host)
+        host_key = _host_key(host)
+        if host_key == "ncbi.nlm.nih.gov":
+            rate = self.settings.ncbi_rate_limit
+        elif host_key == "api.semanticscholar.org":
+            # S2 shared pool without a key; dedicated quota with one.
+            rate = 5.0 if self.settings.s2_api_key else 1.0
+        elif host_key in DEFAULT_HOST_RATES:
+            rate = DEFAULT_HOST_RATES[host_key]
+        else:
+            rate = DEFAULT_FALLBACK_RATE
         with self._limiters_lock:
-            if key not in self._limiters:
-                if key == "ncbi.nlm.nih.gov":
-                    rate = self.settings.ncbi_rate_limit
-                elif key == "api.semanticscholar.org":
-                    # S2 shared pool without a key; dedicated quota with one.
-                    rate = 5.0 if self.settings.s2_api_key else 1.0
-                elif key in DEFAULT_HOST_RATES:
-                    rate = DEFAULT_HOST_RATES[key]
-                else:
-                    rate = DEFAULT_FALLBACK_RATE
-                self._limiters[key] = AsyncRateLimiter(rate_per_sec=rate)
-            return self._limiters[key]
+            limiter = self._limiters.get(host_key)
+            if limiter is None:
+                limiter = AsyncRateLimiter(rate_per_sec=rate)
+                self._limiters[host_key] = limiter
+            elif limiter.rate_per_sec > rate:
+                limiter.rate_per_sec = rate
+            return limiter
+
+    @classmethod
+    def limiter_bucket_count(cls) -> int:
+        """Total live limiters. For tests and diagnostics."""
+        with cls._limiters_lock:
+            return len(cls._limiters)
+
+    @classmethod
+    def reset_limiters(cls) -> None:
+        """Drop every limiter bucket. For tests; never call it on a live server."""
+        with cls._limiters_lock:
+            cls._limiters.clear()
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.
@@ -235,7 +292,9 @@ class AsyncHttpClient:
     def _inject_credentials(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or "").lower()
-        if hostname == "eutils.ncbi.nlm.nih.gov":
+        # Any *.ncbi.nlm.nih.gov host accepts the E-utilities parameters,
+        # including idconv at www.ncbi.nlm.nih.gov/pmc/utils/idconv/.
+        if hostname == "ncbi.nlm.nih.gov" or hostname.endswith(".ncbi.nlm.nih.gov"):
             query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if self.settings.pubmed_api_key and "api_key" not in query_dict:
                 query_dict["api_key"] = [self.settings.pubmed_api_key]
@@ -337,8 +396,12 @@ class AsyncHttpClient:
                 if ok_statuses and resp.status_code in ok_statuses:
                     if resp.status_code >= 400:
                         _log_expected_status(log_url, resp)
+                    self.last_failure = None
                     return resp
                 if resp.status_code >= 400:
+                    self.last_failure = FetchFailure(
+                        "http", resp.status_code, resp.reason_phrase or ""
+                    )
                     if quiet_statuses and resp.status_code in quiet_statuses:
                         _log_expected_status(log_url, resp)
                         return None
@@ -349,6 +412,7 @@ class AsyncHttpClient:
                         _sanitize_error_body(resp.content, resp.headers.get("content-type", "")),
                     )
                     return None
+                self.last_failure = None
                 return resp
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < self.max_retries - 1:
@@ -366,6 +430,7 @@ class AsyncHttpClient:
                     )
                     await asyncio.sleep(wait_time)
                     continue
+                self.last_failure = FetchFailure("transport", None, type(exc).__name__)
                 logger.warning(
                     "HTTP GET %s failed after %d attempts: %s",
                     log_url,
@@ -374,6 +439,7 @@ class AsyncHttpClient:
                 )
                 return None
             except Exception as exc:
+                self.last_failure = FetchFailure("exception", None, type(exc).__name__)
                 logger.warning(
                     "HTTP GET %s raised unexpected exception: %s",
                     log_url,

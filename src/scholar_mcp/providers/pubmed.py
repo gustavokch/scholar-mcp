@@ -4,7 +4,9 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
+from scholar_mcp.providers.base import failure_reason
 from scholar_mcp.ranking import classify_evidence_grade
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -16,6 +18,12 @@ ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
 
 class PubMedProvider:
     """PubMed discovery and abstract provider via NCBI E-utilities."""
+
+    # Set to a short reason immediately before failure returns in search();
+    # None after success or a genuine empty result. Read by the resolver's
+    # per-source degradation map. Context-scoped so one request's failure is
+    # invisible to a concurrent request sharing this singleton provider.
+    last_error: str | None = ContextScoped(lambda: None)
 
     def __init__(self, http_client: AsyncHttpClient, settings: Settings | None = None) -> None:
         self.http_client = http_client
@@ -51,6 +59,7 @@ class PubMedProvider:
         sort: str = "relevance",
     ) -> list[PaperMetadata]:
         term = self.build_query(query, author, journal, year_start, year_end)
+        self.last_error = None
         search_params: dict[str, Any] = {
             "db": "pubmed",
             "term": term,
@@ -68,6 +77,7 @@ class PubMedProvider:
         try:
             resp = await self.http_client.get(ESEARCH_URL, params=search_params)
             if resp is None or resp.status_code != 200:
+                self.last_error = failure_reason(self.http_client, resp=resp)
                 return []
 
             data = resp.json()
@@ -82,6 +92,7 @@ class PubMedProvider:
             }
             sum_resp = await self.http_client.get(ESUMMARY_URL, params=summary_params)
             if sum_resp is None or sum_resp.status_code != 200:
+                self.last_error = failure_reason(self.http_client, resp=sum_resp)
                 return []
 
             sum_data = sum_resp.json()
@@ -141,7 +152,8 @@ class PubMedProvider:
                 )
 
             return papers
-        except Exception:
+        except Exception as exc:
+            self.last_error = failure_reason(self.http_client, exc=exc)
             return []
 
     @staticmethod

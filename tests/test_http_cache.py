@@ -120,6 +120,114 @@ async def test_returns_none_after_exhausting_retries():
 
 
 @respx.mock
+async def test_last_failure_records_http_status():
+    respx.get("https://example.org/forbidden").mock(return_value=httpx.Response(403))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/forbidden") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "http"
+        assert failure.status == 403
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_quiet_status():
+    respx.get("https://example.org/missing").mock(return_value=httpx.Response(404))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get(
+            "https://example.org/missing", quiet_statuses={404}
+        ) is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "http"
+        assert failure.status == 404
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_transport_error():
+    respx.get("https://example.org/unreachable").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/unreachable") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "transport"
+        assert failure.status is None
+        assert failure.detail == "ConnectError"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_unexpected_exception():
+    respx.get("https://example.org/broken").mock(side_effect=ValueError("bad"))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/broken") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "exception"
+        assert failure.status is None
+        assert failure.detail == "ValueError"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_cleared_on_success():
+    respx.get("https://example.org/flaky").mock(return_value=httpx.Response(500))
+    respx.get("https://example.org/recovered").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/flaky") is None
+        assert client.last_failure is not None
+        assert client.last_failure.kind == "http"
+        assert client.last_failure.status == 500
+
+        resp = await client.get("https://example.org/recovered")
+        assert resp is not None
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_isolated_between_concurrent_tasks():
+    respx.get("https://example.org/forbidden").mock(return_value=httpx.Response(403))
+    respx.get("https://example.org/fine").mock(return_value=httpx.Response(200, text="ok"))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    seen: dict[str, object] = {}
+
+    async def _failing() -> None:
+        await client.get("https://example.org/forbidden")
+        seen["failing"] = client.last_failure
+
+    async def _ok() -> None:
+        await client.get("https://example.org/fine")
+        seen["ok"] = client.last_failure
+
+    try:
+        await asyncio.gather(_failing(), _ok())
+        failure = seen["failing"]
+        assert failure is not None and failure.kind == "http" and failure.status == 403
+        assert seen["ok"] is None
+        # The caller's own context never saw either child's failure.
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
 async def test_ncbi_requests_are_rate_limited(monkeypatch):
     """Without an API key the NCBI host bucket must be safe 2.8 rps, not unlimited."""
     respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(
@@ -528,3 +636,142 @@ async def test_429_throttle_pushes_limiter_into_the_future():
     # Retry-After was 0.2s, so the pause must extend past the request start.
     assert limiter.throttled_until >= baseline + 0.2
     await client.aclose()
+
+
+async def test_limiter_registry_shared_across_client_instances():
+    s = Settings(pubmed_api_key=None)
+    a = AsyncHttpClient(s)
+    b = AsyncHttpClient(s)
+    try:
+        # Two clients built from the same settings must share one NCBI
+        # bucket; per-instance registries doubled the effective rate.
+        assert a._limiter_for("eutils.ncbi.nlm.nih.gov") is b._limiter_for(
+            "www.ncbi.nlm.nih.gov"
+        )
+    finally:
+        await a.aclose()
+        await b.aclose()
+
+
+def test_limiter_registry_shared_across_event_loops():
+    """zimqa runs every engine call in its own asyncio.run; buckets must
+    outlive the loop that created them or the burst is unchanged."""
+    boxes: list[object] = []
+
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            boxes.append(client._limiter_for("eutils.ncbi.nlm.nih.gov"))
+        finally:
+            await client.aclose()
+
+    asyncio.run(grab())
+    asyncio.run(grab())
+    assert boxes[0] is boxes[1]
+
+
+def test_registry_is_bounded_by_host_count():
+    async def grab() -> None:
+        client = AsyncHttpClient(Settings())
+        try:
+            client._limiter_for("eutils.ncbi.nlm.nih.gov")
+        finally:
+            await client.aclose()
+
+    for _ in range(5):
+        asyncio.run(grab())
+    assert AsyncHttpClient.limiter_bucket_count() == 1
+
+
+async def test_ncbi_bucket_is_shared_by_keyed_and_unkeyed_clients():
+    """NCBI counts per IP. Two buckets (9.0/s keyed + 2.8/s unkeyed) put
+    11.8 req/s against a 10/s ceiling."""
+    keyed = AsyncHttpClient(Settings(pubmed_api_key="k123"))
+    plain = AsyncHttpClient(Settings(pubmed_api_key=None))
+    try:
+        shared = keyed._limiter_for("eutils.ncbi.nlm.nih.gov")
+        assert shared is plain._limiter_for("eutils.ncbi.nlm.nih.gov")
+        assert shared.rate_per_sec == 2.8
+    finally:
+        await keyed.aclose()
+        await plain.aclose()
+
+
+def test_ncbi_api_key_env_alias(monkeypatch):
+    # Subject IS env loading — sanctioned Settings.load() exception.
+    monkeypatch.setenv("NCBI_API_KEY", "k123")
+    monkeypatch.delenv("PUBMED_API_KEY", raising=False)
+    assert Settings.load().pubmed_api_key == "k123"
+
+
+def test_pubmed_key_wins_over_ncbi_alias(monkeypatch):
+    monkeypatch.setenv("PUBMED_API_KEY", "p1")
+    monkeypatch.setenv("NCBI_API_KEY", "k123")
+    assert Settings.load().pubmed_api_key == "p1"
+
+
+def test_blank_pubmed_key_falls_through_to_ncbi_alias(monkeypatch):
+    # A key of spaces is a misconfiguration, not a choice: without stripping it
+    # beats a good NCBI_API_KEY and ships to E-utilities as "api_key=+".
+    monkeypatch.setenv("PUBMED_API_KEY", "   ")
+    monkeypatch.setenv("NCBI_API_KEY", " k123 ")
+    assert Settings.load().pubmed_api_key == "k123"
+
+
+def test_blank_pubmed_tool_and_email_resolve_to_none(monkeypatch):
+    # Subject IS env loading — sanctioned Settings.load() exception.
+    monkeypatch.setenv("PUBMED_TOOL", "   ")
+    monkeypatch.setenv("PUBMED_EMAIL", " ")
+    monkeypatch.setenv("S2_API_KEY", "\t")
+    s = Settings.load()
+    assert s.pubmed_tool is None
+    assert s.pubmed_email is None
+    assert s.s2_api_key is None
+
+
+def test_both_ncbi_keys_blank_resolve_to_none(monkeypatch):
+    monkeypatch.setenv("PUBMED_API_KEY", "  ")
+    monkeypatch.setenv("NCBI_API_KEY", "")
+    assert Settings.load().pubmed_api_key is None
+
+
+async def test_idconv_receives_api_key():
+    s = Settings(pubmed_api_key="k123")
+    client = AsyncHttpClient(s)
+    try:
+        url = client._inject_credentials(
+            "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids=x"
+        )
+        assert "api_key=k123" in url
+        # No request made: the httpx AsyncClient never opened a connection.
+    finally:
+        await client.aclose()
+
+
+def test_limiter_registry_does_not_pin_dead_event_loops():
+    """The registry is process-global and keyed by event loop. It must not keep
+    a finished loop alive: a long pytest session creates one loop per test."""
+    import gc
+    import weakref
+
+    client = AsyncHttpClient(settings=Settings())
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(
+                asyncio.sleep(0)
+            )  # make it a real running loop at least once
+
+            async def _touch():
+                client._limiter_for("api.crossref.org")
+
+            loop.run_until_complete(_touch())
+        finally:
+            loop.close()
+
+        ref = weakref.ref(loop)
+        del loop
+        gc.collect()
+        assert ref() is None, "limiter registry is keeping a closed event loop alive"
+    finally:
+        asyncio.run(client.aclose())
