@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
+from scholar_mcp.providers.base import failure_reason
 from scholar_mcp.ranking import classify_evidence_grade
 from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -76,9 +77,7 @@ class PubMedProvider:
         try:
             resp = await self.http_client.get(ESEARCH_URL, params=search_params)
             if resp is None or resp.status_code != 200:
-                self.last_error = (
-                    "transport" if resp is None else f"http_{resp.status_code}"
-                )
+                self.last_error = failure_reason(self.http_client, resp=resp)
                 return []
 
             data = resp.json()
@@ -93,9 +92,7 @@ class PubMedProvider:
             }
             sum_resp = await self.http_client.get(ESUMMARY_URL, params=summary_params)
             if sum_resp is None or sum_resp.status_code != 200:
-                self.last_error = (
-                    "transport" if sum_resp is None else f"http_{sum_resp.status_code}"
-                )
+                self.last_error = failure_reason(self.http_client, resp=sum_resp)
                 return []
 
             sum_data = sum_resp.json()
@@ -156,7 +153,7 @@ class PubMedProvider:
 
             return papers
         except Exception as exc:
-            self.last_error = f"exception:{type(exc).__name__}"
+            self.last_error = failure_reason(self.http_client, exc=exc)
             return []
 
     @staticmethod

@@ -3,6 +3,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from scholar_mcp.models import PaperMetadata, ReferenceItem
+from scholar_mcp.providers.base import failure_reason
 from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -64,9 +65,7 @@ class CrossRefProvider:
         try:
             resp = await self.http_client.get(CROSSREF_BASE, params=params)
             if resp is None or resp.status_code != 200:
-                self.last_error = (
-                    "transport" if resp is None else f"http_{resp.status_code}"
-                )
+                self.last_error = failure_reason(self.http_client, resp=resp)
                 return []
 
             data = resp.json()
@@ -114,7 +113,7 @@ class CrossRefProvider:
 
             return papers
         except Exception as exc:
-            self.last_error = f"exception:{type(exc).__name__}"
+            self.last_error = failure_reason(self.http_client, exc=exc)
             return []
 
     async def fetch_metadata(self, doi: str) -> PaperMetadata | None:

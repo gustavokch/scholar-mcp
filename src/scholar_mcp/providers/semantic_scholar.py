@@ -2,6 +2,7 @@ from typing import Any
 import urllib.parse
 
 from scholar_mcp.models import PaperMetadata, RelatedPaper
+from scholar_mcp.providers.base import failure_reason
 from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
@@ -82,13 +83,11 @@ class SemanticScholarProvider:
                 f"{S2_BASE}/paper/search", params=params, headers=self._headers()
             )
             if resp is None or resp.status_code != 200:
-                self.last_error = (
-                    "transport" if resp is None else f"http_{resp.status_code}"
-                )
+                self.last_error = failure_reason(self.http_client, resp=resp)
                 return []
             papers = [_paper_to_metadata(p) for p in resp.json().get("data", [])]
         except Exception as exc:
-            self.last_error = f"exception:{type(exc).__name__}"
+            self.last_error = failure_reason(self.http_client, exc=exc)
             return []
 
         if author:
