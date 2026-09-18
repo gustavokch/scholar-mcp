@@ -1970,3 +1970,102 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
+    tmp_path, monkeypatch
+):
+    """When BVS returns an HTML challenge/block page (e.g. Bunny CDN Bot Shield),
+    _camoufox_search must not crash with JSONDecodeError, but return []."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    challenge_html = (
+        "<!DOCTYPE html><html><head><title>Bot Shield</title></head>"
+        "<body><iframe src=\"https://shield-templates-prod.b-cdn.net/42085/block.html\" "
+        "sandbox=\"allow-scripts allow-same-origin\"></iframe></body></html>"
+    )
+    attempts, _urls, exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, challenge_html
+    )
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert records == []
+        assert meta.error is True
+        assert attempts == [True]
+        assert exits == [True]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_bvs_shielded_403_fast_fails_to_browser_fallback(tmp_path, monkeypatch):
+    """When BVS returns 403 bot shield, title-scoped stage fails and subsequent
+    HTTP stages (all-field, relaxed) are skipped to avoid cascading 10s budget timeouts."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=1, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "1",
+                            "ti": "Manejo da dengue",
+                            "pais_publicacao": "^eBrasil",
+                            "da": "202401",
+                            "ur": ["https://bvsms.saude.gov.br/x.pdf"],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, json.dumps(payload)
+    )
+    try:
+        route = respx.get(BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(403, text="<iframe src=\"https://shield-templates-prod.b-cdn.net/42085/block.html\">")
+        )
+        records, meta = await engine.search_guidelines("dengue hemorragica", limit=10)
+        # Should only have called BVS HTTP for title-scoped, skipping all-field and relaxed
+        assert route.call_count == 1
+        assert [r.title for r in records] == ["Manejo da dengue"]
+        assert meta.error is False
+        assert attempts == [True]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+

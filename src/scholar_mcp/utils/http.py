@@ -396,6 +396,10 @@ class AsyncHttpClient:
                         if retry_after is not None:
                             limiter.throttle(wait_time)
 
+                    self.last_failure = FetchFailure(
+                        "http", resp.status_code, resp.reason_phrase or ""
+                    )
+
                     # Routine on rate-limited hosts; only terminal failure is a warning.
                     logger.info(
                         "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",

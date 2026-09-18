@@ -91,8 +91,18 @@ MAX_FULL_TEXT_CHARS = 50_000
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
 # caller's own timeout. The total ceiling comes from
-# ``settings.brazil_browser_timeout_s``.
-_CAMOUFOX_NAV_TIMEOUT_MS = 15000
+# ``settings.brazil_browser_timeout_s``. 30 s lets the navigation absorb a
+# slow Solr response or a long Bunny CDN challenge without the browser tier
+# ceiling (45 s) firing first.
+_CAMOUFOX_NAV_TIMEOUT_MS = 30000
+
+_BVS_CHALLENGE_MARKERS = (
+    "shield-templates",
+    "b-cdn.net",
+    "block.html",
+    "challenge-platform",
+    "just a moment",
+)
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
@@ -412,6 +422,12 @@ class BrazilMoHEngine:
         self.cache = cache
         self.settings = settings
         self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
+        # Set inside _fetch_records, which runs in the same task as the HTTP
+        # call: the client's last_failure is a per-task ContextScoped var, so a
+        # stage running under asyncio.wait_for cannot read it afterwards (the
+        # write happened in the child task). The flag carries the shield
+        # verdict across that boundary. Reset at each search_guidelines start.
+        self._bvs_shielded = False
 
     async def _fetch_records(
         self,
@@ -433,6 +449,9 @@ class BrazilMoHEngine:
             },
         )
         if resp is None:
+            failure = getattr(self.http_client, "last_failure", None)
+            if failure is not None and failure.status == 403:
+                self._bvs_shielded = True
             return [], True
 
         try:
@@ -443,6 +462,19 @@ class BrazilMoHEngine:
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
         return [record for record in records if _is_brazilian(record)], False
+
+    def _is_bvs_shielded(self) -> bool:
+        if self._bvs_shielded:
+            return True
+        failure = getattr(self.http_client, "last_failure", None)
+        if failure is not None and failure.status == 403:
+            return True
+        limiters = getattr(self.http_client, "_limiters", None)
+        if limiters and isinstance(limiters, dict):
+            limiter = limiters.get("pesquisa.bvsalud.org")
+            if limiter is not None and getattr(limiter, "throttled_until", 0.0) > time.monotonic():
+                return True
+        return False
 
     async def _stage(self, stage: str, coro: Any, default: Any) -> Any:
         """Run one retrieval stage under its own time budget.
@@ -509,6 +541,7 @@ class BrazilMoHEngine:
         # the whole chain, not each stage, is what the caller's ceiling
         # bounds).
         chain_start = time.monotonic()
+        self._bvs_shielded = False
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
         pcdt_records, pcdt_meta = await self._stage(
             "pcdt",
@@ -565,20 +598,24 @@ class BrazilMoHEngine:
 
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
-        # query says nothing about the relaxed one.
-        if not records and tokens and not title_relaxed_errored:
+        # query says nothing about the relaxed one. When BVS is shielded by
+        # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
+        # or timeout; skip them to preserve budget for browser fallback.
+        bvs_shielded = self._is_bvs_shielded()
+        if not records and tokens and not title_relaxed_errored and not bvs_shielded:
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count), ([], True)
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
+            bvs_shielded = bvs_shielded or self._is_bvs_shielded()
 
         # The strict conjunction found nothing usable -- either no hits at all,
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2 and not title_relaxed_errored:
+        if not records and len(tokens) >= 2 and not title_relaxed_errored and not bvs_shielded:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
                 "relaxed", self._fetch_records(composed_relaxed, count), ([], True)
@@ -649,8 +686,8 @@ class BrazilMoHEngine:
         """Ceiling for the browser tier: the flat per-tier cap, shrunk to the
         chain budget still left when the browser tier starts. The whole chain
         (PCDT + every BVS stage + browser) is what the caller's hard timeout
-        bounds, so a flat 30 s browser cap after five stalled 10 s stages
-        would outlast a 60 s caller ceiling. ``brazil_chain_timeout_s <= 0``
+        bounds, so a flat 45 s browser cap after five stalled 20 s stages
+        would outlast a 90 s chain ceiling. ``brazil_chain_timeout_s <= 0``
         disables the chain bound and leaves the flat cap.
         """
         ceiling = float(self.settings.brazil_browser_timeout_s)
@@ -698,8 +735,18 @@ class BrazilMoHEngine:
             # A JSON payload rendered in a browser arrives wrapped in
             # <html><body><pre>...</pre></body></html>; tag-stripping must
             # leave a bare JSON body untouched.
-            text = BeautifulSoup(content, "html.parser").get_text()
-            data = json.loads(text)
+            lowered = content.lower()
+            if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
+                logger.info("brazil_moh: BVS browser fallback received challenge or block page")
+                return []
+            soup = BeautifulSoup(content, "html.parser")
+            pre = soup.find("pre")
+            text = pre.get_text() if pre else soup.get_text()
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
+                return []
             return _extract_docs(data)
 
         try:
