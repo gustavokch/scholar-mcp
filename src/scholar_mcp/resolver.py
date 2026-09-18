@@ -15,6 +15,7 @@ from scholar_mcp.models import (
     PaperMetadata,
     ReferenceItem,
     RelatedPaper,
+    SourceStatus,
 )
 
 from scholar_mcp.parsers.jats import list_sections, select_sections
@@ -30,19 +31,18 @@ from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
 from scholar_mcp.utils.ctxstate import ContextScoped
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchFailure
 from scholar_mcp.utils.text import truncate_content as _truncate_content
 
 
 class WaterfallResolver:
     """Multi-tier waterfall resolver for academic paper discovery and full-text retrieval."""
 
-    # Per-backend status from the current request's search(): "ok" (>=1 result),
-    # "empty" (0 results, no provider error), "blocked" (403/429), or "failed"
-    # (other error or raised). Context-scoped, not a plain attribute: server.py
-    # holds one resolver for the whole process, so two concurrent MCP calls
-    # would otherwise overwrite each other's map between the write and the read.
-    last_search_sources: dict[str, str] = ContextScoped(dict)
+    # Per-backend status from the current request's search(), one SourceStatus
+    # per backend. Context-scoped, not a plain attribute: server.py holds one
+    # resolver for the whole process, so two concurrent MCP calls would
+    # otherwise overwrite each other's map between the write and the read.
+    last_search_sources: dict[str, SourceStatus] = ContextScoped(dict)
 
     def __init__(
         self,
@@ -397,7 +397,9 @@ class WaterfallResolver:
         """Run one backend search and record its degradation status.
 
         Genuine empty results are "empty", not "failed" — a narrow query with
-        zero hits is a valid answer, and crying wolf would flag every such query.
+        zero hits is a valid answer, and crying wolf would flag every such
+        query. Blocked is decided from the http client's typed FetchFailure,
+        not by substring-sniffing the provider's free-form last_error string.
         """
         try:
             papers = await coro
@@ -405,11 +407,15 @@ class WaterfallResolver:
             self.last_search_sources[name] = "failed"
             return []
         err = getattr(provider, "last_error", None)
+        client = getattr(provider, "http_client", None)
+        fail = getattr(client, "last_failure", None) if client is not None else None
+        if not isinstance(fail, FetchFailure):
+            fail = None
         if papers:
             self.last_search_sources[name] = "ok"
-        elif err and any(c in err for c in ("403", "429")):
+        elif fail is not None and fail.kind == "http" and fail.status in (403, 429):
             self.last_search_sources[name] = "blocked"
-        elif err:
+        elif fail is not None or err:
             self.last_search_sources[name] = "failed"
         else:
             self.last_search_sources[name] = "empty"
@@ -473,7 +479,7 @@ class WaterfallResolver:
             )
         elif source_mode in ("s2", "semanticscholar"):
             if not self.settings.enable_s2:
-                self.last_search_sources["s2"] = "empty"
+                self.last_search_sources["s2"] = "disabled"
                 return []
             papers = await self._run_backend(
                 "s2",

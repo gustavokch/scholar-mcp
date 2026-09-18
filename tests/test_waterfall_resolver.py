@@ -7,6 +7,7 @@ import pytest
 from scholar_mcp.config import Settings
 from scholar_mcp.models import FullTextResponse, IdentifierMap, PaperMetadata
 from scholar_mcp.resolver import WaterfallResolver
+from scholar_mcp.utils.http import FetchFailure
 
 
 def make_resolver(settings: Settings) -> WaterfallResolver:
@@ -287,12 +288,40 @@ async def test_title_backfill_bounded_by_remaining_budget():
 
 
 
-async def test_last_search_sources_blocked_on_provider_error():
+async def test_last_search_sources_blocked_on_403():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = "http_403"
+    r.pubmed.http_client.last_failure = FetchFailure("http", 403, "Forbidden")
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "blocked"
+
+
+async def test_last_search_sources_blocked_on_429():
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     r.pubmed.search = AsyncMock(return_value=[])
     r.pubmed.last_error = "http_429"
+    r.pubmed.http_client.last_failure = FetchFailure("http", 429, "Too Many Requests")
     await r.search("q", source="pubmed", rerank=False)
     assert r.last_search_sources["pubmed"] == "blocked"
+
+
+async def test_last_search_sources_failed_on_transport_error():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = "transport"
+    r.pubmed.http_client.last_failure = FetchFailure("transport", None, "ConnectError")
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "failed"
+
+
+async def test_last_search_sources_failed_on_unexpected_exception():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = "exception:ValueError"
+    r.pubmed.http_client.last_failure = FetchFailure("exception", None, "ValueError")
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_search_sources["pubmed"] == "failed"
 
 
 async def test_last_search_sources_failed_on_provider_raise():
@@ -308,6 +337,14 @@ async def test_last_search_sources_empty_when_no_error():
     r.pubmed.last_error = None
     await r.search("q", source="pubmed", rerank=False)
     assert r.last_search_sources["pubmed"] == "empty"
+
+
+async def test_disabled_s2_is_not_reported_as_empty():
+    """"empty" means "queried, zero hits, no error". A backend that was never
+    queried must not claim that."""
+    r = WaterfallResolver(settings=Settings(enable_s2=False), http_client=AsyncMock(), cache=None)
+    await r.search("q", source="s2")
+    assert r.last_search_sources == {"s2": "disabled"}
 
 
 async def test_last_search_sources_is_per_request():
