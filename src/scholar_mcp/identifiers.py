@@ -167,7 +167,7 @@ async def resolve_identifiers(
         await cache.set(
             cache_key,
             id_map,
-            ttl_seconds=getattr(settings, "cache_ttl_idmap_failure", 60),
+            ttl_seconds=settings.cache_ttl_idmap_failure,
         )
 
     return id_map
