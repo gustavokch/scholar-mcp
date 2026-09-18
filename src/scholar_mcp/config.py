@@ -71,17 +71,20 @@ class Settings:
     cache_ttl_clinical_trials: int = 86400
     cache_ttl_who_iris: int = 2592000
     cache_ttl_brazil_moh: int = 2592000
-    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to five BVS stages
-    # run sequentially, and callers wrap the whole chain in their own hard
-    # timeout. Ten seconds per stage keeps one stalled stage from eating the
+    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to six BVS stages
+    # (title-scoped, three title relaxations, all-field, OR-relaxed) run
+    # sequentially, and callers wrap the whole chain in their own hard
+    # timeout. Twenty seconds per stage keeps one stalled stage from eating the
     # share of the ceiling the remaining stages need.
-    brazil_stage_timeout_s: float = 10.0
-    # Whole-chain ceiling for BrazilMoHEngine, matching the 60 s hard timeout
-    # callers document. Real arithmetic: every stage (PCDT + each BVS variant)
-    # burns at most brazil_stage_timeout_s, and the browser tier gets
-    # min(brazil_browser_timeout_s, chain time still left), so
-    # PCDT + stages + browser can never outlast 60 s. <= 0 disables the bound.
-    brazil_chain_timeout_s: float = 60.0
+    brazil_stage_timeout_s: float = 20.0
+    # Whole-chain ceiling for BrazilMoHEngine. Only the browser tier enforces
+    # it directly -- it gets min(brazil_browser_timeout_s, chain time still
+    # left) (BrazilMoHEngine._browser_ceiling). The HTTP stages each get a
+    # flat brazil_stage_timeout_s, so PCDT plus up to six 20 s BVS stages can
+    # overrun this bound; the caller's hard timeout is what cancels that.
+    # 90 s covers the shielded fast-fail path (PCDT + one BVS stage + the
+    # ~25 s camoufox tier) with headroom. <= 0 disables the bound.
+    brazil_chain_timeout_s: float = 90.0
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
     scihub_mirror_timeout_s: float = 12.0
@@ -97,7 +100,9 @@ class Settings:
     # Hard ceiling on the BVS browser tier. It is the last stage of an already
     # staged chain, so the effective ceiling is the smaller of this and the
     # chain budget still left when the tier starts (see _browser_ceiling).
-    brazil_browser_timeout_s: float = 30.0
+    # 45 s because camoufox startup plus Bunny CDN challenge execution on
+    # pesquisa.bvsalud.org runs 15 s-25 s; 30 s cut off legitimate searches.
+    brazil_browser_timeout_s: float = 45.0
     enable_medical_tools: bool = True
 
     @property
@@ -211,13 +216,13 @@ class Settings:
             cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
             cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
-            brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "10.0")),
-            brazil_chain_timeout_s=float(os.getenv("BRAZIL_CHAIN_TIMEOUT_S", "60.0")),
+            brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "20.0")),
+            brazil_chain_timeout_s=float(os.getenv("BRAZIL_CHAIN_TIMEOUT_S", "90.0")),
             scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
             scihub_tier_timeout_s=float(os.getenv("SCIHUB_TIER_TIMEOUT_S", "20.0")),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=float(
-                os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "30.0")
+                os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "45.0")
             ),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")

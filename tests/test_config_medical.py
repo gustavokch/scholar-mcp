@@ -56,6 +56,34 @@ def test_brazil_moh_ttl_env_override(monkeypatch):
     assert settings.cache_ttl_brazil_moh == 600
 
 
+def test_brazil_timeout_defaults_leave_room_for_browser_tier():
+    """Chain budget must cover PCDT + BVS stages AND leave time for the
+    camoufox fallback, which needs ~25 s for startup plus Bunny CDN challenge."""
+    settings = Settings.load()
+    assert settings.brazil_stage_timeout_s == 20.0
+    assert settings.brazil_chain_timeout_s == 90.0
+    assert settings.brazil_browser_timeout_s == 45.0
+    # Worst case: 3 stages at full ceiling still leaves browser time.
+    assert (
+        settings.brazil_chain_timeout_s - 3 * settings.brazil_stage_timeout_s
+        > 0
+    )
+
+
+def test_brazil_timeout_env_overrides(monkeypatch):
+    monkeypatch.setenv("BRAZIL_CHAIN_TIMEOUT_S", "120.0")
+    monkeypatch.setenv("BRAZIL_BROWSER_TIMEOUT_S", "60.0")
+    settings = Settings.load()
+    assert settings.brazil_chain_timeout_s == 120.0
+    assert settings.brazil_browser_timeout_s == 60.0
+
+
+def test_camoufox_nav_timeout_covers_slow_challenge():
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_NAV_TIMEOUT_MS
+
+    assert _CAMOUFOX_NAV_TIMEOUT_MS == 30000
+
+
 def test_brazil_moh_cache_source_uses_its_own_ttl(tmp_path):
     from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
