@@ -5,6 +5,7 @@ import math
 import random
 import re
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -266,6 +267,15 @@ class AsyncHttpClient:
         """Drop every limiter bucket. For tests; never call it on a live server."""
         with cls._limiters_lock:
             cls._limiters.clear()
+
+    def is_throttled(self, host: str) -> bool:
+        """True when ``host``'s limiter holds a throttle deadline in the future.
+
+        Read-only: an unknown host is not throttled and gets no bucket.
+        """
+        with self._limiters_lock:
+            limiter = self._limiters.get(_host_key(host))
+        return limiter is not None and limiter.throttled_until > time.monotonic()
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.

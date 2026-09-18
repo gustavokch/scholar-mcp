@@ -3,6 +3,8 @@ import threading
 import time
 import pytest
 
+from scholar_mcp.config import Settings
+from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 
 
@@ -125,5 +127,22 @@ def test_throttle_from_another_thread_is_observed():
     start = time.monotonic()
     asyncio.run(limiter.acquire())
     assert time.monotonic() - start >= 0.25
+
+
+async def test_is_throttled_reflects_limiter_state():
+    AsyncHttpClient.reset_limiters()
+    client = AsyncHttpClient(Settings.load())
+    try:
+        host = "pesquisa.bvsalud.org"
+        assert client.is_throttled(host) is False
+
+        client._limiter_for(host).throttle(0.2)
+        assert client.is_throttled(host) is True
+
+        AsyncHttpClient.reset_limiters()
+        assert client.is_throttled(host) is False
+    finally:
+        await client.aclose()
+
 
 
