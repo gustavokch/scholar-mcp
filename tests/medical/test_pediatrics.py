@@ -1054,3 +1054,25 @@ async def test_pubmed_tier_reuses_unfiltered_bright_futures_results(tmp_path, mo
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_cache_if_any_parity(tmp_path: Path):
+    """The shared no-empty-cache guard caches a non-empty list under the given
+    source and writes nothing for an empty one."""
+    from scholar_mcp.medical.pediatrics import _cache_if_any
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = PediatricGuideline(title="G", url="u", organization="AAP", source="aap-policy")
+        await _cache_if_any(cache, "k:hit", [item], "bright_futures")
+        cached, meta = await cache.get("k:hit")
+        assert meta.cached
+        assert cached == [item.to_dict()]
+
+        await _cache_if_any(cache, "k:empty", [], "bright_futures")
+        cached, meta = await cache.get("k:empty")
+        assert not meta.cached
+        assert cached is None
+    finally:
+        await cache.close()
+        await http_client.aclose()

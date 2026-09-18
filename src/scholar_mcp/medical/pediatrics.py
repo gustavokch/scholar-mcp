@@ -132,6 +132,22 @@ COMMON_CLINICAL_TOKENS: frozenset[str] = frozenset(
 )
 
 
+async def _cache_if_any(
+    cache: SQLiteCacheManager,
+    key: str,
+    items: list[PediatricGuideline],
+    source: str,
+) -> None:
+    """Cache a non-empty result only.
+
+    An empty result is a valid answer but must not be cached as success: a
+    transient scrape failure indistinguishable from "no match" would
+    otherwise poison the TTL.
+    """
+    if items:
+        await cache.set(key, [g.to_dict() for g in items], source=source)
+
+
 class PediatricsEngine:
     def __init__(
         self,
@@ -383,15 +399,8 @@ class PediatricsEngine:
             )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        # An empty result is a valid answer but must not be cached as success:
-        # a transient scrape failure indistinguishable from "no match" would
-        # otherwise poison the TTL.
-        if results:
-            await self.cache.set(
-                cache_key,
-                [g.to_dict() for g in results],
-                source="bright_futures",
-            )
+        # No empty caching: see _cache_if_any.
+        await _cache_if_any(self.cache, cache_key, results, "bright_futures")
         return results, CacheMetadata(cached=False, cache_age=0)
 
     async def search_aap_policy(
@@ -415,13 +424,8 @@ class PediatricsEngine:
         if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        # No empty caching: see search_bright_futures.
-        if results:
-            await self.cache.set(
-                cache_key,
-                [g.to_dict() for g in results],
-                source="aap_policy",
-            )
+        # No empty caching: see _cache_if_any.
+        await _cache_if_any(self.cache, cache_key, results, "aap_policy")
         return results, CacheMetadata(cached=False, cache_age=0)
 
     async def search_aap_guidelines(
@@ -507,13 +511,8 @@ class PediatricsEngine:
         if errored and not deduped:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        # No empty caching: see search_bright_futures.
-        if deduped:
-            await self.cache.set(
-                cache_key,
-                [g.to_dict() for g in deduped],
-                source="guidelines",
-            )
+        # No empty caching: see _cache_if_any.
+        await _cache_if_any(self.cache, cache_key, deduped, "guidelines")
         return deduped, CacheMetadata(cached=False, cache_age=0, error=errored)
 
     async def search_pediatric_literature(
