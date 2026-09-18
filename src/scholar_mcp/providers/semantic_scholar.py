@@ -2,6 +2,8 @@ from typing import Any
 import urllib.parse
 
 from scholar_mcp.models import PaperMetadata, RelatedPaper
+from scholar_mcp.providers.base import failure_reason
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
@@ -43,6 +45,12 @@ def _paper_to_metadata(p: dict[str, Any]) -> PaperMetadata:
 class SemanticScholarProvider:
     """Semantic Scholar topic search and embedding-based recommendations."""
 
+    # Set to a short reason immediately before failure returns in search();
+    # None after success or a genuine empty result. Read by the resolver's
+    # per-source degradation map. Context-scoped so one request's failure is
+    # invisible to a concurrent request sharing this singleton provider.
+    last_error: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient, api_key: str | None = None) -> None:
         self.http_client = http_client
         self.api_key = api_key
@@ -61,6 +69,7 @@ class SemanticScholarProvider:
     ) -> list[PaperMetadata]:
         # S2 graph search has no author/journal filter, so the caller's constraint
         # is applied to the returned page instead of being silently dropped.
+        self.last_error = None
         params: dict[str, Any] = {
             "query": query,
             "limit": min(max(1, num_results), 100),
@@ -74,9 +83,11 @@ class SemanticScholarProvider:
                 f"{S2_BASE}/paper/search", params=params, headers=self._headers()
             )
             if resp is None or resp.status_code != 200:
+                self.last_error = failure_reason(self.http_client, resp=resp)
                 return []
             papers = [_paper_to_metadata(p) for p in resp.json().get("data", [])]
-        except Exception:
+        except Exception as exc:
+            self.last_error = failure_reason(self.http_client, exc=exc)
             return []
 
         if author:

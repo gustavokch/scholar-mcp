@@ -1,3 +1,5 @@
+import asyncio
+import time
 from typing import NamedTuple
 
 import httpx
@@ -417,6 +419,89 @@ def test_scihub_extract_pdf_url_resolves_relative_path():
 
 
 @respx.mock
+async def test_failing_mirror_deprioritized_on_next_call(client):
+    """A mirror that fails gets a penalty; the next call tries healthy
+    mirrors first (stable sort keeps config order among zero penalties)."""
+    respx.get(url__startswith="https://m1.org").mock(side_effect=httpx.ConnectError("down"))
+    respx.get(url__startswith="https://m2.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://cyber.sci-hub.se/deprio.pdf"></iframe></html>',
+        )
+    )
+    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-deprio")
+    )
+    settings = Settings(enable_browser_fallback=False)
+    provider = SciHubProvider(
+        client, mirrors=["https://m1.org", "https://m2.org"], settings=settings
+    )
+    ids = IdentifierMap(doi="10.1/deprio")
+    b1, _ = await provider.fetch_pdf_bytes(ids)
+    assert b1
+    first_call_calls = len(respx.calls)
+    b2, _ = await provider.fetch_pdf_bytes(ids)
+    assert b2
+    later_hosts = [str(c.request.url.host) for c in respx.calls[first_call_calls:]]
+    assert later_hosts[0] == "m2.org"
+    if "m1.org" in later_hosts:
+        assert later_hosts.index("m2.org") < later_hosts.index("m1.org")
+
+
+@respx.mock
+async def test_mirror_tier_respects_tier_deadline(client):
+    """The whole mirror tier is bounded, not just each mirror: 7 mirrors x a
+    slow per-mirror timeout must not add up past scihub_tier_timeout_s."""
+    async def _slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)
+        return httpx.Response(503)
+
+    mirrors = [f"https://t{i}.org" for i in range(7)]
+    for m in mirrors:
+        respx.get(url__startswith=m).mock(side_effect=_slow)
+    settings = Settings(
+        enable_browser_fallback=False,
+        scihub_mirror_timeout_s=1.0,
+        scihub_tier_timeout_s=2.0,
+    )
+    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    start = time.monotonic()
+    b, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/tier"))
+    elapsed = time.monotonic() - start
+    assert b is None
+    assert elapsed < 5.0, f"mirror tier outlived its deadline: {elapsed:.1f}s"
+
+
+@respx.mock
+async def test_mirror_attempt_respects_per_mirror_timeout(client):
+    """Each mirror gets at most scihub_mirror_timeout_s; a slow mirror must
+    not burn the whole waterfall budget before the next mirror is tried."""
+    async def _slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, text="too late")
+
+    respx.get(url__startswith="https://slow.org").mock(side_effect=_slow)
+    respx.get(url__startswith="https://fast.org").mock(
+        return_value=httpx.Response(
+            200,
+            text='<html><iframe src="https://cyber.sci-hub.se/fast.pdf"></iframe></html>',
+        )
+    )
+    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-fast")
+    )
+    settings = Settings(enable_browser_fallback=False, scihub_mirror_timeout_s=0.2)
+    provider = SciHubProvider(
+        client, mirrors=["https://slow.org", "https://fast.org"], settings=settings
+    )
+    start = time.monotonic()
+    b, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/slow"))
+    elapsed = time.monotonic() - start
+    assert b
+    assert elapsed < 2.0
+
+
+@respx.mock
 async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(503))
     settings = Settings(enable_browser_fallback=False)
@@ -785,3 +870,76 @@ async def test_pubmed_fetch_abstract_parses_own_pmcid(client):
     assert meta is not None
     assert meta.pmcid == "PMC11676342"
 
+
+
+async def test_provider_last_error_is_per_request():
+    """Providers are module-level singletons in server.py. A failing search
+    running concurrently with a successful one must not leave its error on the
+    attribute the successful call reads."""
+    started = asyncio.Event()
+    failed_done = asyncio.Event()
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"message": {"items": []}}
+
+    async def slow_ok(url, **kwargs):
+        started.set()
+        await asyncio.sleep(0.05)
+        return _Resp()
+
+    async def fast_fail(url, **kwargs):
+        return None
+
+    async def run_ok():
+        # Each task gets its own client: reassigning client.get from two
+        # concurrent tasks races one patch over the other.
+        client = AsyncHttpClient(
+            settings=Settings(), max_retries=1, backoff_base=0.01
+        )
+        try:
+            client.get = slow_ok
+            provider = CrossRefProvider(client)
+            await provider.search("ok query")
+            await failed_done.wait()
+            return provider.last_error
+        finally:
+            await client.aclose()
+
+    async def run_fail():
+        await started.wait()
+        client = AsyncHttpClient(
+            settings=Settings(), max_retries=1, backoff_base=0.01
+        )
+        try:
+            client.get = fast_fail
+            provider = CrossRefProvider(client)
+            await provider.search("fail query")
+            return provider.last_error
+        finally:
+            failed_done.set()
+
+    ok_err, fail_err = await asyncio.gather(run_ok(), run_fail())
+    assert fail_err == "transport"
+    assert ok_err is None
+
+
+async def test_mirror_penalty_is_capped(client, monkeypatch):
+    """Penalties order the mirror list; they must not grow without bound as a
+    long-lived process keeps retrying a dead mirror."""
+    from scholar_mcp.providers.scihub import MAX_MIRROR_PENALTY
+
+    provider = SciHubProvider(
+        client, mirrors=["https://m1.example"], settings=Settings(enable_browser_fallback=False)
+    )
+
+    async def always_none(url, **kwargs):
+        return None
+
+    monkeypatch.setattr(client, "get", always_none)
+    for _ in range(MAX_MIRROR_PENALTY + 5):
+        await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/x"))
+    assert provider._mirror_penalties["https://m1.example"] == MAX_MIRROR_PENALTY

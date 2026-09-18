@@ -8,6 +8,7 @@ from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+OAI_PMH_URL = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
 
 
 
@@ -19,7 +20,51 @@ class EuropePMCProvider(BaseProvider):
     def __init__(self, http_client: AsyncHttpClient) -> None:
         super().__init__(http_client)
 
+    async def fetch_metadata(self, ids: IdentifierMap) -> PaperMetadata | None:
+        """Fetch core metadata by PMID. Returns None on any miss or failure.
+
+        PubMed efetch is the primary PMID metadata source, but its failure
+        (transport error, empty efetch) is indistinguishable from an absent
+        record. Europe PMC search by EXT_ID is the fallback that keeps a
+        transient PubMed failure from surfacing as not_found.
+        """
+        if not ids.pmid:
+            return None
+        try:
+            resp = await self.http_client.get(
+                f"{EPMC_REST_BASE}/search",
+                params={
+                    "query": f"EXT_ID:{ids.pmid} AND SRC:MED",
+                    "format": "json",
+                    "resultType": "core",
+                },
+            )
+            if resp is None or resp.status_code != 200:
+                return None
+            data = resp.json()
+            results = data.get("resultList", {}).get("result", [])
+            if not results:
+                return None
+            rec = results[0]
+            authors: list[str] = []
+            author_str = rec.get("authorString", "")
+            if author_str:
+                authors = [a.strip() for a in author_str.split(",") if a.strip()]
+            return PaperMetadata(
+                title=rec.get("title", "").rstrip("."),
+                authors=authors,
+                year=str(rec.get("pubYear") or ""),
+                venue=rec.get("journalTitle") or "",
+                doi=rec.get("doi"),
+                pmid=str(rec.get("pmid") or ids.pmid),
+                pmcid=rec.get("pmcid"),
+                abstract=rec.get("abstractText") or "",
+            )
+        except Exception:
+            return None
+
     async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
+        self.last_skip_reason = ""
         pmcid = ids.pmcid
         if pmcid:
             if not pmcid.upper().startswith("PMC"):
@@ -44,6 +89,11 @@ class EuropePMCProvider(BaseProvider):
                         )
             except Exception:
                 pass
+            # Spec §4 Investigate 3 fallback: a fullTextXML 404 (the run-9
+            # PMC11390030 case) can still carry OA XML through PMC OAI-PMH.
+            oai = await self._fetch_via_oai(pmcid, ids)
+            if oai is not None:
+                return oai
 
         # If no PMCID or PMCID XML failed, try resolving via DOI on Europe PMC Search
         if ids.doi:
@@ -84,10 +134,57 @@ class EuropePMCProvider(BaseProvider):
                                         pmcid=found_pmcid,
                                         url=f"https://europepmc.org/article/PMC/{found_pmcid}",
                                     )
+                            oai = await self._fetch_via_oai(found_pmcid, ids)
+                            if oai is not None:
+                                return oai
             except Exception:
                 pass
 
+        # Terminal miss: both XML routes (and the OAI fallback where a PMCID
+        # was known) came up empty. Tell the waterfall this was a deliberate,
+        # reasoned skip rather than an empty-reason miss.
+        self.last_skip_reason = "EUROPEPMC_FULLTEXT_UNAVAILABLE"
         return None
+
+    async def _fetch_via_oai(
+        self, pmcid: str, ids: IdentifierMap
+    ) -> FullTextResponse | None:
+        """Fetch JATS through PMC OAI-PMH GetRecord for a fullTextXML 404.
+
+        The response wraps the article in
+        ``<OAI-PMH><GetRecord><record><metadata>``; ``jats_to_markdown``
+        searches the whole parsed document tree and the XML parser keeps local
+        tag names, so the wrapper needs no unwrapping.
+        """
+        numeric = pmcid.upper().removeprefix("PMC")
+        try:
+            resp = await self.http_client.get(
+                OAI_PMH_URL,
+                params={
+                    "verb": "GetRecord",
+                    "identifier": f"oai:pubmedcentral.nih.gov:{numeric}",
+                    "metadataPrefix": "pmc",
+                },
+            )
+            if resp is None or resp.status_code != 200 or not resp.content:
+                return None
+            md = jats_to_markdown(resp.content)
+            if len(md.strip()) < MIN_USEFUL_CHARS:
+                return None
+            return FullTextResponse(
+                status="full_text",
+                source="pmc-oai",
+                format="markdown",
+                content=md,
+                total_chars=len(md),
+                sections_available=list_sections(md),
+                doi=ids.doi,
+                pmid=ids.pmid,
+                pmcid=pmcid,
+                url=f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/",
+            )
+        except Exception:
+            return None
 
     async def _resolve_source_and_ext_id(
         self,

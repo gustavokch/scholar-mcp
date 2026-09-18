@@ -219,7 +219,11 @@ async def test_brazil_moh_engine_pcdt_integration(tmp_path, monkeypatch):
     from scholar_mcp.medical.brazil_moh import BVS_SEARCH_URL, BrazilMoHEngine
     from scholar_mcp.utils.http import AsyncHttpClient
 
-    settings = Settings()
+    # Browser tier pinned off: step 2 drives every BVS stage to a 502, and with
+    # the tier on that launches a REAL camoufox against the live BVS host. The
+    # live records then outrank the PCDT record this test asserts on, so the
+    # assertion silently becomes a statement about today's network.
+    settings = Settings(brazil_browser_fallback=False)
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)

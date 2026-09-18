@@ -38,10 +38,14 @@ the over-fetch window and the server still chooses which slice we see.
 """
 
 import asyncio
+import json
 import logging
 import re
+import time
 import urllib.parse
 from typing import Any, Literal
+
+from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
@@ -82,6 +86,13 @@ MAX_RESULTS = 50
 OVERFETCH_FACTOR = 3
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 50_000
+
+# Camoufox (anti-detection Firefox) fetches the JSON search payload with the
+# browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
+# one navigation, hard total ceiling so a hung browser cannot outlive the
+# caller's own timeout. The total ceiling comes from
+# ``settings.brazil_browser_timeout_s``.
+_CAMOUFOX_NAV_TIMEOUT_MS = 15000
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
@@ -493,7 +504,11 @@ class BrazilMoHEngine:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
 
         # Query PCDT engine first. Every stage runs under its own budget, so
-        # one stalled stage costs its budget and the chain moves on.
+        # one stalled stage costs its budget and the chain moves on. The chain
+        # start anchors the browser tier's share of the chain budget (Task 3:
+        # the whole chain, not each stage, is what the caller's ceiling
+        # bounds).
+        chain_start = time.monotonic()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
         pcdt_records, pcdt_meta = await self._stage(
             "pcdt",
@@ -501,12 +516,25 @@ class BrazilMoHEngine:
             ([], stage_error_meta),
         )
         errored_any = pcdt_meta.error
+        # The browser tier answers BVS failures (the CDN shield 403s plain
+        # HTTP clients); a PCDT outage with a healthy BVS must not launch a
+        # real browser. Track BVS errors on their own flag.
+        bvs_errored = False
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+        # The all-field query is built once and shared by the all-field
+        # fallback stage and the browser tier, which need the identical
+        # composition. Both consumers only run when `tokens` is non-empty.
+        all_composed: str | None = (
+            _build_query(query, norm_collection, operator="AND", title_scoped=False)
+            if tokens
+            else None
+        )
         records, errored = await self._stage(
             "title-scoped", self._fetch_records(title_composed, count), ([], True)
         )
         errored_any = errored_any or errored
+        bvs_errored = bvs_errored or errored
 
         # Progressive title-token relaxation: when the full-token title AND
         # returns zero records without error, drop trailing tokens and retry.
@@ -527,6 +555,7 @@ class BrazilMoHEngine:
                     ([], True),
                 )
                 errored_any = errored_any or relaxed_title_errored
+                bvs_errored = bvs_errored or relaxed_title_errored
                 if relaxed_title_errored:
                     title_relaxed_errored = True
                     break
@@ -538,11 +567,11 @@ class BrazilMoHEngine:
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one.
         if not records and tokens and not title_relaxed_errored:
-            all_composed = _build_query(query, norm_collection, operator="AND", title_scoped=False)
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count), ([], True)
             )
             errored_any = errored_any or fallback_errored
+            bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
 
         # The strict conjunction found nothing usable -- either no hits at all,
@@ -555,7 +584,36 @@ class BrazilMoHEngine:
                 "relaxed", self._fetch_records(composed_relaxed, count), ([], True)
             )
             errored_any = errored_any or relaxed_errored
+            bvs_errored = bvs_errored or relaxed_errored
             records = relaxed_records
+
+        # Every BVS HTTP stage errored (the CDN shield 403s every request) and
+        # the PCDT engine alone cannot cover the non-conventional index. One
+        # rendered browser fetch carries the fingerprint the shield accepts;
+        # success clears errored_any so the merged result is cached.
+        if (
+            not records
+            and bvs_errored
+            and tokens
+            and self.settings.enable_browser_fallback
+            and self.settings.brazil_browser_fallback
+        ):
+            docs = await self._camoufox_search(
+                all_composed, count, ceiling=self._browser_ceiling(chain_start)
+            )
+            if docs:
+                browser_records = [
+                    r
+                    for r in (_build_record(d) for d in _dedupe_by_id(docs))
+                    if _is_brazilian(r)
+                ]
+                # Only a non-empty Brazilian slice counts as the shield being
+                # beaten. Docs that all fail the Brazil assertion leave us
+                # exactly where the 403s did, and clearing the flag here would
+                # cache an empty list under the 30-day TTL.
+                if browser_records:
+                    records = browser_records
+                    errored_any = False
 
         if not records and errored_any:
             if pcdt_records:
@@ -586,6 +644,69 @@ class BrazilMoHEngine:
                 source="brazil_moh",
             )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
+
+    def _browser_ceiling(self, chain_start: float) -> float:
+        """Ceiling for the browser tier: the flat per-tier cap, shrunk to the
+        chain budget still left when the browser tier starts. The whole chain
+        (PCDT + every BVS stage + browser) is what the caller's hard timeout
+        bounds, so a flat 30 s browser cap after five stalled 10 s stages
+        would outlast a 60 s caller ceiling. ``brazil_chain_timeout_s <= 0``
+        disables the chain bound and leaves the flat cap.
+        """
+        ceiling = float(self.settings.brazil_browser_timeout_s)
+        chain_budget = float(
+            getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0
+        )
+        if chain_budget > 0:
+            remaining = chain_budget - (time.monotonic() - chain_start)
+            ceiling = min(ceiling, max(remaining, 0.0))
+        return ceiling
+
+    async def _camoufox_search(
+        self, composed: str, count: int, ceiling: float
+    ) -> list[dict[str, Any]]:
+        """Last-resort rendered fetch of the BVS JSON search payload.
+
+        ``pesquisa.bvsalud.org`` 403s plain HTTP clients behind a Bunny CDN
+        shield, and the HTTP layer retries that 403 like a 429 until the retry
+        budget exhausts, so every stage ends as ``([], True)``. A real browser
+        carries the fingerprint the shield accepts. Returns raw Solr-style doc
+        dicts so ``_dedupe_by_id``/``_build_record``/``_is_brazilian`` apply
+        unchanged. Any failure or timeout returns ``[]``.
+
+        ``ceiling`` is mandatory: the caller passes the chain budget left
+        (see ``_browser_ceiling``), never the flat cap alone.
+        """
+        try:
+            from camoufox.async_api import AsyncCamoufox
+        except ImportError:
+            logger.warning("camoufox unavailable; BVS browser fallback disabled")
+            return []
+
+        target = (
+            f"{BVS_SEARCH_URL}?q={urllib.parse.quote(composed)}"
+            f"&output=json&count={count}"
+        )
+
+        async def _run() -> list[dict[str, Any]]:
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                await page.goto(
+                    target, wait_until="domcontentloaded", timeout=_CAMOUFOX_NAV_TIMEOUT_MS
+                )
+                content = await page.content()
+            # A JSON payload rendered in a browser arrives wrapped in
+            # <html><body><pre>...</pre></body></html>; tag-stripping must
+            # leave a bare JSON body untouched.
+            text = BeautifulSoup(content, "html.parser").get_text()
+            data = json.loads(text)
+            return _extract_docs(data)
+
+        try:
+            return await asyncio.wait_for(_run(), timeout=ceiling)
+        except Exception:
+            logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
+            return []
 
     async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
         """Resolve one record by its Solr id. Returns (record, errored)."""

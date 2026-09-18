@@ -120,6 +120,114 @@ async def test_returns_none_after_exhausting_retries():
 
 
 @respx.mock
+async def test_last_failure_records_http_status():
+    respx.get("https://example.org/forbidden").mock(return_value=httpx.Response(403))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/forbidden") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "http"
+        assert failure.status == 403
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_quiet_status():
+    respx.get("https://example.org/missing").mock(return_value=httpx.Response(404))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get(
+            "https://example.org/missing", quiet_statuses={404}
+        ) is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "http"
+        assert failure.status == 404
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_transport_error():
+    respx.get("https://example.org/unreachable").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/unreachable") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "transport"
+        assert failure.status is None
+        assert failure.detail == "ConnectError"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_records_unexpected_exception():
+    respx.get("https://example.org/broken").mock(side_effect=ValueError("bad"))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/broken") is None
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "exception"
+        assert failure.status is None
+        assert failure.detail == "ValueError"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_cleared_on_success():
+    respx.get("https://example.org/flaky").mock(return_value=httpx.Response(500))
+    respx.get("https://example.org/recovered").mock(
+        return_value=httpx.Response(200, text="ok")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), max_retries=2, backoff_base=0.01)
+    try:
+        assert await client.get("https://example.org/flaky") is None
+        assert client.last_failure is not None
+        assert client.last_failure.kind == "http"
+        assert client.last_failure.status == 500
+
+        resp = await client.get("https://example.org/recovered")
+        assert resp is not None
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_last_failure_isolated_between_concurrent_tasks():
+    respx.get("https://example.org/forbidden").mock(return_value=httpx.Response(403))
+    respx.get("https://example.org/fine").mock(return_value=httpx.Response(200, text="ok"))
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    seen: dict[str, object] = {}
+
+    async def _failing() -> None:
+        await client.get("https://example.org/forbidden")
+        seen["failing"] = client.last_failure
+
+    async def _ok() -> None:
+        await client.get("https://example.org/fine")
+        seen["ok"] = client.last_failure
+
+    try:
+        await asyncio.gather(_failing(), _ok())
+        failure = seen["failing"]
+        assert failure is not None and failure.kind == "http" and failure.status == 403
+        assert seen["ok"] is None
+        # The caller's own context never saw either child's failure.
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
 async def test_ncbi_requests_are_rate_limited(monkeypatch):
     """Without an API key the NCBI host bucket must be safe 2.8 rps, not unlimited."""
     respx.get(url__regex=r"https://eutils\.ncbi\.nlm\.nih\.gov/.*").mock(

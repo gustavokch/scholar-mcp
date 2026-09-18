@@ -8,7 +8,6 @@ from scholar_mcp.models import (
     DownloadResult,
     FullTextResponse,
     FullTextSummary,
-    PaperMetadata,
 )
 from scholar_mcp.resolver import WaterfallResolver
 from scholar_mcp.utils.cache import TTLCache
@@ -35,7 +34,7 @@ from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.medical.rxnorm import RxNormClient
 from scholar_mcp.medical.who import WHOClient
 from scholar_mcp.medical.who_iris import MAX_RESULTS, WHOIRISEngine
-from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 settings = Settings.load()
 http_client = AsyncHttpClient(settings)
@@ -75,7 +74,7 @@ async def search_papers(
     year_end: int | None = None,
     author: str | None = None,
     journal: str | None = None,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Search for academic papers across PubMed and CrossRef with smart re-ranking.
 
     Args:
@@ -87,6 +86,14 @@ async def search_papers(
         year_end: Filter papers published in or before this year.
         author: Filter by author name.
         journal: Filter by journal name.
+
+    Returns:
+        Envelope: {"papers": [...], "sources": {...}, "degraded": bool}.
+        ``sources`` maps each backend to one SourceStatus ("ok", "empty",
+        "blocked", "failed", "disabled") and is a snapshot copy. ``degraded``
+        is True when any backend reported "blocked" or "failed". On a total
+        failure the envelope is {"papers": [], "sources": {}, "degraded": True,
+        "status": "error", "error": str}.
     """
     clamped_num = min(max(1, num_results), 50)
     try:
@@ -100,9 +107,38 @@ async def search_papers(
             author=author,
             journal=journal,
         )
-        return [r.to_dict() for r in results]
+        payload = [r.to_dict() for r in results]
+        sources = getattr(resolver, "last_search_sources", None)
+        if not isinstance(sources, dict):
+            sources = {}
+        # dict(...) copy is mandatory: the resolver's map is a live
+        # ContextScoped attribute — embedding it would let a later request
+        # mutate what this call returned.
+        snapshot = dict(sources)
+        return {
+            "papers": payload[:clamped_num],
+            "sources": snapshot,
+            "degraded": any(v in ("blocked", "failed") for v in snapshot.values()),
+        }
     except Exception as ex:
-        return [{"status": "error", "error": str(ex)}]
+        return {
+            "papers": [],
+            "sources": {},
+            "degraded": True,
+            "status": "error",
+            "error": str(ex),
+        }
+
+
+def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, Any]:
+    """Add the machine-readable degraded flag when the engine flagged an error.
+
+    The format_* functions already surface FETCH_ERROR_NOTE in the markdown;
+    this adds the key zimqa and other machine consumers read directly.
+    """
+    if meta.error:
+        payload["degraded"] = True
+    return payload
 
 
 
@@ -371,7 +407,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, limit), 50)
         try:
             drugs, meta = await fda_client.search_drugs(query, clamped)
-            return format_drug_search_results(drugs, query, meta)
+            return _with_degraded(format_drug_search_results(drugs, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "fda"}
 
@@ -386,7 +422,7 @@ if settings.enable_medical_tools:
             drug, meta = await fda_client.get_drug_by_ndc(ndc)
             if drug is None:
                 return {"status": "not_found", "ndc": ndc}
-            return format_drug_details(drug, ndc, meta)
+            return _with_degraded(format_drug_details(drug, ndc, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "fda"}
 
@@ -401,7 +437,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, limit), 50)
         try:
             drugs, meta = await fda_client.search_pediatric_drugs(query, clamped)
-            return format_drug_search_results(drugs, query, meta)
+            return _with_degraded(format_drug_search_results(drugs, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "fda"}
 
@@ -414,7 +450,7 @@ if settings.enable_medical_tools:
         """
         try:
             drugs, meta = await rxnorm_client.search_drug_nomenclature(query)
-            return format_rxnorm_drugs(drugs, query, meta)
+            return _with_degraded(format_rxnorm_drugs(drugs, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "rxnorm"}
 
@@ -434,7 +470,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, limit), 20)
         try:
             records, meta = await who_client.get_health_statistics(indicator, country=country, limit=clamped)
-            return format_health_indicators(records, indicator, meta)
+            return _with_degraded(format_health_indicators(records, indicator, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "who"}
 
@@ -454,7 +490,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, limit), 20)
         try:
             records, meta = await who_client.get_child_health_statistics(indicator, country=country, limit=clamped)
-            return format_health_indicators(records, indicator, meta)
+            return _with_degraded(format_health_indicators(records, indicator, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "who"}
 
@@ -471,7 +507,7 @@ if settings.enable_medical_tools:
         """
         try:
             guidelines, meta = await guidelines_engine.search_clinical_guidelines(query, organization=organization)
-            return format_guidelines(guidelines, query, meta)
+            return _with_degraded(format_guidelines(guidelines, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "guidelines"}
 
@@ -493,7 +529,7 @@ if settings.enable_medical_tools:
                 guidelines, meta = await pediatrics_engine.search_aap_policy(query)
             else:
                 guidelines, meta = await pediatrics_engine.search_aap_guidelines(query)
-            return format_pediatric_guidelines(guidelines, query, meta)
+            return _with_degraded(format_pediatric_guidelines(guidelines, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
 
@@ -506,7 +542,7 @@ if settings.enable_medical_tools:
         """
         try:
             guidelines, meta = await pediatrics_engine.search_aap_guidelines(query)
-            return format_pediatric_guidelines(guidelines, query, meta)
+            return _with_degraded(format_pediatric_guidelines(guidelines, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
 
@@ -524,7 +560,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, max_results), 20)
         try:
             articles, meta = await pediatrics_engine.search_pediatric_literature(query, max_results=clamped)
-            return format_medical_articles(articles, query, meta)
+            return _with_degraded(format_medical_articles(articles, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "pediatrics"}
 
@@ -545,7 +581,7 @@ if settings.enable_medical_tools:
         clamped = min(max(1, limit), MAX_RESULTS)
         try:
             guidelines, meta = await who_iris_engine.search_guidelines(query, limit=clamped, mode=mode)
-            return format_who_iris_guidelines(guidelines, query, meta)
+            return _with_degraded(format_who_iris_guidelines(guidelines, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "who-iris"}
 
@@ -603,7 +639,7 @@ if settings.enable_medical_tools:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
                 query, limit=limit, collection=norm_collection
             )
-            return format_brazil_moh_guidelines(guidelines, query, meta)
+            return _with_degraded(format_brazil_moh_guidelines(guidelines, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "brazil-moh"}
 
@@ -642,7 +678,7 @@ if settings.enable_medical_tools:
         """
         try:
             articles, meta = await databases_engine.search_medical_databases(query)
-            return format_medical_articles(articles, query, meta)
+            return _with_degraded(format_medical_articles(articles, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "databases"}
 
@@ -655,7 +691,7 @@ if settings.enable_medical_tools:
         """
         try:
             articles, meta = await databases_engine.search_medical_journals(query)
-            return format_medical_articles(articles, query, meta)
+            return _with_degraded(format_medical_articles(articles, query, meta), meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "databases"}
 

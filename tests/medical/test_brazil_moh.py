@@ -1,4 +1,14 @@
+import dataclasses
+import json
+from unittest.mock import AsyncMock
+
+import httpx
+import respx
+
+from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
+    BVS_SEARCH_URL,
+    BrazilMoHEngine,
     _as_list,
     _derive_fulltext_id,
     _first,
@@ -6,6 +16,8 @@ from scholar_mcp.medical.brazil_moh import (
     _parse_issued,
 )
 from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 def test_first_returns_first_list_element():
@@ -377,7 +389,12 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 async def _engine(tmp_path: Path):
-    settings = Settings.load()
+    # The browser tier is pinned off here: it is not what these tests exercise,
+    # and left on it launches a REAL camoufox against the live BVS host as soon
+    # as every HTTP stage errors — which silently turns an assertion about an
+    # empty result into an assertion about today's network. The dedicated
+    # camoufox tests enable it explicitly and install a fake.
+    settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
@@ -589,6 +606,9 @@ async def test_search_clamps_limit_inside_engine(tmp_path: Path):
 @respx.mock
 async def test_search_network_failure_is_error_and_not_cached(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
+    # Keep the browser tier out: this test asserts the pure-HTTP failure path,
+    # and a real camoufox launch would leave the respx mock and hit the network.
+    engine.settings.enable_browser_fallback = False
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=httpx.ConnectError("reset by peer")
@@ -1432,6 +1452,9 @@ async def _slow_response(request: httpx.Request) -> httpx.Response:
 async def test_search_stage_timeout_returns_error_instead_of_hanging(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_stage_timeout_s = 0.05
+    # This test exercises stage stalls, not the browser tier: a real camoufox
+    # launch would exceed the elapsed bound below.
+    engine.settings.enable_browser_fallback = False
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
         # No PCDT seed match for this query, so a stage stall must surface as
@@ -1624,6 +1647,9 @@ async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
     do not keep looping through relaxations; degrade gracefully."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
+    # Browser tier off: the respx mock cannot intercept camoufox, and this
+    # test asserts the pure-HTTP degradation chain.
+    engine.settings.enable_browser_fallback = False
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
@@ -1665,6 +1691,282 @@ async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
         assert 'db:"BRISA"' in q2
         assert "ti:dengue AND ti:manejo" in q2
         assert "ti:intratavel" not in q2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def _install_fake_camoufox(monkeypatch, rendered_html=""):
+    """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
+
+    Copied from tests/medical/test_pediatrics.py — no conftest exists to
+    share it through. ``rendered_html`` is what page.content() returns.
+    """
+    import asyncio
+    import sys
+    import types
+
+    attempts: list[bool] = []
+    captured_urls: list[str] = []
+    exits: list[bool] = []
+    sleeps: list[int] = []
+
+    class _FakePage:
+        def __init__(self):
+            self.url = ""
+
+        async def goto(self, url, *a, **k):
+            captured_urls.append(url)
+            self.url = url
+            return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            sleeps.append(ms)
+            return None
+
+        async def content(self):
+            return rendered_html
+
+    class _FakeBrowser:
+        async def new_page(self, *a, **k):
+            return _FakePage()
+
+    class _FakeCamoufoxContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _FakeBrowser()
+
+        async def __aexit__(self, *exc):
+            exits.append(True)
+            return False
+
+    def _fake_async_camoufox(**launch_options):
+        return _FakeCamoufoxContext()
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = _fake_async_camoufox
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    return attempts, captured_urls, exits, sleeps
+
+
+async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
+    tmp_path, monkeypatch
+):
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    # Fast retry ladder: the BVS 403 is retried as a bot-shield 429, and the
+    # default backoff would add real seconds per stage.
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "1", "ti": "Manejo da dengue",
+                         "pais_publicacao": "^eBrasil", "da": "202401",
+                         "ur": ["https://bvsms.saude.gov.br/x.pdf"]},
+                        {"id": "2", "ti": "Dengue en Peru",
+                         "pais_publicacao": "^ePeru", "da": "202401",
+                         "ur": ["https://example.org/y.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, json.dumps(payload)
+    )
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert [r.title for r in records] == ["Manejo da dengue"]
+        assert meta.error is False
+        assert attempts == [True]  # one browser launch
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, monkeypatch):
+    """The browser tier answers BVS failures (CDN 403s), not a PCDT outage.
+    A PCDT error with a healthy BVS that legitimately returned zero records
+    must not launch a real browser."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=True))),
+    )
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch)
+    empty_payload = {"diaServerResponse": [{"response": {"docs": []}}]}
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(
+                return_value=httpx.Response(200, json=empty_payload)
+            )
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert attempts == []  # BVS was healthy; no browser launch
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
+    """Worst case must stay inside the documented 60 s caller ceiling: a
+    browser tier on a flat 30 s ceiling after five stalled 10 s stages is
+    ~90 s. The browser gets only the chain budget that is still left."""
+    import time as _time
+
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+        brazil_stage_timeout_s=0.05,
+        brazil_chain_timeout_s=0.5,
+        brazil_browser_timeout_s=30.0,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    attempts: list[bool] = []
+
+    class _SlowPage:
+        url = ""
+
+        async def goto(self, url, *a, **k):
+            return None
+
+        async def wait_for_selector(self, selector, timeout=None):
+            return None
+
+        async def wait_for_timeout(self, ms):
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(5.0)  # far past any remaining chain budget
+            return None
+
+        async def content(self):
+            return ""
+
+    class _SlowBrowser:
+        async def new_page(self, *a, **k):
+            return _SlowPage()
+
+    class _SlowContext:
+        async def __aenter__(self):
+            attempts.append(True)
+            return _SlowBrowser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    import sys as _sys
+    import types as _types
+
+    api_mod = _types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _SlowContext()
+    camoufox_mod = _types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(_sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", api_mod)
+
+    try:
+        with respx.mock:
+            # BVS shield 403s every stage, so the browser tier is attempted...
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            start = _time.monotonic()
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+            elapsed = _time.monotonic() - start
+        # ...but only with the chain budget left: ~0.5 s ceiling, not 30 s.
+        assert attempts == [True]
+        assert elapsed < 2.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch):
+    """The browser tier returned docs, but _is_brazilian dropped every one.
+
+    That is not a success: every HTTP stage still 403'd, so the error flag must
+    survive and nothing may be written under the 30-day TTL.
+    """
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "2", "ti": "Dengue en Peru",
+                         "pais_publicacao": "^ePeru", "da": "202401",
+                         "ur": ["https://example.org/y.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert records == []
+        assert meta.error is True
+        # Nothing cached: a second call must not be served a cached empty list.
+        from scholar_mcp.medical.brazil_moh import _build_query
+
+        composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
+        _cached, cached_meta = await cache.get(f"brazil_moh_search:all:10:{composed}")
+        assert not cached_meta.cached
     finally:
         await cache.close()
         await http_client.aclose()

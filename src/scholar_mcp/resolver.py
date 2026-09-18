@@ -15,6 +15,7 @@ from scholar_mcp.models import (
     PaperMetadata,
     ReferenceItem,
     RelatedPaper,
+    SourceStatus,
 )
 
 from scholar_mcp.parsers.jats import list_sections, select_sections
@@ -29,12 +30,19 @@ from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
 from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
 from scholar_mcp.utils.cache import TTLCache
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.ctxstate import ContextScoped
+from scholar_mcp.utils.http import AsyncHttpClient, FetchFailure
 from scholar_mcp.utils.text import truncate_content as _truncate_content
 
 
 class WaterfallResolver:
     """Multi-tier waterfall resolver for academic paper discovery and full-text retrieval."""
+
+    # Per-backend status from the current request's search(), one SourceStatus
+    # per backend. Context-scoped, not a plain attribute: server.py holds one
+    # resolver for the whole process, so two concurrent MCP calls would
+    # otherwise overwrite each other's map between the write and the read.
+    last_search_sources: dict[str, SourceStatus] = ContextScoped(dict)
 
     def __init__(
         self,
@@ -74,6 +82,13 @@ class WaterfallResolver:
 
     async def fetch_abstract(self, ids: IdentifierMap) -> PaperMetadata | None:
         meta = await self.pubmed.fetch_abstract(ids)
+        if (not meta or not meta.abstract) and ids.pmid:
+            epmc_meta = await self.europe_pmc.fetch_metadata(ids)
+            if epmc_meta is not None:
+                if meta is None:
+                    meta = epmc_meta
+                elif not meta.abstract and epmc_meta.abstract:
+                    meta.abstract = epmc_meta.abstract
         if (not meta or not meta.abstract) and ids.doi:
             meta = await self.crossref.fetch_metadata(ids.doi)
         if (not meta or not meta.abstract) and ids.arxiv:
@@ -195,10 +210,12 @@ class WaterfallResolver:
             return None
 
         winning_resp: FullTextResponse | None = None
+        budget = float(self.settings.total_budget_seconds)
+        waterfall_start = time.monotonic()
         try:
             winning_resp = await asyncio.wait_for(
                 _execute_waterfall(),
-                timeout=float(self.settings.total_budget_seconds),
+                timeout=budget,
             )
         except asyncio.TimeoutError:
             # Mark remaining in-flight tier as timeout
@@ -207,6 +224,21 @@ class WaterfallResolver:
                 attempts.append(FetchAttempt(tier=in_flight_tier, outcome="timeout", reason="Total budget exceeded"))
 
         if winning_resp is not None:
+            # Producers like scihub/pmc/arxiv/unpaywall omit title; backfill it
+            # from the metadata chain. The backfill runs after the waterfall, so
+            # its ceiling comes out of what the waterfall left of the same
+            # budget — capped at 5 s, skipped entirely when nothing remains.
+            remaining = budget - (time.monotonic() - waterfall_start)
+            if not winning_resp.title and remaining > 0:
+                try:
+                    meta = await asyncio.wait_for(
+                        self.fetch_abstract(ids), timeout=min(5.0, remaining)
+                    )
+                except Exception:
+                    meta = None
+                if meta and meta.title:
+                    winning_resp.title = meta.title
+
             content = winning_resp.content
             if sections:
                 content = select_sections(content, sections)
@@ -361,6 +393,34 @@ class WaterfallResolver:
                 message=f"Failed to write file: {ex}",
             )
 
+    async def _run_backend(self, name: str, provider: Any, coro: Any) -> list[PaperMetadata]:
+        """Run one backend search and record its degradation status.
+
+        Genuine empty results are "empty", not "failed" — a narrow query with
+        zero hits is a valid answer, and crying wolf would flag every such
+        query. Blocked is decided from the http client's typed FetchFailure,
+        not by substring-sniffing the provider's free-form last_error string.
+        """
+        try:
+            papers = await coro
+        except Exception:
+            self.last_search_sources[name] = "failed"
+            return []
+        err = getattr(provider, "last_error", None)
+        client = getattr(provider, "http_client", None)
+        fail = getattr(client, "last_failure", None) if client is not None else None
+        if not isinstance(fail, FetchFailure):
+            fail = None
+        if papers:
+            self.last_search_sources[name] = "ok"
+        elif fail is not None and fail.kind == "http" and fail.status in (403, 429):
+            self.last_search_sources[name] = "blocked"
+        elif fail is not None or err:
+            self.last_search_sources[name] = "failed"
+        else:
+            self.last_search_sources[name] = "empty"
+        return papers
+
     async def search(
         self,
         query: str,
@@ -374,6 +434,7 @@ class WaterfallResolver:
     ) -> list[PaperMetadata]:
         limit = min(num_results, 50)
         source_mode = source.lower().strip()
+        self.last_search_sources = {}
 
         # Compute candidate pool depth if reranking is enabled
         should_rerank = rerank and self.settings.ranking_enabled
@@ -390,56 +451,77 @@ class WaterfallResolver:
             fetch_limit = limit
 
         if source_mode == "pubmed":
-            papers = await self.pubmed.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-                sort="relevance",
-            )
-        elif source_mode == "crossref":
-            papers = await self.crossref.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-            )
-        elif source_mode in ("s2", "semanticscholar"):
-            if not self.settings.enable_s2:
-                return []
-            papers = await self.s2.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-            )
-        else:  # auto
-            # 1. Query PubMed for fetch_limit
-            papers = await self.pubmed.search(
-                query,
-                num_results=fetch_limit,
-                author=author,
-                journal=journal,
-                year_start=year_start,
-                year_end=year_end,
-                sort="relevance",
-            )
-            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
-            if len(papers) < fetch_limit:
-                needed = fetch_limit - len(papers)
-                crossref_papers = await self.crossref.search(
+            papers = await self._run_backend(
+                "pubmed",
+                self.pubmed,
+                self.pubmed.search(
                     query,
-                    num_results=needed * 2,
+                    num_results=fetch_limit,
                     author=author,
                     journal=journal,
                     year_start=year_start,
                     year_end=year_end,
+                    sort="relevance",
+                ),
+            )
+        elif source_mode == "crossref":
+            papers = await self._run_backend(
+                "crossref",
+                self.crossref,
+                self.crossref.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                ),
+            )
+        elif source_mode in ("s2", "semanticscholar"):
+            if not self.settings.enable_s2:
+                self.last_search_sources["s2"] = "disabled"
+                return []
+            papers = await self._run_backend(
+                "s2",
+                self.s2,
+                self.s2.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                ),
+            )
+        else:  # auto
+            # 1. Query PubMed for fetch_limit
+            papers = await self._run_backend(
+                "pubmed",
+                self.pubmed,
+                self.pubmed.search(
+                    query,
+                    num_results=fetch_limit,
+                    author=author,
+                    journal=journal,
+                    year_start=year_start,
+                    year_end=year_end,
+                    sort="relevance",
+                ),
+            )
+            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
+            if len(papers) < fetch_limit:
+                needed = fetch_limit - len(papers)
+                crossref_papers = await self._run_backend(
+                    "crossref",
+                    self.crossref,
+                    self.crossref.search(
+                        query,
+                        num_results=needed * 2,
+                        author=author,
+                        journal=journal,
+                        year_start=year_start,
+                        year_end=year_end,
+                    ),
                 )
                 # Deduplicate: PubMed records win on conflict
                 seen_dois = {p.doi.lower() for p in papers if p.doi}

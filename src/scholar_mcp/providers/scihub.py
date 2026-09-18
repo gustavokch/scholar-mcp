@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
@@ -12,6 +13,11 @@ from scholar_mcp.utils.http import AsyncHttpClient
 
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
+
+# Ceiling on a mirror's failure count. The count only orders the mirror list, so
+# anything above "worse than every healthy mirror" buys nothing and just delays
+# a recovered mirror's climb back to the head.
+MAX_MIRROR_PENALTY = 5
 
 # Statuses that mean "this host looked at the Referer and said no". Anything else
 # (transport error, timeout, 5xx, 429, other 4xx) is a failed request, not a
@@ -89,6 +95,10 @@ class SciHubProvider(BaseProvider):
         super().__init__(http_client)
         self.settings = settings or Settings.load()
         self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
+        # Failure memory: a mirror that fails gets +1; iteration order is a
+        # stable sort on penalties, so known-bad mirrors sink to the tail
+        # while zero-penalty mirrors keep config order. Success pops the entry.
+        self._mirror_penalties: dict[str, int] = {}
 
     async def _get_pdf_bytes(
         self, pdf_url: str, referer: str | None, *, allow_bare_retry: bool = True
@@ -191,23 +201,51 @@ class SciHubProvider(BaseProvider):
             return None, None
 
         clean_doi = ids.doi.strip()
-        for mirror in self.mirrors:
+
+        async def _try_mirror(mirror: str) -> tuple[bytes, str] | None:
             mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
+            resp = await self.http_client.get(mirror_url)
+            if resp is None or resp.status_code != 200 or not resp.text:
+                return None
+
+            final_page_url = _landing_url(str(resp.url), mirror_url)
+            pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
+            if not pdf_url:
+                return None
+
+            pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
+            if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
+                return pdf_bytes, pdf_url
+            return None
+
+        ordered = sorted(self.mirrors, key=lambda m: self._mirror_penalties.get(m, 0))
+        # The tier as a whole is bounded, not only each mirror: 7 mirrors x
+        # the per-mirror ceiling would outlast the 45 s waterfall budget.
+        # Once the tier deadline passes, no new mirror is started.
+        tier_budget = float(
+            getattr(self.settings, "scihub_tier_timeout_s", 0.0) or 0.0
+        )
+        tier_start = time.monotonic()
+        for mirror in ordered:
+            if tier_budget > 0 and time.monotonic() - tier_start >= tier_budget:
+                break
             try:
-                resp = await self.http_client.get(mirror_url)
-                if resp is None or resp.status_code != 200 or not resp.text:
-                    continue
-
-                final_page_url = _landing_url(str(resp.url), mirror_url)
-                pdf_url = _extract_pdf_url(resp.text, base_url=final_page_url)
-                if not pdf_url:
-                    continue
-
-                pdf_bytes = await self._get_pdf_bytes(pdf_url, final_page_url)
-                if pdf_bytes and pdf_bytes.startswith(b"%PDF-"):
-                    return pdf_bytes, pdf_url
+                result = await asyncio.wait_for(
+                    _try_mirror(mirror), timeout=self.settings.scihub_mirror_timeout_s
+                )
             except Exception:
-                continue
+                # asyncio.TimeoutError included: this is ordering metadata, not
+                # an error channel, so every failure mode demotes the mirror.
+                result = None
+            if result is not None:
+                self._mirror_penalties.pop(mirror, None)
+                return result
+            # Capped: the penalty only has to order the list, and an uncapped
+            # counter in a long-lived server climbs forever while a mirror that
+            # comes back still has to claw its way down from that count.
+            self._mirror_penalties[mirror] = min(
+                self._mirror_penalties.get(mirror, 0) + 1, MAX_MIRROR_PENALTY
+            )
 
         if self.settings.enable_browser_fallback:
             camoufox_bytes, camoufox_url = await self._fetch_via_camoufox(clean_doi)
