@@ -6,12 +6,14 @@ import random
 import re
 import threading
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from scholar_mcp.config import Settings
+from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,23 @@ BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 # misconfigured host can park a request -- and, via limiter.throttle, every
 # other request to that host -- for hours.
 MAX_RETRY_AFTER = 60.0
+
+
+@dataclass(frozen=True)
+class FetchFailure:
+    """Typed record of why ``AsyncHttpClient.get`` returned ``None``.
+
+    ``kind`` discriminates the terminal failure: an HTTP status (``"http"``),
+    a transport/timeout error after retries (``"transport"``), or any other
+    unexpected exception (``"exception"``). ``status`` carries the HTTP status
+    for ``"http"`` failures only; ``detail`` is the reason phrase or the
+    exception class name. Consumers map this to vocabulary like
+    "blocked"/"failed" instead of sniffing free-form strings.
+    """
+
+    kind: Literal["transport", "http", "exception"]
+    status: int | None
+    detail: str
 
 
 def _host_key(host: str | None) -> str:
@@ -182,6 +201,11 @@ class AsyncHttpClient:
     # credentials, which is not a deployment shape we ship.
     _limiters: dict[str, AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
+
+    # Typed record of the most recent terminal failure, per requesting task.
+    # ContextScoped: the client is a shared singleton, so a plain attribute
+    # would leak one request's failure into every concurrent call.
+    last_failure: ContextScoped[FetchFailure | None] = ContextScoped(lambda: None)
 
     def __init__(
         self,
@@ -372,8 +396,12 @@ class AsyncHttpClient:
                 if ok_statuses and resp.status_code in ok_statuses:
                     if resp.status_code >= 400:
                         _log_expected_status(log_url, resp)
+                    self.last_failure = None
                     return resp
                 if resp.status_code >= 400:
+                    self.last_failure = FetchFailure(
+                        "http", resp.status_code, resp.reason_phrase or ""
+                    )
                     if quiet_statuses and resp.status_code in quiet_statuses:
                         _log_expected_status(log_url, resp)
                         return None
@@ -384,6 +412,7 @@ class AsyncHttpClient:
                         _sanitize_error_body(resp.content, resp.headers.get("content-type", "")),
                     )
                     return None
+                self.last_failure = None
                 return resp
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 if attempt < self.max_retries - 1:
@@ -401,6 +430,7 @@ class AsyncHttpClient:
                     )
                     await asyncio.sleep(wait_time)
                     continue
+                self.last_failure = FetchFailure("transport", None, type(exc).__name__)
                 logger.warning(
                     "HTTP GET %s failed after %d attempts: %s",
                     log_url,
@@ -409,6 +439,7 @@ class AsyncHttpClient:
                 )
                 return None
             except Exception as exc:
+                self.last_failure = FetchFailure("exception", None, type(exc).__name__)
                 logger.warning(
                     "HTTP GET %s raised unexpected exception: %s",
                     log_url,
