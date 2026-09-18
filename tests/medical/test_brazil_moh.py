@@ -2081,6 +2081,7 @@ async def test_shield_verdict_is_not_engine_state(tmp_path):
 
 
 async def test_is_bvs_shielded_reads_the_state_it_is_given(tmp_path):
+    AsyncHttpClient.reset_limiters()
     engine, cache, http_client = await _engine(tmp_path)
     try:
         assert engine._is_bvs_shielded(_SearchState(bvs_shielded=True)) is True
@@ -2088,6 +2089,7 @@ async def test_is_bvs_shielded_reads_the_state_it_is_given(tmp_path):
     finally:
         await cache.close()
         await http_client.aclose()
+        AsyncHttpClient.reset_limiters()
 
 
 async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
@@ -2103,6 +2105,3 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
-
-
-
