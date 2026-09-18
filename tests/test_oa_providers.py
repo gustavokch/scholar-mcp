@@ -11,12 +11,21 @@ from scholar_mcp.utils.http import AsyncHttpClient
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+OAI = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
 UNPAYWALL = "https://api.unpaywall.org/v2"
 
 PMC_XML = (
     b"<article><front><article-meta><title-group>"
     b"<article-title>Test</article-title></title-group></article-meta></front>"
     b"<body><sec><title>Results</title><p>Content body.</p></sec></body></article>"
+)
+
+# What PMC OAI-PMH GetRecord actually returns: the JATS article nested in the
+# OAI-PMH/GetRecord/record/metadata wrapper, with the OAI default namespace.
+OAI_WRAPPED = (
+    b'<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"><GetRecord><record><metadata>'
+    + PMC_XML
+    + b"</metadata></record></GetRecord></OAI-PMH>"
 )
 
 
@@ -67,6 +76,40 @@ async def test_europe_pmc_provider_hit(client):
     )
     assert res is not None and res.source == "europepmc"
     assert "Content body." in res.content
+
+
+@respx.mock
+async def test_europe_pmc_falls_back_to_pmc_oai_on_fulltextxml_404(client):
+    """The run-9 PMC11390030 case: fullTextXML 404s but the OA XML is still
+    reachable through PMC OAI-PMH, nested in the GetRecord wrapper."""
+    respx.get(url__regex=rf"{EPMC}/PMC11390030/fullTextXML").mock(
+        return_value=httpx.Response(404)
+    )
+    oai_route = respx.get(url__startswith=OAI).mock(
+        return_value=httpx.Response(200, content=OAI_WRAPPED)
+    )
+    res = await EuropePMCProvider(client).fetch_full_text(
+        IdentifierMap(pmcid="PMC11390030", doi="10.1/x")
+    )
+    assert res is not None and res.source == "pmc-oai"
+    assert "Content body." in res.content
+    params = oai_route.calls.last.request.url.params
+    assert params["verb"] == "GetRecord"
+    assert params["identifier"] == "oai:pubmedcentral.nih.gov:11390030"
+    assert params["metadataPrefix"] == "pmc"
+
+
+@respx.mock
+async def test_europe_pmc_oai_failure_falls_through(client):
+    """Both XML routes miss: no full text, and the waterfall gets a reasoned
+    skip instead of an empty-reason miss."""
+    respx.get(url__regex=rf"{EPMC}/PMC1/fullTextXML").mock(
+        return_value=httpx.Response(404)
+    )
+    respx.get(url__startswith=OAI).mock(return_value=httpx.Response(404))
+    provider = EuropePMCProvider(client)
+    assert await provider.fetch_full_text(IdentifierMap(pmcid="PMC1")) is None
+    assert provider.last_skip_reason == "EUROPEPMC_FULLTEXT_UNAVAILABLE"
 
 
 @respx.mock
