@@ -47,6 +47,26 @@ async def test_falls_through_to_unpaywall():
     assert (await r.resolve_full_text("10.1038/xyz")).source == "unpaywall"
 
 
+async def test_unpaywall_tier_consulted_when_oa_url_is_null():
+    """§5 Investigate 2 regression: search-derived identifiers carry no OA URL.
+
+    Root cause, documented not changed: nothing in the resolve path populates
+    oa_url before the waterfall — only the S2 search mapping and the OpenAlex
+    branch of fetch_abstract ever set it (resolver.py:108-109). The waterfall
+    must therefore not depend on oa_url: the Unpaywall tier consults Unpaywall
+    by DOI on its own, and it must still run — and win — for a DOI-only
+    identifier.
+    """
+    r = make_resolver(Settings())
+    r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz"))
+    r.unpaywall.fetch_full_text.return_value = hit("unpaywall")
+    res = await r.resolve_full_text("10.1038/xyz")
+    assert res.source == "unpaywall"
+    attempts = [a for a in res.attempts if a.tier == "unpaywall"]
+    assert len(attempts) == 1
+    assert attempts[0].outcome == "hit"
+
+
 async def test_prefer_scihub_skips_unpaywall():
     r = make_resolver(Settings(prefer_scihub_over_unpaywall=True, enable_scihub=True))
     r.unpaywall.fetch_full_text.return_value = hit("unpaywall")
