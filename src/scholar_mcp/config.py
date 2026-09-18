@@ -71,17 +71,19 @@ class Settings:
     cache_ttl_clinical_trials: int = 86400
     cache_ttl_who_iris: int = 2592000
     cache_ttl_brazil_moh: int = 2592000
-    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to five BVS stages
-    # run sequentially, and callers wrap the whole chain in their own hard
+    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to six BVS stages
+    # (title-scoped, three title relaxations, all-field, OR-relaxed) run
+    # sequentially, and callers wrap the whole chain in their own hard
     # timeout. Twenty seconds per stage keeps one stalled stage from eating the
     # share of the ceiling the remaining stages need.
     brazil_stage_timeout_s: float = 20.0
-    # Whole-chain ceiling for BrazilMoHEngine. Real arithmetic: every stage
-    # (PCDT + each BVS variant) burns at most brazil_stage_timeout_s, and the
-    # browser tier gets min(brazil_browser_timeout_s, chain time still left),
-    # so PCDT + stages + browser can never outlast this bound. 90 s covers the
-    # worst case of three 20 s stages plus the ~25 s camoufox tier (startup
-    # plus Bunny CDN challenge) with headroom. <= 0 disables the bound.
+    # Whole-chain ceiling for BrazilMoHEngine. Only the browser tier enforces
+    # it directly -- it gets min(brazil_browser_timeout_s, chain time still
+    # left) (BrazilMoHEngine._browser_ceiling). The HTTP stages each get a
+    # flat brazil_stage_timeout_s, so PCDT plus up to six 20 s BVS stages can
+    # overrun this bound; the caller's hard timeout is what cancels that.
+    # 90 s covers the shielded fast-fail path (PCDT + one BVS stage + the
+    # ~25 s camoufox tier) with headroom. <= 0 disables the bound.
     brazil_chain_timeout_s: float = 90.0
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
