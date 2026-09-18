@@ -522,7 +522,14 @@ class BrazilMoHEngine:
         bvs_errored = False
 
         count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
-        all_composed: str | None = None
+        # The all-field query is built once and shared by the all-field
+        # fallback stage and the browser tier, which need the identical
+        # composition. Both consumers only run when `tokens` is non-empty.
+        all_composed: str | None = (
+            _build_query(query, norm_collection, operator="AND", title_scoped=False)
+            if tokens
+            else None
+        )
         records, errored = await self._stage(
             "title-scoped", self._fetch_records(title_composed, count), ([], True)
         )
@@ -560,9 +567,6 @@ class BrazilMoHEngine:
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one.
         if not records and tokens and not title_relaxed_errored:
-            all_composed = all_composed or _build_query(
-                query, norm_collection, operator="AND", title_scoped=False
-            )
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count), ([], True)
             )
@@ -594,9 +598,6 @@ class BrazilMoHEngine:
             and self.settings.enable_browser_fallback
             and self.settings.brazil_browser_fallback
         ):
-            all_composed = all_composed or _build_query(
-                query, norm_collection, operator="AND", title_scoped=False
-            )
             docs = await self._camoufox_search(
                 all_composed, count, ceiling=self._browser_ceiling(chain_start)
             )
@@ -662,7 +663,7 @@ class BrazilMoHEngine:
         return ceiling
 
     async def _camoufox_search(
-        self, composed: str, count: int, ceiling: float | None = None
+        self, composed: str, count: int, ceiling: float
     ) -> list[dict[str, Any]]:
         """Last-resort rendered fetch of the BVS JSON search payload.
 
@@ -673,11 +674,9 @@ class BrazilMoHEngine:
         dicts so ``_dedupe_by_id``/``_build_record``/``_is_brazilian`` apply
         unchanged. Any failure or timeout returns ``[]``.
 
-        ``ceiling`` overrides the flat ``brazil_browser_timeout_s`` cap; the
-        caller passes the chain budget left (see ``_browser_ceiling``).
+        ``ceiling`` is mandatory: the caller passes the chain budget left
+        (see ``_browser_ceiling``), never the flat cap alone.
         """
-        if ceiling is None:
-            ceiling = float(self.settings.brazil_browser_timeout_s)
         try:
             from camoufox.async_api import AsyncCamoufox
         except ImportError:
