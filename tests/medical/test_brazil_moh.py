@@ -9,6 +9,7 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
     BrazilMoHEngine,
+    _SearchState,
     _as_list,
     _derive_fulltext_id,
     _first,
@@ -2067,5 +2068,41 @@ async def test_search_bvs_shielded_403_fast_fails_to_browser_fallback(tmp_path, 
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_shield_verdict_is_not_engine_state(tmp_path):
+    """The engine is a shared singleton; a per-search verdict must not live on it."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        assert not hasattr(engine, "_bvs_shielded")
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_is_bvs_shielded_reads_the_state_it_is_given(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        assert engine._is_bvs_shielded(_SearchState(bvs_shielded=True)) is True
+        assert engine._is_bvs_shielded(_SearchState()) is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
+    AsyncHttpClient.reset_limiters()
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        state = _SearchState()
+        assert engine._is_bvs_shielded(state) is False
+
+        http_client._limiter_for("pesquisa.bvsalud.org").throttle(5.0)
+        assert engine._is_bvs_shielded(state) is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+        AsyncHttpClient.reset_limiters()
+
 
 

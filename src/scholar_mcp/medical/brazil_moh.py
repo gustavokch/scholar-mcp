@@ -43,6 +43,7 @@ import logging
 import re
 import time
 import urllib.parse
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from bs4 import BeautifulSoup
@@ -60,7 +61,8 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 from scholar_mcp.utils.text import truncate_content
 
-BVS_SEARCH_URL = "https://pesquisa.bvsalud.org/portal/"
+_BVS_HOST = "pesquisa.bvsalud.org"
+BVS_SEARCH_URL = f"https://{_BVS_HOST}/portal/"
 
 # The repo default User-Agent receives HTTP 403 from this host.
 BVS_HEADERS = {
@@ -103,6 +105,22 @@ _BVS_CHALLENGE_MARKERS = (
     "challenge-platform",
     "just a moment",
 )
+
+
+@dataclass
+class _SearchState:
+    """Mutable state for one ``search_guidelines`` call.
+
+    The engine is a shared singleton (src/scholar_mcp/server.py), so state
+    that must not bleed across concurrent searches lives here, never on
+    ``self``. ``bvs_shielded`` carries the CDN-shield 403 verdict out of
+    ``_fetch_records`` — the client's ``last_failure`` is a per-task
+    ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
+    read it afterwards (the write happened in the child task).
+    """
+
+    bvs_shielded: bool = False
+
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
@@ -422,22 +440,18 @@ class BrazilMoHEngine:
         self.cache = cache
         self.settings = settings
         self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
-        # Set inside _fetch_records, which runs in the same task as the HTTP
-        # call: the client's last_failure is a per-task ContextScoped var, so a
-        # stage running under asyncio.wait_for cannot read it afterwards (the
-        # write happened in the child task). The flag carries the shield
-        # verdict across that boundary. Reset at each search_guidelines start.
-        self._bvs_shielded = False
 
     async def _fetch_records(
         self,
         composed: str,
         count: int,
+        state: _SearchState,
     ) -> tuple[list[BrazilGuideline], bool]:
         """One BVS search request, parsed, deduplicated and Brazil-filtered.
 
         Returns ``(records, errored)``. Extracted so the strict and relaxed
-        stages cannot drift apart in how they parse or filter.
+        stages cannot drift apart in how they parse or filter. A shield 403
+        verdict is recorded on ``state`` for ``_is_bvs_shielded``.
         """
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
@@ -451,7 +465,7 @@ class BrazilMoHEngine:
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
             if failure is not None and failure.status == 403:
-                self._bvs_shielded = True
+                state.bvs_shielded = True
             return [], True
 
         try:
@@ -463,18 +477,10 @@ class BrazilMoHEngine:
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
         return [record for record in records if _is_brazilian(record)], False
 
-    def _is_bvs_shielded(self) -> bool:
-        if self._bvs_shielded:
+    def _is_bvs_shielded(self, state: _SearchState) -> bool:
+        if state.bvs_shielded:
             return True
-        failure = getattr(self.http_client, "last_failure", None)
-        if failure is not None and failure.status == 403:
-            return True
-        limiters = getattr(self.http_client, "_limiters", None)
-        if limiters and isinstance(limiters, dict):
-            limiter = limiters.get("pesquisa.bvsalud.org")
-            if limiter is not None and getattr(limiter, "throttled_until", 0.0) > time.monotonic():
-                return True
-        return False
+        return self.http_client.is_throttled(_BVS_HOST)
 
     async def _stage(self, stage: str, coro: Any, default: Any) -> Any:
         """Run one retrieval stage under its own time budget.
@@ -541,7 +547,7 @@ class BrazilMoHEngine:
         # the whole chain, not each stage, is what the caller's ceiling
         # bounds).
         chain_start = time.monotonic()
-        self._bvs_shielded = False
+        state = _SearchState()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
         pcdt_records, pcdt_meta = await self._stage(
             "pcdt",
@@ -564,7 +570,7 @@ class BrazilMoHEngine:
             else None
         )
         records, errored = await self._stage(
-            "title-scoped", self._fetch_records(title_composed, count), ([], True)
+            "title-scoped", self._fetch_records(title_composed, count, state), ([], True)
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -584,7 +590,7 @@ class BrazilMoHEngine:
 
                 relaxed_title_records, relaxed_title_errored = await self._stage(
                     "title-scoped-relaxed",
-                    self._fetch_records(relaxed_title_composed, count),
+                    self._fetch_records(relaxed_title_composed, count, state),
                     ([], True),
                 )
                 errored_any = errored_any or relaxed_title_errored
@@ -601,15 +607,15 @@ class BrazilMoHEngine:
         # query says nothing about the relaxed one. When BVS is shielded by
         # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
         # or timeout; skip them to preserve budget for browser fallback.
-        bvs_shielded = self._is_bvs_shielded()
+        bvs_shielded = self._is_bvs_shielded(state)
         if not records and tokens and not title_relaxed_errored and not bvs_shielded:
             fallback_records, fallback_errored = await self._stage(
-                "all-field", self._fetch_records(all_composed, count), ([], True)
+                "all-field", self._fetch_records(all_composed, count, state), ([], True)
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
-            bvs_shielded = bvs_shielded or self._is_bvs_shielded()
+            bvs_shielded = bvs_shielded or self._is_bvs_shielded(state)
 
         # The strict conjunction found nothing usable -- either no hits at all,
         # or only records the Brazil assertion dropped. Retry the same tokens
@@ -618,7 +624,7 @@ class BrazilMoHEngine:
         if not records and len(tokens) >= 2 and not title_relaxed_errored and not bvs_shielded:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
-                "relaxed", self._fetch_records(composed_relaxed, count), ([], True)
+                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True)
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored
