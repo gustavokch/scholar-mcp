@@ -2143,3 +2143,37 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
+
+
+@respx.mock
+async def test_monography_noise_does_not_displace_the_matching_guideline(
+    tmp_path: Path,
+):
+    # The widened BASE_FILTER admits monographs. BVS returns them ahead of
+    # the guideline in relevance order; rank_brazil_guidelines must still
+    # lift the title that actually matches the query.
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        noise = _bvs_doc(
+            record_id="mono-noise",
+            title="Dengue: aspectos históricos da doença no Brasil",
+        )
+        target = _bvs_doc(
+            record_id="biblio-target",
+            title="Dengue: classificação de risco e manejo do paciente",
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([noise, target])
+            )
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue classificação risco manejo", limit=2
+        )
+        assert meta.error is False
+        assert records[0].record_id == "biblio-target"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
