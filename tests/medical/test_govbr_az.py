@@ -59,6 +59,13 @@ def test_build_alias_text_empty_when_no_match():
     assert build_alias_text("Boletim epidemiológico", {"dengue": "Dengue"}) == ""
 
 
+def test_build_alias_text_word_boundary():
+    # "dtha" shouldn't match within "widthas"
+    aliases = {"dtha": "doencas de transmissao hidrica e alimentar"}
+    assert build_alias_text("widthas title", aliases) == ""
+    assert "doencas de transmissao hidrica e alimentar" in build_alias_text("manual de dtha no brasil", aliases)
+
+
 from unittest.mock import AsyncMock
 
 import pytest
