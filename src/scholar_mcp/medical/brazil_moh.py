@@ -115,6 +115,20 @@ _BVS_CHALLENGE_MARKERS = (
     "just a moment",
 )
 
+# The Bunny CDN challenge is upstream of the origin; once it passes, a sick origin
+# answers with its own Portuguese error page ("Erro 504 - Gateway Timeout"). That is
+# an outage, not a block, and mislabelling it sends the next debugging session at the
+# wrong layer.
+_BVS_OUTAGE_MARKERS = (
+    "erro 502",
+    "erro 503",
+    "erro 504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+)
+
+
 
 @dataclass
 class _SearchState:
@@ -814,20 +828,21 @@ class BrazilMoHEngine:
                     target, wait_until="domcontentloaded", timeout=_CAMOUFOX_NAV_TIMEOUT_MS
                 )
                 content = await page.content()
-            # A JSON payload rendered in a browser arrives wrapped in
-            # <html><body><pre>...</pre></body></html>; tag-stripping must
-            # leave a bare JSON body untouched.
-            lowered = content.lower()
-            if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
-                logger.info("brazil_moh: BVS browser fallback received challenge or block page")
-                return []
             soup = BeautifulSoup(content, "html.parser")
             pre = soup.find("pre")
             text = pre.get_text() if pre else soup.get_text()
             try:
                 data = json.loads(text)
             except (json.JSONDecodeError, ValueError):
-                logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
+                # Only an unparseable payload can be a shield or an error page; a
+                # marker phrase inside a parsed record is just record text.
+                lowered = content.lower()
+                if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
+                    logger.info("brazil_moh: BVS browser fallback received challenge or block page")
+                elif any(marker in lowered for marker in _BVS_OUTAGE_MARKERS):
+                    logger.info("brazil_moh: BVS origin returned an error page")
+                else:
+                    logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
                 return []
             return _extract_docs(data)
 

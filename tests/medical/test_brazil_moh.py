@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import httpx
@@ -2064,6 +2065,59 @@ async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monkeypatch, caplog):
+    """A 504 from the BVS origin is an outage, not a CDN block; the log must say so."""
+    engine, cache, http_client = await _engine(tmp_path)
+    _install_fake_camoufox(
+        monkeypatch,
+        "<html><head><title>Erro 504 — Gateway Timeout</title></head>"
+        "<body><h1>Erro 504 — Gateway Timeout</h1></body></html>",
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
+            docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
+        assert docs == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("origin returned an error page" in m for m in messages)
+        assert not any("challenge or block page" in m for m in messages)
+        assert not any("non-JSON payload" in m for m in messages)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_path, monkeypatch):
+    """Marker text inside a record must not be read as a block page."""
+    engine, cache, http_client = await _engine(tmp_path)
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "1",
+                            "ti": "Just a moment: protocolo de triagem",
+                            "ab": "Gateway timeout no sistema de regulacao.",
+                            "pais_publicacao": "^eBrasil",
+                            "da": "202401",
+                            "ur": ["https://bvsms.saude.gov.br/x.pdf"],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    try:
+        docs = await engine._camoufox_search("triagem", count=10, ceiling=5.0)
+        assert [d["id"] for d in docs] == ["1"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 
 
 @respx.mock
