@@ -2177,3 +2177,27 @@ async def test_monography_noise_does_not_displace_the_matching_guideline(
         await cache.close()
         await http_client.aclose()
 
+
+@respx.mock
+async def test_or_title_stage_after_a_stalled_strict_stage(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                _slow_response,  # strict title stalls
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue manejo", limit=5)
+        composed = [c.request.url.params["q"] for c in route.calls]
+        or_title = [q for q in composed if "ti:dengue OR" in q]
+        # Assert the chosen behaviour: `assert not or_title` if the stage is
+        # gated on the strict error, `assert or_title` if it is not.
+        assert not or_title, composed
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+

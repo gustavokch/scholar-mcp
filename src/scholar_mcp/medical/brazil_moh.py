@@ -615,9 +615,12 @@ class BrazilMoHEngine:
         # ranker to lift. It runs before the all-field fallback because a
         # title match is a stronger signal than an abstract match, and it is
         # skipped for a single token, where it would compose identically to
-        # the strict stage and waste a request.
+        # the strict stage and waste a request. It is also skipped if the
+        # strict title stage errored (stalled/failed) to avoid paying an extra
+        # stage budget against a misbehaving endpoint.
         if (
             not records
+            and not errored
             and len(tokens) >= 2
             and not title_relaxed_errored
             and not self._is_bvs_shielded(state)
