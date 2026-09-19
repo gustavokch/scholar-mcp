@@ -389,8 +389,18 @@ class AsyncHttpClient:
                 shielded_403 = (
                     resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
                 )
+                # NCBI E-utilities returns HTTP 400 for internal viewer timeouts:
+                # 'Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout'
+                # Retry these transient backend timeouts instead of failing fatal on 400.
+                ncbi_viewer_timeout = (
+                    resp.status_code == 400
+                    and host_key == "ncbi.nlm.nih.gov"
+                    and b"External viewer error" in resp.content
+                )
                 if (
-                    resp.status_code in RETRYABLE_STATUS_CODES or shielded_403
+                    resp.status_code in RETRYABLE_STATUS_CODES
+                    or shielded_403
+                    or ncbi_viewer_timeout
                 ) and attempt < self.max_retries - 1:
                     retry_after = _parse_retry_after(resp)
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(

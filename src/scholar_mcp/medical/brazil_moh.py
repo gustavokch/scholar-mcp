@@ -113,6 +113,8 @@ _BVS_CHALLENGE_MARKERS = (
     "block.html",
     "challenge-platform",
     "just a moment",
+    "gateway timeout",
+    "erro 504",
 )
 
 

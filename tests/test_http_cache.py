@@ -774,3 +774,42 @@ async def test_pmc_article_download_does_not_receive_credentials():
         assert "api_key" not in record
     finally:
         await client.aclose()
+
+
+@respx.mock
+async def test_ncbi_external_viewer_error_400_retried():
+    """NCBI efetch 400 with 'External viewer error' is a transient backend timeout and must be retried."""
+    ncbi_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    route = respx.get(url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*").mock(
+        side_effect=[
+            httpx.Response(
+                400,
+                text="Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout",
+            ),
+            httpx.Response(200, text="<PubmedArticleSet><PubmedArticle/></PubmedArticleSet>"),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get(ncbi_url, params={"db": "pubmed", "id": "41778748", "retmode": "xml"})
+        assert resp is not None
+        assert resp.status_code == 200
+        assert route.call_count == 2
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_generic_400_is_not_retried():
+    """Generic 400 errors must remain fatal and not retry."""
+    route = respx.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi").mock(
+        return_value=httpx.Response(400, text="Bad Request: invalid parameter")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi")
+        assert resp is None
+        assert route.call_count == 1
+    finally:
+        await client.aclose()
+
