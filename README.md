@@ -234,7 +234,7 @@ pip install 'scholar-mcp[medical]'
 | `search_pediatric_literature` | PubMed | Targeted search across 7 premier pediatric medical journals. |
 | `search_who_iris_guidelines` | WHO IRIS | Search the WHO Institutional Repository for Information Sharing (DSpace JSON API) in title-prefix or full-text mode. |
 | `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
-| `search_brazil_moh_guidelines` | BVS / iAHx | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS. |
+| `search_brazil_moh_guidelines` | BVS / iAHx & gov.br | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS, PCDT guidelines, and "Saúde de A a Z" surveillance manuals from SVSA and guias-e-manuais publication trees. Supported `collection` options: `all` (default), `brisa`, `pcdt`, and `az`. |
 | `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
 | `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |

@@ -624,15 +624,18 @@ if settings.enable_medical_tools:
             query: Free-text search terms. Portuguese terms match best;
                 every token is required (they are ANDed).
             limit: Maximum number of results to return (max 50).
-            collection: 'all' (default, all Brazilian grey literature) or
-                'brisa' (health-technology assessments and PCDT only).
+            collection: 'all' (default, all Brazilian grey literature),
+                'brisa' (health-technology assessments and PCDT only),
+                'pcdt' (PCDT clinical protocols from gov.br), or
+                'az' (gov.br SVSA and guias-e-manuais publications,
+                including the Dengue and Tuberculosis surveillance manuals).
         """
         # The engine clamps limit; no server-side clamp.
         norm_collection = (collection or "all").strip().lower()
         if norm_collection not in BRAZIL_VALID_COLLECTIONS:
             return {
                 "status": "error",
-                "error": f"unknown collection {collection!r}; expected 'all', 'brisa', or 'pcdt'",
+                "error": f"unknown collection {collection!r}; expected 'all', 'brisa', 'pcdt', or 'az'",
                 "source": "brazil-moh",
             }
         try:

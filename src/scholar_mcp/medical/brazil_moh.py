@@ -49,6 +49,7 @@ from typing import Any, Literal
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.govbr_az import GovBrAZEngine
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
 from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.medical.ranking import (
@@ -124,7 +125,13 @@ class _SearchState:
 
 BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
 BRISA_FILTER = 'db:"BRISA"'
-VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt"})
+VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
+
+# How long a merged result is held when BVS answered cleanly but a local
+# gov.br scraper failed. Short enough that the missing rows reappear soon
+# after the scraper recovers, long enough that a burst of queries does not
+# re-run the whole BVS chain each time.
+DEGRADED_RESULT_TTL_SECONDS = 300
 
 BRAZIL_COUNTRY = "Brasil"
 
@@ -440,6 +447,7 @@ class BrazilMoHEngine:
         self.cache = cache
         self.settings = settings
         self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
+        self.az_engine = GovBrAZEngine(http_client, cache, settings)
 
     async def _fetch_records(
         self,
@@ -521,6 +529,9 @@ class BrazilMoHEngine:
         if norm_collection == "pcdt":
             return await self.pcdt_engine.search(query, limit=clamped)
 
+        if norm_collection == "az":
+            return await self.az_engine.search(query, limit=clamped)
+
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
         # filters alone would return arbitrary top-of-index documents dressed
@@ -549,12 +560,11 @@ class BrazilMoHEngine:
         chain_start = time.monotonic()
         state = _SearchState()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
-        pcdt_records, pcdt_meta = await self._stage(
-            "pcdt",
-            self.pcdt_engine.search(query, limit=clamped),
-            ([], stage_error_meta),
+        (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
+            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta)),
+            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta)),
         )
-        errored_any = pcdt_meta.error
+        errored_any = pcdt_meta.error or az_meta.error
         # The browser tier answers BVS failures (the CDN shield 403s plain
         # HTTP clients); a PCDT outage with a healthy BVS must not launch a
         # real browser. Track BVS errors on their own flag.
@@ -658,15 +668,27 @@ class BrazilMoHEngine:
                     records = browser_records
                     errored_any = False
 
+        local_records: list[BrazilGuideline] = []
+        seen_local: set[str] = set()
+        for r in pcdt_records + az_records:
+            if r.record_id and r.record_id in seen_local:
+                continue
+            if r.record_id:
+                seen_local.add(r.record_id)
+            local_records.append(r)
+
         if not records and errored_any:
-            if pcdt_records:
-                return pcdt_records, pcdt_meta
+            if local_records:
+                return rank_brazil_guidelines(local_records, query)[:clamped], CacheMetadata(
+                    cached=False, cache_age=0, error=False
+                )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
-        # Merge PCDT records (first) and BVS records, deduplicating by record_id
-        seen_ids: set[str] = set()
-        merged_records: list[BrazilGuideline] = []
-        for r in pcdt_records + records:
+        # Merge local gov.br records (first) and BVS records, deduplicating
+        # by record_id.
+        seen_ids: set[str] = set(seen_local)
+        merged_records: list[BrazilGuideline] = list(local_records)
+        for r in records:
             if r.record_id and r.record_id in seen_ids:
                 continue
             if r.record_id:
@@ -685,6 +707,18 @@ class BrazilMoHEngine:
                 cache_key,
                 [record.to_dict() for record in records],
                 source="brazil_moh",
+            )
+        elif not bvs_errored:
+            # BVS answered cleanly and only a local gov.br scraper failed, so
+            # the merge is complete except for that scraper's rows. Pinning it
+            # for the full TTL would freeze the gap, but re-running the entire
+            # BVS chain on every call for as long as the scraper is down is
+            # its own cost. Hold the degraded merge briefly instead.
+            await self.cache.set(
+                cache_key,
+                [record.to_dict() for record in records],
+                source="brazil_moh",
+                ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
 
@@ -857,9 +891,10 @@ class BrazilMoHEngine:
         if meta.cached and cached_data is not None:
             return self._serve_full_text(cached_data, max_chars), meta
 
-        pcdt_record = await self.pcdt_engine.get_guideline(normalized)
-        if pcdt_record is not None:
-            record = pcdt_record
+        record = await self.pcdt_engine.get_guideline(normalized)
+        if record is None:
+            record = await self.az_engine.get_guideline(normalized)
+        if record is not None:
             errored = False
         else:
             record, errored = await self._lookup_record(normalized)
