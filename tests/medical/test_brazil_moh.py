@@ -237,8 +237,6 @@ def test_build_query_or_operator_leaves_base_filters_anded():
 
 
 def test_build_query_defaults_to_and():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     assert _build_query("manejo dengue", "all") == _build_query(
         "manejo dengue", "all", operator="AND"
     )
@@ -1080,7 +1078,6 @@ def test_build_query_keeps_the_type_alternation_grouped():
     assert composed.endswith("(dengue)")
 
 
-
 @respx.mock
 async def test_search_returns_empty_for_query_with_no_usable_tokens(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
@@ -1469,13 +1466,10 @@ async def test_search_falls_back_to_or_title_before_all_field(tmp_path: Path):
         assert or_title, composed_queries
         # The stage runs after the AND ladder and before the all-field
         # fallback, so no unscoped query is issued once it succeeds.
-        assert not any(
-            q.startswith('la:"pt"') and "ti:" not in q for q in composed_queries
-        ), composed_queries
+        assert not any("ti:" not in q for q in composed_queries), composed_queries
     finally:
         await cache.close()
         await http_client.aclose()
-
 
 
 async def _slow_response(request: httpx.Request) -> httpx.Response:
@@ -1568,8 +1562,6 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
 
 
 def test_build_query_accepts_token_override():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     composed = _build_query(
         "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
     )
@@ -2001,8 +1993,6 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         assert records == []
         assert meta.error is True
         # Nothing cached: a second call must not be served a cached empty list.
-        from scholar_mcp.medical.brazil_moh import _build_query
-
         composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
         _cached, cached_meta = await cache.get(f"brazil_moh_search:all:10:{composed}")
         assert not cached_meta.cached
