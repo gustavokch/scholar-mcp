@@ -50,6 +50,12 @@ CATALOG_CACHE_KEY = "govbr_az:catalog"
 # pagination loop pointing back into itself.
 MAX_PAGES_PER_FOLDER = 25
 
+# A refreshed crawl that returns less than this fraction of the catalog
+# already in hand is treated as a parser break, not as a smaller site, and
+# is never pinned for the 7-day TTL. scripts/update_govbr_az_catalog.py
+# applies the same idea with an absolute floor for the bundled seed.
+MIN_CATALOG_RETENTION = 0.5
+
 _TREES = (("svsa", SVSA_URL, SVSA_PATH), ("guias", GUIAS_URL, GUIAS_PATH))
 
 
@@ -238,8 +244,15 @@ class GovBrAZEngine:
 
         return rows, ok
 
-    async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
-        """Crawl both publication trees from gov.br."""
+    async def refresh_catalog(
+        self, incumbent: dict[str, dict[str, Any]] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Crawl both publication trees from gov.br.
+
+        ``incumbent`` is the catalog already in hand, if any. It is used only
+        as a size reference: a crawl that returns a fraction of it is a
+        parser break rather than a smaller site, and must not be pinned.
+        """
         aliases = await self._load_aliases()
         catalog: dict[str, dict[str, Any]] = {}
         folders_total = 0
@@ -263,13 +276,30 @@ class GovBrAZEngine:
         # the 7-day TTL would serve an incomplete catalog for a week while
         # gov.br is flaky. Partial results are returned for this call but
         # leave the cached and in-memory catalogs untouched.
-        if catalog and folders_total > 0 and folders_ok == folders_total:
+        #
+        # Folder-level success is not enough on its own: a DOM change makes
+        # every folder answer 200 while the listing parser matches nothing,
+        # which would otherwise pin a near-empty catalog over a good one.
+        size_floor = int(len(incumbent or {}) * MIN_CATALOG_RETENTION)
+        if (
+            catalog
+            and len(catalog) >= size_floor
+            and folders_total > 0
+            and folders_ok == folders_total
+        ):
             self._memory_catalog = catalog
             await self.cache.set(
                 CATALOG_CACHE_KEY,
                 catalog,
                 source="govbr_az",
                 ttl=SEVEN_DAYS_SECONDS,
+            )
+        elif catalog and len(catalog) < size_floor:
+            logger.warning(
+                "gov.br A-Z crawl returned %d rows against %d already held; "
+                "not caching (suspected parser break)",
+                len(catalog),
+                len(incumbent or {}),
             )
         return catalog
 
@@ -284,7 +314,7 @@ class GovBrAZEngine:
                 self._memory_catalog = cached_data
                 return self._memory_catalog
             try:
-                refreshed = await self.refresh_catalog()
+                refreshed = await self.refresh_catalog(incumbent=cached_data)
                 if refreshed:
                     # refresh_catalog only writes the cache for a complete
                     # crawl. A partial crawl must still be memoized here, or
