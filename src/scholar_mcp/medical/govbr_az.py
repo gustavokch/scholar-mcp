@@ -275,6 +275,11 @@ class GovBrAZEngine:
             try:
                 refreshed = await self.refresh_catalog()
                 if refreshed:
+                    # refresh_catalog only writes the cache for a complete
+                    # crawl. A partial crawl must still be memoized here, or
+                    # every subsequent search re-crawls both publication trees
+                    # for as long as gov.br is degraded.
+                    self._memory_catalog = refreshed
                     return refreshed
             except Exception as exc:
                 logger.warning("Failed to refresh gov.br A-Z catalog: %s", exc)
@@ -295,6 +300,10 @@ class GovBrAZEngine:
         try:
             crawled = await self.refresh_catalog()
             if crawled:
+                # Same reasoning as the stale-cache path: memoize even a
+                # partial crawl so a degraded gov.br is not re-crawled once
+                # per search.
+                self._memory_catalog = crawled
                 return crawled
         except Exception as exc:
             logger.warning("Failed initial crawl of gov.br A-Z catalog: %s", exc)
