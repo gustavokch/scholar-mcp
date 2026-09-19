@@ -113,9 +113,21 @@ _BVS_CHALLENGE_MARKERS = (
     "block.html",
     "challenge-platform",
     "just a moment",
-    "gateway timeout",
-    "erro 504",
 )
+
+# The Bunny CDN challenge is upstream of the origin; once it passes, a sick origin
+# answers with its own Portuguese error page ("Erro 504 - Gateway Timeout"). That is
+# an outage, not a block, and mislabelling it sends the next debugging session at the
+# wrong layer.
+_BVS_OUTAGE_MARKERS = (
+    "erro 502",
+    "erro 503",
+    "erro 504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+)
+
 
 
 @dataclass
@@ -822,6 +834,9 @@ class BrazilMoHEngine:
             lowered = content.lower()
             if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
                 logger.info("brazil_moh: BVS browser fallback received challenge or block page")
+                return []
+            if any(marker in lowered for marker in _BVS_OUTAGE_MARKERS):
+                logger.info("brazil_moh: BVS origin returned an error page")
                 return []
             soup = BeautifulSoup(content, "html.parser")
             pre = soup.find("pre")
