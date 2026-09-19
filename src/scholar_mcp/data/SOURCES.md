@@ -32,3 +32,23 @@ use for redistribution of derived data on their site.
 
 Lookup tries ISSN first, falls back to normalized journal name, then `None`
 (neutral) if neither matches.
+
+# govbr_az_catalog.json
+
+Catalog index for Brazilian Ministry of Health "Saúde de A a Z" surveillance
+manuals and guides.
+
+**Sources:**
+- `https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa`
+- `https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais`
+- Topic abbreviations/aliases harvested from `https://www.gov.br/saude/pt-br/assuntos/saude-de-a-a-z`
+
+**Generation Date:** 2026-09-18
+
+**Regeneration command:**
+```bash
+python scripts/update_govbr_az_catalog.py
+```
+This crawls both publication trees, resolves pagination, attaches A-Z aliases,
+and writes the resulting dictionary to `src/scholar_mcp/data/govbr_az_catalog.json`.
+
