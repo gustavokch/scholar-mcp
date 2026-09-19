@@ -6,6 +6,7 @@ https://www.gov.br/saude/pt-br/assuntos/pcdt/[a-u]/[condition]
 """
 
 from collections.abc import Callable
+import functools
 import json
 import logging
 from pathlib import Path
@@ -47,6 +48,59 @@ def load_seed_catalog() -> dict[str, dict[str, Any]]:
     except Exception as exc:
         logger.warning("Failed to load PCDT seed catalog: %s", exc)
         return {}
+
+
+@functools.lru_cache(maxsize=1)
+def load_extended_catalog() -> dict[str, dict[str, Any]]:
+    """Load the bundled full-text MoH manuals corpus, normalized to PCDT shape.
+
+    Cached per process: the corpus is a bundled, immutable file, so every
+    ``get_catalog`` call reuses one parsed dict instead of re-reading disk.
+    """
+    ext_path = (
+        Path(__file__).resolve().parent.parent / "data" / "brazil_moh_extended_catalog.json"
+    )
+    if not ext_path.exists():
+        return {}
+    try:
+        with ext_path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load extended MoH catalog: %s", exc)
+        return {}
+    catalog: dict[str, dict[str, Any]] = {}
+    for record_id, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        file_path = row.get("file_path", "")
+        slug = (
+            Path(file_path).stem.replace("_", "-")
+            if file_path
+            else str(record_id).lower()
+        )
+        catalog[record_id] = {
+            "record_id": record_id,
+            "slug": slug,
+            "title": row.get("title", ""),
+            "description": row.get("description", ""),
+            "keywords": row.get("keywords", ""),
+            "source_url": row.get("source_url", ""),
+            "file_path": file_path,
+            "download_url": f"local:{file_path}",
+            "authors": row.get("authors", []),
+            "collections": row.get("collections", []),
+        }
+    return catalog
+
+
+def _merge_extended(base: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return a NEW dict of ``base`` plus the extended corpus rows.
+
+    The cached and in-memory catalogs stay base-only: the merged result is
+    never written back to either, so a crawl refresh cannot pin extended
+    rows into the 7-day SQLite TTL.
+    """
+    return {**base, **load_extended_catalog()}
 
 
 def parse_letter_page(
@@ -119,16 +173,23 @@ def parse_letter_page(
 
 def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) -> float:
     """Compute matching score between query and catalog item."""
+    extra = f"{item.get('description', '')} {item.get('keywords', '')}".strip()
     return score_item(
         query_tokens,
         query_norm,
         item.get("title", ""),
         item.get("slug", ""),
+        extra,
     )
 
 
 def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
-    """Convert catalog dictionary to BrazilGuideline dataclass."""
+    """Convert catalog dictionary to BrazilGuideline dataclass.
+
+    ``authors``/``collections`` pass through when the catalog row declares
+    them (extended corpus rows carry their real source); crawled and seed
+    rows default to the MS/CONITEC PCDT shape.
+    """
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
@@ -138,8 +199,8 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         abstract=item.get("description", ""),
         country="Brasil",
         languages=["pt"],
-        collections=["PCDT"],
-        authors=["Ministério da Saúde", "CONITEC"],
+        collections=item.get("collections") or ["PCDT"],
+        authors=item.get("authors") or ["Ministério da Saúde", "CONITEC"],
         score=score,
     )
 
@@ -161,26 +222,29 @@ class GovBrPCDTEngine:
     async def get_catalog(self) -> dict[str, dict[str, Any]]:
         """Get PCDT catalog from memory, cache, or seed fallback.
 
-        Refreshes catalog if cached entry is older than 7 days.
+        Refreshes catalog if cached entry is older than 7 days. Every path
+        returns a NEW merged dict (base plus the extended corpus); the
+        stored base object is never mutated and the merged result is never
+        written to the cache.
         """
         if self._memory_catalog:
-            return self._memory_catalog
+            return _merge_extended(self._memory_catalog)
 
         cache_key = "govbr_pcdt:catalog"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and isinstance(cached_data, dict) and cached_data:
             if meta.cache_age < SEVEN_DAYS_SECONDS:
                 self._memory_catalog = cached_data
-                return self._memory_catalog
+                return _merge_extended(cached_data)
             # Cache entry is older than 7 days. Try refresh.
             try:
                 refreshed = await self.refresh_catalog()
                 if refreshed:
-                    return refreshed
+                    return _merge_extended(refreshed)
             except Exception as exc:
                 logger.warning("Failed to refresh PCDT catalog: %s", exc)
             self._memory_catalog = cached_data
-            return self._memory_catalog
+            return _merge_extended(cached_data)
 
         # Not cached in SQLite. Use bundled seed catalog on cold start.
         seed = load_seed_catalog()
@@ -192,17 +256,17 @@ class GovBrPCDTEngine:
                 source="govbr_pcdt",
                 ttl=SEVEN_DAYS_SECONDS,
             )
-            return self._memory_catalog
+            return _merge_extended(seed)
 
         # If no seed, try online crawl.
         try:
             crawled = await self.refresh_catalog()
             if crawled:
-                return crawled
+                return _merge_extended(crawled)
         except Exception as exc:
             logger.warning("Failed initial crawl of PCDT catalog: %s", exc)
 
-        return {}
+        return _merge_extended({})
 
     async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
         """Crawl fresh catalog from gov.br portal."""

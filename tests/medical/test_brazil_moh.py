@@ -1057,6 +1057,7 @@ async def test_get_full_text_caps_cached_content_at_ceiling(tmp_path: Path, monk
         await engine.get_full_text("biblio-1")
         cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
         assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
+        assert cached["total_chars"] == MAX_FULL_TEXT_CHARS + 1000
     finally:
         await cache.close()
         await http_client.aclose()
