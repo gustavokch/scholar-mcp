@@ -187,3 +187,54 @@ async def test_cache_stores_capped_content_with_full_total_chars(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def _local_record(document_url: str):
+    from scholar_mcp.medical.models import BrazilGuideline
+
+    return BrazilGuideline(
+        title="Local", record_id="local-test", document_url=document_url
+    )
+
+
+def _local_base(document_url: str) -> dict:
+    return {
+        "source": "brazil-moh",
+        "record_id": "local-test",
+        "document_url": document_url,
+        "truncated": False,
+    }
+
+
+async def test_local_text_invalid_path_reports_not_found(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        payload, meta = await engine._serve_local_text(
+            "brazil_moh_fulltext:local-test",
+            _local_base("local:../../etc/passwd"),
+            _local_record("local:../../etc/passwd"),
+            None,
+        )
+        assert payload["status"] == "not_found"
+        assert payload["error"] == "invalid local corpus path"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_local_text_missing_file_reports_missing(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        payload, meta = await engine._serve_local_text(
+            "brazil_moh_fulltext:local-test",
+            _local_base("local:guidelines/nope.txt"),
+            _local_record("local:guidelines/nope.txt"),
+            None,
+        )
+        assert payload["status"] == "not_found"
+        assert payload["error"] == "local corpus file missing"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()

@@ -922,31 +922,27 @@ class BrazilMoHEngine:
         Task 1 ``total_chars``/ceiling/cache contract applies unchanged. No
         network, PDF parsing, or BVS lookup happens on this path.
         """
-        rel = (record.document_url or "")[len("local:"):]
-        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+
+        def _local_error(status: str, error_text: str) -> tuple[dict[str, Any], CacheMetadata]:
             return (
-                {**base, "status": "not_found", "error": "no record for id",
+                {**base, "status": status, "error": error_text,
                  "title": record.title, "content_type": "none", "content": ""},
                 CacheMetadata(cached=False, cache_age=0, error=False),
             )
+
+        rel = (record.document_url or "")[len("local:"):]
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            return _local_error("not_found", "invalid local corpus path")
         try:
             data_dir = (Path(__file__).resolve().parent.parent / "data").resolve()
             path = (data_dir / rel).resolve()
             path.relative_to(data_dir)
         except ValueError:
-            return (
-                {**base, "status": "not_found", "error": "no record for id",
-                 "title": record.title, "content_type": "none", "content": ""},
-                CacheMetadata(cached=False, cache_age=0, error=False),
-            )
+            return _local_error("not_found", "invalid local corpus path")
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return (
-                {**base, "status": "not_found", "error": "no record for id",
-                 "title": record.title, "content_type": "none", "content": ""},
-                CacheMetadata(cached=False, cache_age=0, error=False),
-            )
+            return _local_error("not_found", "local corpus file missing")
         except (UnicodeDecodeError, OSError) as exc:
             logger.warning("brazil_moh local text read failed (%s): %s", path, exc)
             return (
