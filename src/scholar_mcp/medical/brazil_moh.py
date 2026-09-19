@@ -584,9 +584,10 @@ class BrazilMoHEngine:
         # returns zero records without error, drop trailing tokens and retry.
         # Scenario queries frequently contain clinical descriptors ('grupo',
         # 'criterios', 'hidratacao') that do not appear in formal manual titles.
-        # An errored relaxation step halts the whole BVS chain: the endpoint is
-        # already misbehaving, so further variants likely fail the same way.
-        title_relaxed_errored = False
+        # An errored title stage halts the remaining BVS stages regardless of
+        # which title stage failed: the endpoint is already misbehaving, so
+        # further variants likely fail the same way.
+        title_chain_errored = False
         if not records and not errored and tokens:
             for relaxed_tokens in _title_token_relaxations(tokens):
                 relaxed_title_composed = _build_query(
@@ -601,7 +602,7 @@ class BrazilMoHEngine:
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
                 if relaxed_title_errored:
-                    title_relaxed_errored = True
+                    title_chain_errored = True
                     break
                 if relaxed_title_records:
                     records = relaxed_title_records
@@ -622,7 +623,7 @@ class BrazilMoHEngine:
             not records
             and not errored
             and len(tokens) >= 2
-            and not title_relaxed_errored
+            and not title_chain_errored
             and not self._is_bvs_shielded(state)
         ):
             or_title_composed = _build_query(
@@ -636,7 +637,7 @@ class BrazilMoHEngine:
             errored_any = errored_any or or_title_errored
             bvs_errored = bvs_errored or or_title_errored
             if or_title_errored:
-                title_relaxed_errored = True
+                title_chain_errored = True
             else:
                 records = or_title_records
 
@@ -646,7 +647,7 @@ class BrazilMoHEngine:
         # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
         # or timeout; skip them to preserve budget for browser fallback.
         bvs_shielded = self._is_bvs_shielded(state)
-        if not records and tokens and not title_relaxed_errored and not bvs_shielded:
+        if not records and tokens and not title_chain_errored and not bvs_shielded:
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count, state), ([], True)
             )
@@ -659,7 +660,7 @@ class BrazilMoHEngine:
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2 and not title_relaxed_errored and not bvs_shielded:
+        if not records and len(tokens) >= 2 and not title_chain_errored and not bvs_shielded:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
                 "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True)
