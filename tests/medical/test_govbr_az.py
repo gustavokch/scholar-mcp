@@ -450,3 +450,40 @@ async def test_refresh_catalog_pins_a_crawl_that_holds_its_size(tmp_path, respon
         assert meta.cached is True
     finally:
         await engine.cache.close()
+
+
+def test_compile_alias_patterns_is_reused_across_titles(monkeypatch):
+    """The alias vocabulary is compiled once per crawl, not once per title.
+
+    refresh_catalog scores hundreds of items against hundreds of aliases,
+    which overruns re's internal pattern cache and recompiles almost every
+    time when the patterns are built inline.
+    """
+    import scholar_mcp.medical.govbr_az as az
+
+    compiled: list[str] = []
+    original = az._alias_pattern
+    monkeypatch.setattr(
+        az, "_alias_pattern", lambda term: (compiled.append(term), original(term))[1]
+    )
+
+    patterns = az.compile_alias_patterns({"dengue": "Dengue", "dtha": "DTHA"})
+    after_compile = len(compiled)
+
+    for _ in range(50):
+        az.build_alias_text_compiled("Manual da Dengue", patterns)
+
+    assert len(compiled) == after_compile, "alias patterns recompiled per title"
+
+
+def test_build_alias_text_compiled_matches_the_uncompiled_helper():
+    aliases = {"dtha": "Doenças de Transmissão Hídrica e Alimentar", "dengue": "Dengue"}
+    title = "Doenças de Transmissão Hídrica e Alimentar"
+    from scholar_mcp.medical.govbr_az import (
+        build_alias_text_compiled,
+        compile_alias_patterns,
+    )
+
+    assert build_alias_text_compiled(
+        title, compile_alias_patterns(aliases)
+    ) == build_alias_text(title, aliases)
