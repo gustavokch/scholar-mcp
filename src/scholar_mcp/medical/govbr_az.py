@@ -338,6 +338,14 @@ class GovBrAZEngine:
             return [BrazilGuideline.from_dict(d) for d in cached_data], meta
 
         catalog = await self.get_catalog()
+        if not catalog:
+            # An empty catalog means the seed is missing and every crawl
+            # failed: an outage, not a zero-result search. Caching it would
+            # pin a false success for cache_ttl_brazil_moh and hide the
+            # failure from errored_any in brazil_moh.
+            logger.warning("gov.br A-Z catalog is empty; reporting search error")
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
         scored_items: list[tuple[float, dict[str, Any]]] = []
         for item in catalog.values():
             score = score_item(

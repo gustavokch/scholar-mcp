@@ -397,3 +397,23 @@ def test_build_alias_text_plural_does_not_reopen_false_positives():
     aliases = {"dtha": "doencas de transmissao hidrica e alimentar"}
     assert build_alias_text("widthas title", aliases) == ""
     assert build_alias_text("largura dthas nao", aliases) != ""
+
+
+async def test_search_reports_error_when_catalog_unavailable(tmp_path, responses):
+    """An empty catalog is an outage, not a zero-result search.
+
+    Caching it would pin a false success for cache_ttl_brazil_moh and hide
+    the failure from errored_any in brazil_moh.
+    """
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        engine.get_catalog = AsyncMock(return_value={})
+
+        results, meta = await engine.search("dengue", limit=5)
+
+        assert results == []
+        assert meta.error is True
+        _, cache_meta = await engine.cache.get("govbr_az_search:5:dengue")
+        assert cache_meta.cached is False
+    finally:
+        await engine.cache.close()
