@@ -25,7 +25,10 @@ from scholar_mcp.medical.govbr_common import (
     normalize_text,
     parse_folder_index,
     parse_listing_page,
+    score_item,
+    tokenize_portuguese,
 )
+from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -113,6 +116,28 @@ def build_alias_text(title: str, aliases: dict[str, str]) -> str:
             if disease_norm not in matched and disease_norm not in title_norm:
                 matched.append(disease_norm)
     return " ".join(matched)
+
+
+_COLLECTION_BY_TREE = {"svsa": "SVSA", "guias": "GUIAS-E-MANUAIS"}
+
+
+def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
+    """Convert a catalog row to a BrazilGuideline."""
+    collection = _COLLECTION_BY_TREE.get(item.get("tree", ""), "GOVBR")
+    return BrazilGuideline(
+        title=item.get("title", ""),
+        record_id=item.get("record_id", ""),
+        document_url=item.get("download_url", ""),
+        fulltext_id=item.get("record_id", ""),
+        source="brazil-moh",
+        abstract=item.get("description", ""),
+        year=item.get("year", ""),
+        country="Brasil",
+        languages=["pt"],
+        collections=[collection],
+        authors=["Ministério da Saúde"],
+        score=score,
+    )
 
 
 class GovBrAZEngine:
@@ -271,3 +296,64 @@ class GovBrAZEngine:
             logger.warning("Failed initial crawl of gov.br A-Z catalog: %s", exc)
 
         return {}
+
+    async def search(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> tuple[list[BrazilGuideline], CacheMetadata]:
+        """Search the publication catalog by disease, topic, or keyword."""
+        query_norm = normalize_text(query)
+        query_tokens = tokenize_portuguese(query)
+        if not query_norm or not query_tokens:
+            return [], CacheMetadata(cached=False, cache_age=0, error=False)
+
+        cache_key = f"govbr_az_search:{limit}:{query_norm}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and isinstance(cached_data, list):
+            return [BrazilGuideline.from_dict(d) for d in cached_data], meta
+
+        catalog = await self.get_catalog()
+        scored_items: list[tuple[float, dict[str, Any]]] = []
+        for item in catalog.values():
+            score = score_item(
+                query_tokens,
+                query_norm,
+                item.get("title", ""),
+                item.get("slug", ""),
+                f"{item.get('topic', '')} {item.get('aliases', '')}",
+            )
+            if score > 0.0:
+                scored_items.append((score, item))
+
+        scored_items.sort(key=lambda pair: (-pair[0], pair[1].get("title", "")))
+        results = [
+            _dict_to_guideline(item, score=score)
+            for score, item in scored_items[:limit]
+        ]
+
+        await self.cache.set(
+            cache_key,
+            [g.to_dict() for g in results],
+            source="govbr_az",
+            ttl=self.settings.cache_ttl_brazil_moh,
+        )
+        return results, CacheMetadata(cached=False, cache_age=0, error=False)
+
+    async def get_guideline(self, record_id: str) -> BrazilGuideline | None:
+        """Look up one publication by record_id or slug."""
+        normalized = (record_id or "").strip().lower()
+        if not normalized:
+            return None
+
+        catalog = await self.get_catalog()
+        if normalized in catalog:
+            return _dict_to_guideline(catalog[normalized])
+
+        for item in catalog.values():
+            if item.get("slug", "").lower() == normalized:
+                return _dict_to_guideline(item)
+            if item.get("record_id", "").lower() == normalized:
+                return _dict_to_guideline(item)
+
+        return None

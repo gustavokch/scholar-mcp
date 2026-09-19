@@ -223,3 +223,92 @@ async def test_refresh_catalog_follows_pagination_once_per_url(tmp_path, respons
         assert len(urls) == len(set(urls))
     finally:
         await engine.cache.close()
+
+
+async def test_search_ranks_exact_topic_match_first(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        results, meta = await engine.search("tuberculose", limit=5)
+
+        assert meta.error is False
+        assert results
+        assert results[0].record_id == "govbr-svsa-tuberculose-manual-tuberculose"
+        assert results[0].document_url.endswith("/@@download/file")
+        assert results[0].source == "brazil-moh"
+        assert results[0].collections == ["SVSA"]
+        assert results[0].authors == ["Ministério da Saúde"]
+        assert results[0].country == "Brasil"
+        assert results[0].languages == ["pt"]
+    finally:
+        await engine.cache.close()
+
+
+async def test_search_returns_empty_for_blank_query(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        results, meta = await engine.search("   ", limit=5)
+        assert results == []
+        assert meta.error is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_search_respects_limit(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        results, _ = await engine.search("dengue", limit=1)
+        assert len(results) == 1
+    finally:
+        await engine.cache.close()
+
+
+async def test_search_uses_cache_on_second_call(tmp_path, responses):
+    engine, http = _make_engine(tmp_path, responses)
+    try:
+        await engine.search("dengue", limit=5)
+        calls_after_first = http.get.await_count
+        results, meta = await engine.search("dengue", limit=5)
+        assert meta.cached is True
+        assert http.get.await_count == calls_after_first
+        assert results
+    finally:
+        await engine.cache.close()
+
+
+async def test_get_guideline_by_record_id(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        record = await engine.get_guideline("govbr-svsa-dengue-dengue-manejo-clinico")
+        assert record is not None
+        assert record.title.startswith("Dengue")
+    finally:
+        await engine.cache.close()
+
+
+async def test_get_guideline_by_slug(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        record = await engine.get_guideline("dengue-manejo-clinico")
+        assert record is not None
+        assert record.record_id == "govbr-svsa-dengue-dengue-manejo-clinico"
+    finally:
+        await engine.cache.close()
+
+
+async def test_get_guideline_unknown_returns_none(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        assert await engine.get_guideline("nao-existe") is None
+    finally:
+        await engine.cache.close()
+
+
+async def test_guias_records_carry_year(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        record = await engine.get_guideline("govbr-guias-2024-guia-vigilancia")
+        assert record is not None
+        assert record.year == "2024"
+        assert record.collections == ["GUIAS-E-MANUAIS"]
+    finally:
+        await engine.cache.close()
