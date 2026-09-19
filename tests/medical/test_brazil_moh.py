@@ -2333,3 +2333,32 @@ async def test_full_text_resolves_az_record(tmp_path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+@respx.mock
+async def test_clean_bvs_result_is_cached_when_only_an_auxiliary_stage_fails(tmp_path: Path):
+    """A healthy BVS answer must not be re-fetched on every call while a
+    local gov.br scraper is down.
+
+    The merge is incomplete (the AZ rows are missing), so it is cached
+    briefly rather than pinned for the full 30-day TTL.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        async def _az_down(*args, **kwargs):
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        engine.az_engine.search = _az_down
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+
+        first, _first_meta = await engine.search_guidelines("dengue", limit=5)
+        second, second_meta = await engine.search_guidelines("dengue", limit=5)
+
+        assert first, "BVS returned a record"
+        assert route.call_count == 1, "the BVS chain re-ran while AZ was down"
+        assert second_meta.cached is True
+        assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()

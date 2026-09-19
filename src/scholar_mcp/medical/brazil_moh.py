@@ -134,6 +134,12 @@ BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
 
+# How long a merged result is held when BVS answered cleanly but a local
+# gov.br scraper failed. Short enough that the missing rows reappear soon
+# after the scraper recovers, long enough that a burst of queries does not
+# re-run the whole BVS chain each time.
+DEGRADED_RESULT_TTL_SECONDS = 300
+
 BRAZIL_COUNTRY = "Brasil"
 
 logger = logging.getLogger(__name__)
@@ -748,6 +754,18 @@ class BrazilMoHEngine:
                 cache_key,
                 [record.to_dict() for record in records],
                 source="brazil_moh",
+            )
+        elif not bvs_errored:
+            # BVS answered cleanly and only a local gov.br scraper failed, so
+            # the merge is complete except for that scraper's rows. Pinning it
+            # for the full TTL would freeze the gap, but re-running the entire
+            # BVS chain on every call for as long as the scraper is down is
+            # its own cost. Hold the degraded merge briefly instead.
+            await self.cache.set(
+                cache_key,
+                [record.to_dict() for record in records],
+                source="brazil_moh",
+                ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
         return records, CacheMetadata(cached=False, cache_age=0, error=False)
 
