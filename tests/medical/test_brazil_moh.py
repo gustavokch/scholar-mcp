@@ -115,113 +115,71 @@ def test_brazil_guideline_from_dict_handles_none():
 
 
 def test_build_query_joins_user_tokens_with_and():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("tratamento tuberculose", "all")
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(tratamento AND tuberculose)")
+    assert built == f'{BASE_FILTER} AND (tratamento AND tuberculose)'
 
 
 def test_build_query_appends_brisa_filter():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("dengue", "brisa")
-    assert 'db:"BRISA"' in built
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
+    assert built == f'{BASE_FILTER} AND db:"BRISA" AND (dengue)'
 
 
 def test_build_query_omits_brisa_filter_for_all():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     assert 'db:"BRISA"' not in _build_query("dengue", "all")
 
 
 def test_build_query_with_blank_query_is_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("   ", "all") == 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
+    assert _build_query("   ", "all") == BASE_FILTER
 
 
 def test_build_query_strips_solr_special_characters():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query('a "quote" (b) [c] && d || e', "all")
     # "a" and "e" are Portuguese stopwords and are dropped. The single-char
     # "b", "c", "d" are not Portuguese words, so they survive -- confirming
     # the length floor is not applied to outbound tokens.
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(quote AND b AND c AND d)")
+    assert built == f'{BASE_FILTER} AND (quote AND b AND c AND d)'
 
 
 def test_build_query_drops_bare_boolean_words():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("dengue AND zika", "all")
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(dengue AND zika)")
+    assert built == f'{BASE_FILTER} AND (dengue AND zika)'
 
 
 def test_build_query_all_tokens_reserved_yields_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("AND OR NOT", "all") == 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
+    assert _build_query("AND OR NOT", "all") == BASE_FILTER
 
 
 def test_build_query_title_scoped_prefixes_tokens_with_ti():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("tratamento tuberculose", "all", title_scoped=True)
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(ti:tratamento AND ti:tuberculose)")
+    assert built == f'{BASE_FILTER} AND (ti:tratamento AND ti:tuberculose)'
 
 
 def test_build_query_caller_supplied_ti_prefix_is_neutralized():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     # Caller cannot control field scoping or poison tokens into tidengue
     scoped = _build_query("ti:dengue", "all", title_scoped=True)
-    assert 'la:"pt"' in scoped
-    assert '(type:"non-conventional" OR type:"monography")' in scoped
-    assert scoped.endswith("(ti:dengue)")
+    assert scoped == f'{BASE_FILTER} AND (ti:dengue)'
 
     all_fields = _build_query("ti:dengue", "all", title_scoped=False)
-    assert 'la:"pt"' in all_fields
-    assert '(type:"non-conventional" OR type:"monography")' in all_fields
-    assert all_fields.endswith("(dengue)")
+    assert all_fields == f'{BASE_FILTER} AND (dengue)'
 
     # Multi-token test
     scoped_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=True)
-    assert 'la:"pt"' in scoped_multi
-    assert '(type:"non-conventional" OR type:"monography")' in scoped_multi
-    assert scoped_multi.endswith("(ti:dengue AND ti:zika)")
+    assert scoped_multi == f'{BASE_FILTER} AND (ti:dengue AND ti:zika)'
 
     all_fields_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=False)
-    assert 'la:"pt"' in all_fields_multi
-    assert '(type:"non-conventional" OR type:"monography")' in all_fields_multi
-    assert all_fields_multi.endswith("(dengue AND zika)")
+    assert all_fields_multi == f'{BASE_FILTER} AND (dengue AND zika)'
 
     # Leading +/- signs with field prefix
     scoped_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=True)
-    assert 'la:"pt"' in scoped_signed
-    assert '(type:"non-conventional" OR type:"monography")' in scoped_signed
-    assert scoped_signed.endswith("(ti:dengue AND ti:zika)")
+    assert scoped_signed == f'{BASE_FILTER} AND (ti:dengue AND ti:zika)'
 
     all_fields_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=False)
-    assert 'la:"pt"' in all_fields_signed
-    assert '(type:"non-conventional" OR type:"monography")' in all_fields_signed
-    assert all_fields_signed.endswith("(dengue AND zika)")
+    assert all_fields_signed == f'{BASE_FILTER} AND (dengue AND zika)'
 
 
 def test_build_query_title_scoped_blank_or_reserved_yields_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("   ", "all", title_scoped=True) == 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
-    assert _build_query("AND OR NOT", "all", title_scoped=True) == 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
+    assert _build_query("   ", "all", title_scoped=True) == BASE_FILTER
+    assert _build_query("AND OR NOT", "all", title_scoped=True) == BASE_FILTER
 
 
 def test_usable_tokens_strips_portuguese_stopwords():
@@ -262,33 +220,20 @@ def test_usable_tokens_all_stopwords_yields_nothing():
 
 
 def test_build_query_strips_stopwords_in_and_mode():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("manejo da dengue", "all")
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(manejo AND dengue)")
+    assert built == f'{BASE_FILTER} AND (manejo AND dengue)'
 
 
 def test_build_query_strips_stopwords_in_or_mode():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("manejo da dengue", "all", operator="OR")
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert built.endswith("(manejo OR dengue)")
+    assert built == f'{BASE_FILTER} AND (manejo OR dengue)'
 
 
 def test_build_query_or_operator_leaves_base_filters_anded():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     # Only the user-token group relaxes. The filters stay conjunctive, or the
     # query would match non-Portuguese and conventional literature.
     built = _build_query("manejo dengue", "brisa", operator="OR")
-    assert 'la:"pt"' in built
-    assert '(type:"non-conventional" OR type:"monography")' in built
-    assert 'db:"BRISA"' in built
-    assert built.endswith("(manejo OR dengue)")
+    assert built == f'{BASE_FILTER} AND db:"BRISA" AND (manejo OR dengue)'
 
 
 def test_build_query_defaults_to_and():
