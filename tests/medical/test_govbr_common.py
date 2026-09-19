@@ -45,6 +45,12 @@ def test_derive_item_urls_strips_existing_view_suffix():
     assert download == "https://www.gov.br/saude/x/item/@@download/file"
 
 
+def test_derive_item_urls_strips_fragments():
+    view, dl = derive_item_urls("https://www.gov.br/saude/pt-br/manual.pdf#page=2")
+    assert view == "https://www.gov.br/saude/pt-br/manual.pdf/view"
+    assert dl == "https://www.gov.br/saude/pt-br/manual.pdf/@@download/file"
+
+
 def test_is_login_redirect_detects_plone_gate():
     html = "<html><body><script>window.location='/acl_users/credentials_cookie_auth/require_login?came_from=x'</script></body></html>"
     assert is_login_redirect(html) is True
