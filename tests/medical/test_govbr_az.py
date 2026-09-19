@@ -372,7 +372,7 @@ async def test_get_catalog_memoizes_partial_refresh(tmp_path, responses):
         )
         calls: list[int] = []
 
-        async def _partial_refresh():
+        async def _partial_refresh(incumbent=None):
             calls.append(1)
             return {"new": {"record_id": "new"}}
 
@@ -415,5 +415,38 @@ async def test_search_reports_error_when_catalog_unavailable(tmp_path, responses
         assert meta.error is True
         _, cache_meta = await engine.cache.get("govbr_az_search:5:dengue")
         assert cache_meta.cached is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_refuses_to_pin_a_shrunken_crawl(tmp_path, responses):
+    """A parser break must not overwrite a good catalog for seven days.
+
+    Every folder answers 200, so folders_ok == folders_total and the old
+    guard would have pinned the result; only the row count reveals that the
+    listing parser stopped matching.
+    """
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        incumbent = {f"row-{i}": {"record_id": f"row-{i}"} for i in range(100)}
+
+        catalog = await engine.refresh_catalog(incumbent=incumbent)
+
+        assert catalog, "the crawl is still returned to this caller"
+        _, meta = await engine.cache.get("govbr_az:catalog")
+        assert meta.cached is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_pins_a_crawl_that_holds_its_size(tmp_path, responses):
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        incumbent = {"row-0": {"record_id": "row-0"}, "row-1": {"record_id": "row-1"}}
+
+        await engine.refresh_catalog(incumbent=incumbent)
+
+        _, meta = await engine.cache.get("govbr_az:catalog")
+        assert meta.cached is True
     finally:
         await engine.cache.close()
