@@ -560,15 +560,9 @@ class BrazilMoHEngine:
         chain_start = time.monotonic()
         state = _SearchState()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
-        pcdt_records, pcdt_meta = await self._stage(
-            "pcdt",
-            self.pcdt_engine.search(query, limit=clamped),
-            ([], stage_error_meta),
-        )
-        az_records, az_meta = await self._stage(
-            "govbr_az",
-            self.az_engine.search(query, limit=clamped),
-            ([], stage_error_meta),
+        (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
+            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta)),
+            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta)),
         )
         errored_any = pcdt_meta.error or az_meta.error
         # The browser tier answers BVS failures (the CDN shield 403s plain

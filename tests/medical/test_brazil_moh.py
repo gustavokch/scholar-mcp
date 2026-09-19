@@ -2196,6 +2196,41 @@ async def test_default_collection_includes_az_records(tmp_path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_pcdt_record_wins_dedupe_against_az_duplicate(tmp_path: Path):
+    """PCDT must stay first in local_records after the gather refactor."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        pcdt_rec = dataclasses.replace(
+            _az_record(),
+            record_id="duplicate-id",
+            title="PCDT Title",
+        )
+        az_rec = dataclasses.replace(
+            _az_record(),
+            record_id="duplicate-id",
+            title="AZ Title",
+        )
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=([pcdt_rec], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        engine.az_engine.search = AsyncMock(
+            return_value=([az_rec], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        records, meta = await engine.search_guidelines("tuberculose", collection="all")
+
+        assert meta.error is False
+        assert len(records) == 1
+        assert records[0].record_id == "duplicate-id"
+        assert records[0].title == "PCDT Title"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_local_fallback_returns_az_records_when_bvs_errors(tmp_path):
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.enable_browser_fallback = False
