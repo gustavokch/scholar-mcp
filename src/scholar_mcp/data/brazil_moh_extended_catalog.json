@@ -5,7 +5,10 @@
     "file_path": "guidelines/manual_tuberculose_2019.txt",
     "keywords": "tuberculose manual acolhimento ubs porta de entrada sintomatico respiratorio",
     "source_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/tuberculose/manual-de-recomendacoes-e-controle-da-tuberculose-no-brasil-2a-ed.pdf/@@download/file",
-    "license": "CC BY-NC-SA 4.0 (atribuição-não comercial-compartilhamento igual 4.0 Internacional)"
+    "license": "CC BY-NC-SA 4.0 (atribuição-não comercial-compartilhamento igual 4.0 Internacional)",
+    "authors": [
+      "Ministério da Saúde"
+    ]
   },
   "ms-pnab-portaria-2436-2017": {
     "title": "PNAB - Portaria nº 2.436 de 2017 - Política Nacional de Atenção Básica",
@@ -13,7 +16,10 @@
     "file_path": "guidelines/pnab_portaria_2436_2017.txt",
     "keywords": "pnab atencao basica portaria 2436 saude da familia ubs",
     "source_url": "https://central.to.gov.br/download/106831",
-    "license": "Texto oficial — Lei 9.610/98, art. 8 (sem direito autoral)"
+    "license": "Texto oficial — Lei 9.610/98, art. 8 (sem direito autoral)",
+    "authors": [
+      "Presidência da República"
+    ]
   },
   "ms-portaria-aps-cofinanciamento-2024": {
     "title": "Portaria GM/MS nº 3.493 de 2024 - Cofinanciamento federal da APS",
@@ -21,7 +27,10 @@
     "file_path": "guidelines/portaria_aps_cofinanciamento_2024.txt",
     "keywords": "aps cofinanciamento portaria 3493 financiamento atencao primaria piso",
     "source_url": "https://cosemspi.org.br/wp-content/uploads/2024/04/PORTARIA-GM_MS-No-3.493-DE-10-DE-ABRIL-DE-2024-PORTARIA-GM_MS-No-3.493-DE-10-DE-ABRIL-DE-2024-DOU-Imprensa-Nacional.pdf",
-    "license": "Texto oficial — Lei 9.610/98, art. 8 (sem direito autoral)"
+    "license": "Texto oficial — Lei 9.610/98, art. 8 (sem direito autoral)",
+    "authors": [
+      "Ministério da Saúde"
+    ]
   },
   "sbait-trauma-pelvico-2020": {
     "title": "Trauma pélvico instável: fixador externo na emergência (manual de trauma ortopédico)",
@@ -29,6 +38,12 @@
     "file_path": "guidelines/sbait_trauma_pelvico.txt",
     "keywords": "trauma pelvico instavel fixador externo anel pelvico emergencia controle de danos",
     "source_url": "https://sbot.org.br/wp-content/uploads/2018/09/MANUAL_TRAUMA_ORTOPEDICO.pdf",
-    "license": "© SBOT — reproduzido para pesquisa/educação; redistribuição sujeita a permissão"
+    "license": "© SBOT — reproduzido para pesquisa/educação; redistribuição sujeita a permissão",
+    "authors": [
+      "Sociedade Brasileira de Ortopedia e Traumatologia (SBOT)"
+    ],
+    "collections": [
+      "Guias e manuais"
+    ]
   }
 }

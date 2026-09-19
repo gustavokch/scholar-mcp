@@ -111,3 +111,25 @@ def test_extended_catalog_load_is_cached():
     assert all(
         row["download_url"].startswith("local:") for row in first.values()
     )
+
+
+async def test_extended_records_carry_source_attribution(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        records, _ = await engine.search_guidelines(
+            "trauma pelvico instavel", collection="pcdt"
+        )
+        sbait = next(r for r in records if r.record_id == "sbait-trauma-pelvico-2020")
+        assert sbait.authors == [
+            "Sociedade Brasileira de Ortopedia e Traumatologia (SBOT)"
+        ]
+        assert sbait.collections == ["Guias e manuais"]
+
+        records, _ = await engine.search_guidelines(
+            "tuberculose acolhimento ubs", collection="pcdt"
+        )
+        tb = next(r for r in records if r.record_id == "ms-manual-tuberculose-2019")
+        assert tb.authors == ["Ministério da Saúde"]
+    finally:
+        await cache.close()
+        await http_client.aclose()

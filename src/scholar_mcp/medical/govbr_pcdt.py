@@ -87,6 +87,8 @@ def load_extended_catalog() -> dict[str, dict[str, Any]]:
             "source_url": row.get("source_url", ""),
             "file_path": file_path,
             "download_url": f"local:{file_path}",
+            "authors": row.get("authors", []),
+            "collections": row.get("collections", []),
         }
     return catalog
 
@@ -182,7 +184,12 @@ def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) 
 
 
 def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
-    """Convert catalog dictionary to BrazilGuideline dataclass."""
+    """Convert catalog dictionary to BrazilGuideline dataclass.
+
+    ``authors``/``collections`` pass through when the catalog row declares
+    them (extended corpus rows carry their real source); crawled and seed
+    rows default to the MS/CONITEC PCDT shape.
+    """
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
@@ -192,8 +199,8 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         abstract=item.get("description", ""),
         country="Brasil",
         languages=["pt"],
-        collections=["PCDT"],
-        authors=["Ministério da Saúde", "CONITEC"],
+        collections=item.get("collections") or ["PCDT"],
+        authors=item.get("authors") or ["Ministério da Saúde", "CONITEC"],
         score=score,
     )
 
