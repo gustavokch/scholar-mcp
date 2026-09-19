@@ -399,19 +399,21 @@ async def _engine(tmp_path: Path):
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    _stub_pcdt_empty(engine)
     return engine, cache, http_client
 
 
 def _stub_pcdt_empty(engine):
-    """Replace the PCDT stage with an empty, non-errored result.
+    """Replace the PCDT and AZ stages with empty, non-errored results.
 
-    Isolates BVS call sequencing from the static PCDT dataset, which would
-    otherwise merge its own records into the result list.
+    Isolates BVS call sequencing from the static datasets, which would
+    otherwise merge their own records into the result list.
     """
-    async def _no_pcdt(*args, **kwargs):
+    async def _empty(*args, **kwargs):
         return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-    engine.pcdt_engine.search = _no_pcdt
+    engine.pcdt_engine.search = _empty
+    engine.az_engine.search = _empty
 
 
 def _bvs_doc(record_id="biblio-1", title="Protocolo", country="^iBrazil^eBrasil", **extra):
@@ -1777,6 +1779,11 @@ async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
         "search",
         AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
     )
+    monkeypatch.setattr(
+        engine.az_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
     payload = {
         "diaServerResponse": [
             {
@@ -1863,6 +1870,11 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         "search",
         AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
     )
+    monkeypatch.setattr(
+        engine.az_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
     attempts: list[bool] = []
 
     class _SlowPage:
@@ -1942,6 +1954,11 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         "search",
         AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
     )
+    monkeypatch.setattr(
+        engine.az_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
     payload = {
         "diaServerResponse": [
             {
@@ -1994,6 +2011,11 @@ async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
         "search",
         AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
     )
+    monkeypatch.setattr(
+        engine.az_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
     challenge_html = (
         "<!DOCTYPE html><html><head><title>Bot Shield</title></head>"
         "<body><iframe src=\"https://shield-templates-prod.b-cdn.net/42085/block.html\" "
@@ -2032,6 +2054,11 @@ async def test_search_bvs_shielded_403_fast_fails_to_browser_fallback(tmp_path, 
     engine = BrazilMoHEngine(http_client, cache, settings)
     monkeypatch.setattr(
         engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    monkeypatch.setattr(
+        engine.az_engine,
         "search",
         AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
     )
@@ -2105,3 +2132,101 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
+
+
+def _az_record() -> BrazilGuideline:
+    return BrazilGuideline(
+        title="Manual de Recomendações para o Controle da Tuberculose no Brasil",
+        record_id="govbr-svsa-tuberculose-manual-tuberculose",
+        document_url="https://www.gov.br/x/manual-tuberculose/@@download/file",
+        fulltext_id="govbr-svsa-tuberculose-manual-tuberculose",
+        source="brazil-moh",
+        collections=["SVSA"],
+        country="Brasil",
+        languages=["pt"],
+        authors=["Ministério da Saúde"],
+        score=1.0,
+    )
+
+
+async def test_collection_az_routes_to_az_engine(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        engine.az_engine.search = AsyncMock(
+            return_value=([_az_record()], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        records, meta = await engine.search_guidelines("tuberculose", collection="az")
+
+        assert meta.error is False
+        assert [r.record_id for r in records] == ["govbr-svsa-tuberculose-manual-tuberculose"]
+        engine.az_engine.search.assert_awaited_once()
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_unknown_collection_still_rejected(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        records, meta = await engine.search_guidelines("dengue", collection="bogus")
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_default_collection_includes_az_records(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        engine.az_engine.search = AsyncMock(
+            return_value=([_az_record()], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        records, meta = await engine.search_guidelines("tuberculose", collection="all")
+
+        assert meta.error is False
+        assert any(
+            r.record_id == "govbr-svsa-tuberculose-manual-tuberculose" for r in records
+        )
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_local_fallback_returns_az_records_when_bvs_errors(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    try:
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=([], CacheMetadata(cached=False, cache_age=0, error=True))
+        )
+        engine.az_engine.search = AsyncMock(
+            return_value=([_az_record()], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        engine._fetch_records = AsyncMock(return_value=([], True))
+        records, _ = await engine.search_guidelines("tuberculose", collection="all")
+        assert [r.record_id for r in records] == ["govbr-svsa-tuberculose-manual-tuberculose"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_full_text_resolves_az_record(tmp_path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        engine.pcdt_engine.get_guideline = AsyncMock(return_value=None)
+        engine.az_engine.get_guideline = AsyncMock(return_value=_az_record())
+        engine._extract_pdf_text = AsyncMock(return_value=("texto do manual", False))
+
+        payload, meta = await engine.get_full_text(
+            "govbr-svsa-tuberculose-manual-tuberculose"
+        )
+        assert payload["status"] == "success"
+        assert "manual" in payload["content"]
+        engine.az_engine.get_guideline.assert_awaited_once()
+    finally:
+        await cache.close()
+        await http_client.aclose()
