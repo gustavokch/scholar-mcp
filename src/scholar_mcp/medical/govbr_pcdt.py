@@ -9,14 +9,20 @@ from collections.abc import Callable
 import json
 import logging
 from pathlib import Path
-import re
 from typing import Any
-import unicodedata
 import urllib.parse
 
 from bs4 import BeautifulSoup
-
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
+    GOVBR_HEADERS,
+    PORTUGUESE_STOPWORDS,
+    SEVEN_DAYS_SECONDS,
+    derive_item_urls,
+    normalize_text,
+    score_item,
+    tokenize_portuguese,
+)
 from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -28,54 +34,6 @@ PCDT_LETTERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "l",
     "m", "n", "o", "p", "r", "s", "t", "u",
 )
-
-SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60  # 604,800 seconds
-
-GOVBR_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-}
-
-PORTUGUESE_STOPWORDS = frozenset(
-    {
-        "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do",
-        "dos", "e", "em", "entre", "na", "nao", "nas", "no", "nos", "o",
-        "os", "ou", "para", "pela", "pelo", "por", "que", "se", "sem",
-        "sob", "sobre", "um", "uma", "umas", "uns",
-    }
-)
-
-_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-
-
-def normalize_text(text: str | None) -> str:
-    """Normalize text by folding accents, stripping non-ASCII characters, and lowercasing."""
-    if not text:
-        return ""
-    folded = (
-        unicodedata.normalize("NFKD", text)
-        .encode("ascii", "ignore")
-        .decode("ascii")
-        .lower()
-    )
-    return folded.strip()
-
-
-def tokenize_portuguese(text: str | None) -> list[str]:
-    """Tokenize Portuguese text into substantive search terms."""
-    norm = normalize_text(text)
-    if not norm:
-        return []
-    return [
-        tok
-        for tok in _WORD_SPLIT_RE.split(norm)
-        if len(tok) >= 2 and tok not in PORTUGUESE_STOPWORDS
-    ]
-
 
 def load_seed_catalog() -> dict[str, dict[str, Any]]:
     """Load the bundled pre-scraped PCDT catalog."""
@@ -161,39 +119,12 @@ def parse_letter_page(
 
 def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) -> float:
     """Compute matching score between query and catalog item."""
-    if not query_tokens:
-        return 0.0
-
-    title_norm = normalize_text(item.get("title", ""))
-    slug_norm = normalize_text(item.get("slug", "")).replace("-", " ")
-
-    # Exact match
-    if query_norm == title_norm or query_norm == slug_norm:
-        return 1.0
-
-    # Substring match (prefix matches are a subset of substring matches,
-    # so a separate startswith tier would be unreachable).
-    if query_norm in title_norm or query_norm in slug_norm:
-        return 0.90
-
-    title_tokens = set(tokenize_portuguese(item.get("title", "")))
-    slug_tokens = set(tokenize_portuguese(item.get("slug", "").replace("-", " ")))
-    all_item_tokens = title_tokens | slug_tokens
-
-    if not all_item_tokens:
-        return 0.0
-
-    matching_tokens = [tok for tok in query_tokens if tok in all_item_tokens]
-    if not matching_tokens:
-        return 0.0
-
-    token_ratio = len(matching_tokens) / len(query_tokens)
-
-    # All terms matched
-    if token_ratio == 1.0:
-        return 0.80
-
-    return 0.50 * token_ratio
+    return score_item(
+        query_tokens,
+        query_norm,
+        item.get("title", ""),
+        item.get("slug", ""),
+    )
 
 
 def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
