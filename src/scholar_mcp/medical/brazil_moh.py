@@ -901,9 +901,9 @@ class BrazilMoHEngine:
             )
             return "", True
         try:
-            # Bounded before it is cached: an unbounded extraction would write
-            # a multi-megabyte row into the shared cache for a long manual.
-            return pdf_bytes_to_text(resp.content)[:MAX_FULL_TEXT_CHARS], False
+            # Unbounded here: the ceiling is applied at cache/serve time so
+            # the pre-truncation length survives as ``total_chars``.
+            return pdf_bytes_to_text(resp.content), False
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
             return "", True
@@ -957,9 +957,11 @@ class BrazilMoHEngine:
         pdf_text, errored = await self._extract_pdf_text(record.document_url)
 
         if pdf_text:
-            result = {"content_type": "pdf", "content": pdf_text}
+            source_text = pdf_text
+            content_type = "pdf"
         elif record.abstract:
-            result = {"content_type": "abstract", "content": record.abstract}
+            source_text = record.abstract
+            content_type = "abstract"
         else:
             # A transient fetch failure with nothing to fall back on is an
             # error, not an absence: callers must retry, not move on.
@@ -976,6 +978,14 @@ class BrazilMoHEngine:
                 CacheMetadata(cached=False, cache_age=0, error=errored),
             )
 
+        total_chars = len(source_text)
+        # Bounded before it is cached: an unbounded extraction would write
+        # a multi-megabyte row into the shared cache for a long manual.
+        result = {
+            "content_type": content_type,
+            "content": source_text[:MAX_FULL_TEXT_CHARS],
+            "total_chars": total_chars,
+        }
         payload = {**base, "status": "success", "title": record.title, **result}
         # An errored payload is never cached: a transient block must not
         # poison a 30-day TTL.
@@ -996,5 +1006,10 @@ class BrazilMoHEngine:
             if max_chars is None
             else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )
-        content, truncated = truncate_content(payload.get("content", ""), limit)
-        return {**payload, "content": content, "truncated": truncated}
+        stored = payload.get("content", "")
+        # Old cache rows predate ``total_chars`` and degrade to the stored
+        # length (truncation at the ceiling reads as False) — accepted.
+        total = payload.get("total_chars", len(stored))
+        content, truncated = truncate_content(stored, limit)
+        is_truncated = truncated or (len(content) < total)
+        return {**payload, "content": content, "truncated": is_truncated, "total_chars": total}
