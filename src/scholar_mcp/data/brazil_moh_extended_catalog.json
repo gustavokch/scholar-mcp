@@ -1,0 +1,30 @@
+{
+  "ms-manual-tuberculose-2019": {
+    "title": "Manual de Recomendações para o Controle da Tuberculose no Brasil 2019",
+    "description": "Manual do Ministério da Saúde com diretrizes nacionais de tuberculose: busca de sintomáticos respiratórios, diagnóstico, tratamento, adesão e organização da rede. Fluxo de acolhimento na UBS e porta de entrada na APS.",
+    "file_path": "guidelines/manual_tuberculose_2019.txt",
+    "keywords": "tuberculose manual acolhimento ubs porta de entrada sintomatico respiratorio",
+    "source_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/tuberculose/manual-de-recomendacoes-e-controle-da-tuberculose-no-brasil-2a-ed.pdf/@@download/file"
+  },
+  "ms-pnab-portaria-2436-2017": {
+    "title": "PNAB - Portaria nº 2.436 de 2017 - Política Nacional de Atenção Básica",
+    "description": "Portaria que aprova a Política Nacional de Atenção Básica (PNAB), organização da Atenção Básica e da Estratégia Saúde da Família no SUS.",
+    "file_path": "guidelines/pnab_portaria_2436_2017.txt",
+    "keywords": "pnab atencao basica portaria 2436 saude da familia ubs",
+    "source_url": "https://central.to.gov.br/download/106831"
+  },
+  "ms-portaria-aps-cofinanciamento-2024": {
+    "title": "Portaria GM/MS nº 3.493 de 2024 - Cofinanciamento federal da APS",
+    "description": "Nova metodologia de cofinanciamento federal do Piso de Atenção Primária à Saúde (APS): componente fixo, vínculo e acompanhamento territorial e qualidade.",
+    "file_path": "guidelines/portaria_aps_cofinanciamento_2024.txt",
+    "keywords": "aps cofinanciamento portaria 3493 financiamento atencao primaria piso",
+    "source_url": "https://cosemspi.org.br/wp-content/uploads/2024/04/PORTARIA-GM_MS-No-3.493-DE-10-DE-ABRIL-DE-2024-PORTARIA-GM_MS-No-3.493-DE-10-DE-ABRIL-DE-2024-DOU-Imprensa-Nacional.pdf"
+  },
+  "sbait-trauma-pelvico-2020": {
+    "title": "Trauma pélvico instável: fixador externo na emergência (manual de trauma ortopédico)",
+    "description": "Manejo do trauma pélvico instável e das fraturas do anel pélvico: controle de danos, fixador externo anterior e clampe de Ganz na emergência.",
+    "file_path": "guidelines/sbait_trauma_pelvico.txt",
+    "keywords": "trauma pelvico instavel fixador externo anel pelvico emergencia controle de danos",
+    "source_url": "https://sbot.org.br/wp-content/uploads/2018/09/MANUAL_TRAUMA_ORTOPEDICO.pdf"
+  }
+}
