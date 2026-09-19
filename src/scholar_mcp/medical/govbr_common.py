@@ -110,7 +110,7 @@ def score_item(
 
 def derive_item_urls(href: str) -> tuple[str, str]:
     """Return ``(view_url, download_url)`` for a Plone item URL."""
-    clean = href.strip().split("?")[0].rstrip("/")
+    clean = href.strip().split("#")[0].split("?")[0].rstrip("/")
     base = clean[: -len("/view")] if clean.endswith("/view") else clean
     return f"{base}/view", f"{base}/@@download/file"
 
