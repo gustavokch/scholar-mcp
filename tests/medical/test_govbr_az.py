@@ -385,3 +385,15 @@ async def test_get_catalog_memoizes_partial_refresh(tmp_path, responses):
         assert len(calls) == 1, "partial crawl re-ran on the second get_catalog call"
     finally:
         await engine.cache.close()
+
+
+def test_build_alias_text_matches_portuguese_plural():
+    """Titles pluralize the disease name; the alias must still apply."""
+    aliases = {"hepatite": "Hepatite"}
+    assert "hepatite" in build_alias_text("Manual das Hepatites Virais", aliases)
+
+
+def test_build_alias_text_plural_does_not_reopen_false_positives():
+    aliases = {"dtha": "doencas de transmissao hidrica e alimentar"}
+    assert build_alias_text("widthas title", aliases) == ""
+    assert build_alias_text("largura dthas nao", aliases) != ""

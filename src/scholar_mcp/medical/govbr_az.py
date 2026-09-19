@@ -92,6 +92,17 @@ def parse_az_letter_page(html: str) -> dict[str, str]:
     return entries
 
 
+def _alias_pattern(term: str) -> re.Pattern[str]:
+    """Word-boundary match for ``term`` that tolerates a plural suffix.
+
+    Anchoring on word boundaries keeps a short abbreviation such as "dtha"
+    from matching inside "widthas". The optional trailing "s" keeps the
+    match working against the pluralized titles gov.br actually publishes
+    ("Manual das Hepatites Virais" for the alias "hepatite").
+    """
+    return re.compile(r"\b" + re.escape(term) + r"s?\b")
+
+
 def build_alias_text(title: str, aliases: dict[str, str]) -> str:
     """Return space-joined A-Z aliases that apply to ``title``.
 
@@ -108,8 +119,8 @@ def build_alias_text(title: str, aliases: dict[str, str]) -> str:
         slug_norm = normalize_text(slug)
         if not disease_norm:
             continue
-        disease_matched = bool(re.search(r"\b" + re.escape(disease_norm) + r"\b", title_norm))
-        slug_matched = bool(re.search(r"\b" + re.escape(slug_norm) + r"\b", title_norm)) if slug_norm else False
+        disease_matched = bool(_alias_pattern(disease_norm).search(title_norm))
+        slug_matched = bool(_alias_pattern(slug_norm).search(title_norm)) if slug_norm else False
 
         if disease_matched:
             if slug_norm not in matched and not slug_matched:
