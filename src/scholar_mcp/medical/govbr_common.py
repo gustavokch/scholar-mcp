@@ -8,6 +8,9 @@ shared here rather than duplicated per engine.
 
 import re
 import unicodedata
+import urllib.parse
+
+from bs4 import BeautifulSoup
 
 SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60  # 604,800 seconds
 
@@ -119,3 +122,84 @@ def is_login_redirect(html: str) -> bool:
     so status codes alone cannot detect them.
     """
     return _LOGIN_MARKER in (html or "")
+
+
+_B_START_RE = re.compile(r"b_start(?::|%3A)int=(\d+)")
+
+
+def parse_listing_page(html: str, base_url: str) -> tuple[list[dict[str, str]], list[str]]:
+    """Parse one Plone folder listing page.
+
+    Only ``tile-file`` rows are harvested: ``tile-link`` rows point at
+    content pages whose ``@@download/file`` is a 404 and whose ``/view``
+    redirects into the login-gated tree.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    items: list[dict[str, str]] = []
+    seen_slugs: set[str] = set()
+
+    for article in soup.find_all("article"):
+        classes = article.get("class") or []
+        if "tile-file" not in classes:
+            continue
+        anchor = article.find("a", class_="summary", href=True)
+        if anchor is None:
+            anchor = article.find("a", href=True)
+        if anchor is None:
+            continue
+        title = anchor.get_text(strip=True)
+        if not title:
+            continue
+        href = urllib.parse.urljoin(base_url, anchor["href"].strip())
+        view_url, download_url = derive_item_urls(href)
+        slug = view_url[: -len("/view")].rstrip("/").rsplit("/", 1)[-1]
+        if not slug or slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        description_node = article.find("span", class_="description")
+        items.append(
+            {
+                "slug": slug,
+                "title": title,
+                "description": (
+                    description_node.get_text(strip=True) if description_node else ""
+                ),
+                "view_url": view_url,
+                "download_url": download_url,
+            }
+        )
+
+    next_urls: list[str] = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not _B_START_RE.search(href):
+            continue
+        absolute = urllib.parse.urljoin(base_url, href)
+        if absolute not in next_urls:
+            next_urls.append(absolute)
+
+    return items, next_urls
+
+
+def parse_folder_index(html: str, base_url: str, parent_path: str) -> list[str]:
+    """Return absolute URLs of the immediate child folders of ``parent_path``.
+
+    Folder lists (A-Z letters, publication years, SVSA topics) change over
+    time, so they are discovered rather than hardcoded.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    prefix = parent_path.rstrip("/") + "/"
+    folders: list[str] = []
+    for a in soup.find_all("a", href=True):
+        absolute = urllib.parse.urljoin(base_url, a["href"].strip()).split("?")[0]
+        parsed = urllib.parse.urlparse(absolute)
+        path = parsed.path.rstrip("/")
+        if not path.startswith(prefix):
+            continue
+        remainder = path[len(prefix) :]
+        if not remainder or "/" in remainder:
+            continue
+        normalized = f"{parsed.scheme}://{parsed.netloc}{path}"
+        if normalized not in folders:
+            folders.append(normalized)
+    return folders
