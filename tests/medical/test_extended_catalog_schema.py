@@ -71,8 +71,19 @@ def test_corpus_files_carry_provenance_header():
     catalog = _load_catalog()
     for record_id in EXPECTED_IDS:
         text = (DATA_DIR / catalog[record_id]["file_path"]).read_text(encoding="utf-8")
-        for marker in ("Fonte:", "URL:", "Extraído em:"):
+        for marker in ("Fonte:", "URL:", "Extraído em:", "Licença:"):
             assert marker in text, f"{record_id} missing provenance marker {marker}"
+
+
+def test_catalog_declares_license():
+    catalog = _load_catalog()
+    for record_id in EXPECTED_IDS:
+        row = catalog[record_id]
+        license_text = row.get("license", "")
+        assert license_text, f"{record_id} missing license declaration"
+        assert license_text == license_text.strip(), (
+            f"{record_id} license has stray whitespace"
+        )
 
 
 def _fold(text: str) -> str:
