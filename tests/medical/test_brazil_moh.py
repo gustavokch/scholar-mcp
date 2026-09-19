@@ -2298,6 +2298,25 @@ async def test_local_fallback_returns_az_records_when_bvs_errors(tmp_path):
         await http_client.aclose()
 
 
+async def test_search_guidelines_local_records_returns_success_metadata(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    try:
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=([_az_record()], CacheMetadata(cached=False, cache_age=0, error=True))
+        )
+        engine.az_engine.search = AsyncMock(
+            return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        engine._fetch_records = AsyncMock(return_value=([], True))
+        records, meta = await engine.search_guidelines("tuberculose", collection="all")
+        assert len(records) == 1
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_full_text_resolves_az_record(tmp_path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
