@@ -72,7 +72,8 @@ import pytest
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
-from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
+from scholar_mcp.medical.govbr_common import SEVEN_DAYS_SECONDS
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 class FakeResponse:
@@ -350,3 +351,37 @@ def test_seed_catalog_contains_dengue_and_tuberculosis_manuals():
     titles = [normalize_text(row["title"]) for row in load_seed_catalog().values()]
     assert any("dengue" in title for title in titles)
     assert any("tuberculose" in title for title in titles)
+
+
+async def test_get_catalog_memoizes_partial_refresh(tmp_path, responses):
+    """A partial crawl must not re-crawl gov.br on the next get_catalog call.
+
+    refresh_catalog only writes the cache for a complete crawl, so a partial
+    result that is returned without being memoized makes every subsequent
+    search re-crawl both publication trees for as long as gov.br is degraded.
+    """
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        engine.cache.get = AsyncMock(
+            return_value=(
+                {"old": {"record_id": "old"}},
+                CacheMetadata(
+                    cached=True, cache_age=SEVEN_DAYS_SECONDS + 1, error=False
+                ),
+            )
+        )
+        calls: list[int] = []
+
+        async def _partial_refresh():
+            calls.append(1)
+            return {"new": {"record_id": "new"}}
+
+        engine.refresh_catalog = _partial_refresh
+
+        first = await engine.get_catalog()
+        second = await engine.get_catalog()
+
+        assert first == second == {"new": {"record_id": "new"}}
+        assert len(calls) == 1, "partial crawl re-ran on the second get_catalog call"
+    finally:
+        await engine.cache.close()
