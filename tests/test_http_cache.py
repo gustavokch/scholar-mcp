@@ -813,3 +813,26 @@ async def test_generic_400_is_not_retried():
     finally:
         await client.aclose()
 
+
+@respx.mock
+async def test_permanent_external_viewer_error_400_is_not_retried():
+    """A viewer error without 'Status: Timeout' is permanent and must fail fast."""
+    route = respx.get(
+        url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*"
+    ).mock(
+        return_value=httpx.Response(
+            400, text="Error: External viewer error: Unsupported retmode"
+        )
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+            params={"db": "pubmed", "id": "1", "retmode": "bogus"},
+        )
+        assert resp is None
+        assert route.call_count == 1
+    finally:
+        await client.aclose()
+
+
