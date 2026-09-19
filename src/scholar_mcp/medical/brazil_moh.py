@@ -85,7 +85,14 @@ FULLTEXT_ALLOWED_HOSTS = frozenset(
 )
 
 MAX_RESULTS = 50
-OVERFETCH_FACTOR = 3
+# Over-fetch, then re-rank client-side, then slice. The factor is tied to
+# BASE_FILTER's width: admitting the monography class takes the pt pool from
+# roughly 23.6k to 117.8k documents and about triples the hit count of a
+# topical query, so a factor of 3 would truncate targets out of the window
+# before rank_brazil_guidelines ever sees them. At limit=10 this fetches 100.
+# The factor of 10 is fully realized up to limit=20 (200 records); above that,
+# MAX_PAGE_SIZE = 200 governs (e.g. at limit=50 the effective factor is 4).
+OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 50_000
 
@@ -122,7 +129,7 @@ class _SearchState:
     bvs_shielded: bool = False
 
 
-BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
+BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt"})
 
@@ -579,9 +586,10 @@ class BrazilMoHEngine:
         # returns zero records without error, drop trailing tokens and retry.
         # Scenario queries frequently contain clinical descriptors ('grupo',
         # 'criterios', 'hidratacao') that do not appear in formal manual titles.
-        # An errored relaxation step halts the whole BVS chain: the endpoint is
-        # already misbehaving, so further variants likely fail the same way.
-        title_relaxed_errored = False
+        # An errored title stage halts the remaining BVS stages regardless of
+        # which title stage failed: the endpoint is already misbehaving, so
+        # further variants likely fail the same way.
+        title_chain_errored = False
         if not records and not errored and tokens:
             for relaxed_tokens in _title_token_relaxations(tokens):
                 relaxed_title_composed = _build_query(
@@ -596,11 +604,44 @@ class BrazilMoHEngine:
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
                 if relaxed_title_errored:
-                    title_relaxed_errored = True
+                    title_chain_errored = True
                     break
                 if relaxed_title_records:
                     records = relaxed_title_records
                     break
+
+        # OR-title stage. Every AND conjunction above requires all tokens to
+        # share one title, which a clinical-scenario query rarely satisfies:
+        # measured on the dengue item, the strict stage and all three
+        # relaxation steps return zero while ORing the same tokens in ti:
+        # surfaces the manual inside the over-fetch window for the client
+        # ranker to lift. It runs before the all-field fallback because a
+        # title match is a stronger signal than an abstract match, and it is
+        # skipped for a single token, where it would compose identically to
+        # the strict stage and waste a request. It is also skipped if the
+        # strict title stage errored (stalled/failed) to avoid paying an extra
+        # stage budget against a misbehaving endpoint.
+        if (
+            not records
+            and not errored
+            and len(tokens) >= 2
+            and not title_chain_errored
+            and not self._is_bvs_shielded(state)
+        ):
+            or_title_composed = _build_query(
+                query, norm_collection, operator="OR", title_scoped=True
+            )
+            or_title_records, or_title_errored = await self._stage(
+                "title-scoped-or",
+                self._fetch_records(or_title_composed, count, state),
+                ([], True),
+            )
+            errored_any = errored_any or or_title_errored
+            bvs_errored = bvs_errored or or_title_errored
+            if or_title_errored:
+                title_chain_errored = True
+            else:
+                records = or_title_records
 
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
@@ -608,7 +649,7 @@ class BrazilMoHEngine:
         # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
         # or timeout; skip them to preserve budget for browser fallback.
         bvs_shielded = self._is_bvs_shielded(state)
-        if not records and tokens and not title_relaxed_errored and not bvs_shielded:
+        if not records and tokens and not title_chain_errored and not bvs_shielded:
             fallback_records, fallback_errored = await self._stage(
                 "all-field", self._fetch_records(all_composed, count, state), ([], True)
             )
@@ -621,7 +662,7 @@ class BrazilMoHEngine:
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2 and not title_relaxed_errored and not bvs_shielded:
+        if not records and len(tokens) >= 2 and not title_chain_errored and not bvs_shielded:
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
                 "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True)
