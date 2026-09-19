@@ -94,3 +94,20 @@ async def test_pnab_full_text_served_offline(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_extended_catalog_load_is_cached():
+    from scholar_mcp.medical.govbr_pcdt import load_extended_catalog
+
+    load_extended_catalog.cache_clear()
+    try:
+        first = load_extended_catalog()
+        second = load_extended_catalog()
+        # One disk read per process: the loader returns the same object.
+        assert first is second
+    finally:
+        load_extended_catalog.cache_clear()
+    assert first, "extended catalog load returned empty"
+    assert all(
+        row["download_url"].startswith("local:") for row in first.values()
+    )

@@ -6,6 +6,7 @@ https://www.gov.br/saude/pt-br/assuntos/pcdt/[a-u]/[condition]
 """
 
 from collections.abc import Callable
+import functools
 import json
 import logging
 from pathlib import Path
@@ -49,8 +50,13 @@ def load_seed_catalog() -> dict[str, dict[str, Any]]:
         return {}
 
 
+@functools.lru_cache(maxsize=1)
 def load_extended_catalog() -> dict[str, dict[str, Any]]:
-    """Load the bundled full-text MoH manuals corpus, normalized to PCDT shape."""
+    """Load the bundled full-text MoH manuals corpus, normalized to PCDT shape.
+
+    Cached per process: the corpus is a bundled, immutable file, so every
+    ``get_catalog`` call reuses one parsed dict instead of re-reading disk.
+    """
     ext_path = (
         Path(__file__).resolve().parent.parent / "data" / "brazil_moh_extended_catalog.json"
     )
