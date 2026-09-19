@@ -35,6 +35,26 @@ PORTUGUESE_STOPWORDS = frozenset(
 _WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _LOGIN_MARKER = "credentials_cookie_auth/require_login"
 
+# Catalog slugs keep their file extension because ``record_id`` derives from
+# them ("govbr-guias-2001-manual-de-calibracao-de-examinadores.pdf"), so the
+# extension would otherwise leak into scoring as a literal term: the query
+# "pdf" scored 392 of the 569 bundled rows.
+_DOCUMENT_EXTENSIONS = frozenset(
+    {"pdf", "doc", "docx", "odt", "xls", "xlsx", "ods", "ppt", "pptx", "zip"}
+)
+
+
+def strip_document_extension(text: str) -> str:
+    """Drop a trailing document file extension from ``text``.
+
+    Only a known document extension is removed, so version suffixes such as
+    "protocolo-v1.2" survive.
+    """
+    head, sep, tail = text.rpartition(".")
+    if sep and tail.lower() in _DOCUMENT_EXTENSIONS:
+        return head
+    return text
+
 
 def normalize_text(text: str | None) -> str:
     """Normalize text by folding accents, stripping non-ASCII characters, and lowercasing."""
@@ -77,6 +97,10 @@ def score_item(
     """
     if not query_tokens:
         return 0.0
+
+    # The slug carries the source filename, extension included. That
+    # extension is an artifact of the CMS, not a search term.
+    secondary = strip_document_extension(secondary)
 
     primary_norm = normalize_text(primary)
     secondary_norm = normalize_text(secondary).replace("-", " ")
