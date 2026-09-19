@@ -140,9 +140,12 @@ class _SearchState:
     ``_fetch_records`` — the client's ``last_failure`` is a per-task
     ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
     read it afterwards (the write happened in the child task).
+    ``bvs_origin_down`` records a 5xx origin error (500, 502, 503, 504), which
+    short-circuits subsequent BVS stages in the same call.
     """
 
     bvs_shielded: bool = False
+    bvs_origin_down: bool = False
 
 
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
@@ -494,8 +497,11 @@ class BrazilMoHEngine:
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            if failure is not None and failure.status == 403:
-                state.bvs_shielded = True
+            if failure is not None:
+                if failure.status == 403:
+                    state.bvs_shielded = True
+                elif failure.status is not None and 500 <= failure.status < 600:
+                    state.bvs_origin_down = True
             return [], True
 
         try:
@@ -512,7 +518,28 @@ class BrazilMoHEngine:
             return True
         return self.http_client.is_throttled(_BVS_HOST)
 
-    async def _stage(self, stage: str, coro: Any, default: Any) -> Any:
+    def _bvs_unavailable(self, state: _SearchState) -> bool:
+        """True when BVS is shielded by CDN 403, throttled, or origin 5xx."""
+        return self._is_bvs_shielded(state) or state.bvs_origin_down
+
+    def _stage_budget(self, chain_start: float | None = None) -> float:
+        """Effective time budget for one retrieval stage.
+
+        Returns min(brazil_stage_timeout_s, chain_budget_remaining).
+        A setting <= 0 disables that bound.
+        """
+        stage_budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        if chain_start is None:
+            return stage_budget
+        chain_budget = float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+        if chain_budget <= 0:
+            return stage_budget
+        remaining = max(chain_budget - (time.monotonic() - chain_start), 0.0)
+        if stage_budget <= 0:
+            return remaining
+        return min(stage_budget, remaining)
+
+    async def _stage(self, stage: str, coro: Any, default: Any, chain_start: float | None = None) -> Any:
         """Run one retrieval stage under its own time budget.
 
         Callers wrap the whole ``search_guidelines`` chain in a hard ceiling
@@ -521,12 +548,29 @@ class BrazilMoHEngine:
         fallback — still get their share of that ceiling, and so the chain
         degrades to partial results instead of a cancelled coroutine.
 
-        ``brazil_stage_timeout_s <= 0`` disables the budget. On expiry the
-        stage counts as errored and ``default`` is returned.
+        Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
+        is provided. If the chain budget is already exhausted (or stage budget <= 0
+        and expired), the stage is skipped and ``default`` is returned. If both
+        bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
-        budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
-        if budget <= 0:
+        stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        chain_setting = (
+            float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+            if chain_start is not None
+            else 0.0
+        )
+        # If neither setting is active, timeout is disabled.
+        if stage_setting <= 0 and chain_setting <= 0:
             return await coro
+
+        budget = self._stage_budget(chain_start)
+        if budget <= 0:
+            logger.warning(
+                "brazil_moh %s stage skipped: chain budget expired", stage
+            )
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            return default
         try:
             return await asyncio.wait_for(coro, budget)
         except (asyncio.TimeoutError, TimeoutError):
@@ -583,8 +627,8 @@ class BrazilMoHEngine:
         state = _SearchState()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
         (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
-            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta)),
-            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta)),
+            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
+            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
         )
         errored_any = pcdt_meta.error or az_meta.error
         # The browser tier answers BVS failures (the CDN shield 403s plain
@@ -602,7 +646,7 @@ class BrazilMoHEngine:
             else None
         )
         records, errored = await self._stage(
-            "title-scoped", self._fetch_records(title_composed, count, state), ([], True)
+            "title-scoped", self._fetch_records(title_composed, count, state), ([], True), chain_start=chain_start
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -613,9 +657,10 @@ class BrazilMoHEngine:
         # 'criterios', 'hidratacao') that do not appear in formal manual titles.
         # An errored title stage halts the remaining BVS stages regardless of
         # which title stage failed: the endpoint is already misbehaving, so
-        # further variants likely fail the same way.
+        # further variants likely fail the same way. When BVS is unavailable
+        # (shielded by CDN 403 or origin 5xx down), skip further stages.
         title_chain_errored = False
-        if not records and not errored and tokens:
+        if not records and not errored and tokens and not self._bvs_unavailable(state):
             for relaxed_tokens in _title_token_relaxations(tokens):
                 relaxed_title_composed = _build_query(
                     query, norm_collection, title_scoped=True, tokens=relaxed_tokens
@@ -625,6 +670,7 @@ class BrazilMoHEngine:
                     "title-scoped-relaxed",
                     self._fetch_records(relaxed_title_composed, count, state),
                     ([], True),
+                    chain_start=chain_start,
                 )
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
@@ -651,7 +697,7 @@ class BrazilMoHEngine:
             and not errored
             and len(tokens) >= 2
             and not title_chain_errored
-            and not self._is_bvs_shielded(state)
+            and not self._bvs_unavailable(state)
         ):
             or_title_composed = _build_query(
                 query, norm_collection, operator="OR", title_scoped=True
@@ -660,6 +706,7 @@ class BrazilMoHEngine:
                 "title-scoped-or",
                 self._fetch_records(or_title_composed, count, state),
                 ([], True),
+                chain_start=chain_start,
             )
             errored_any = errored_any or or_title_errored
             bvs_errored = bvs_errored or or_title_errored
@@ -671,26 +718,35 @@ class BrazilMoHEngine:
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one. When BVS is shielded by
-        # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
-        # or timeout; skip them to preserve budget for browser fallback.
-        bvs_shielded = self._is_bvs_shielded(state)
-        if not records and tokens and not title_chain_errored and not bvs_shielded:
+        # CDN anti-bot 403s or origin 5xx is down, subsequent HTTP stages are
+        # guaranteed to fail or timeout; skip them to preserve budget for
+        # browser fallback.
+        if (
+            not records
+            and tokens
+            and not title_chain_errored
+            and not self._bvs_unavailable(state)
+        ):
             fallback_records, fallback_errored = await self._stage(
-                "all-field", self._fetch_records(all_composed, count, state), ([], True)
+                "all-field", self._fetch_records(all_composed, count, state), ([], True), chain_start=chain_start
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
-            bvs_shielded = bvs_shielded or self._is_bvs_shielded(state)
 
         # The strict conjunction found nothing usable -- either no hits at all,
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2 and not title_chain_errored and not bvs_shielded:
+        if (
+            not records
+            and len(tokens) >= 2
+            and not title_chain_errored
+            and not self._bvs_unavailable(state)
+        ):
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
-                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True)
+                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True), chain_start=chain_start
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored
