@@ -4,6 +4,7 @@ from scholar_mcp.medical.govbr_common import (
     is_login_redirect,
     normalize_text,
     score_item,
+    strip_document_extension,
     tokenize_portuguese,
 )
 
@@ -131,3 +132,36 @@ def test_parse_folder_index_returns_child_folders_only():
         "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/dengue",
         "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/tuberculose",
     ]
+
+
+def test_strip_document_extension_removes_only_a_trailing_extension():
+    """Catalog slugs keep their file extension; it must not reach scoring."""
+    assert strip_document_extension("manual-de-dengue.pdf") == "manual-de-dengue"
+    assert strip_document_extension("guia-2024.docx") == "guia-2024"
+    # Not an extension: a version suffix must survive untouched.
+    assert strip_document_extension("protocolo-v1.2") == "protocolo-v1.2"
+    assert strip_document_extension("manual-tuberculose") == "manual-tuberculose"
+
+
+def test_score_item_ignores_pdf_suffix_in_slug():
+    """Query "pdf" must not match a row purely because its slug ends in .pdf."""
+    score = score_item(
+        tokenize_portuguese("pdf"),
+        normalize_text("pdf"),
+        "Manual de Calibração de Examinadores",
+        "manual-de-calibracao-de-examinadores.pdf",
+        "",
+    )
+    assert score == 0.0
+
+
+def test_score_item_still_matches_the_slug_without_its_extension():
+    """Stripping the extension must not cost a legitimate slug match."""
+    score = score_item(
+        tokenize_portuguese("manual tuberculose"),
+        normalize_text("manual tuberculose"),
+        "Manual de Recomendações",
+        "manual-tuberculose.pdf",
+        "",
+    )
+    assert score == 1.0
