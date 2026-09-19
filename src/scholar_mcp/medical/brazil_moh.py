@@ -679,8 +679,9 @@ class BrazilMoHEngine:
 
         if not records and errored_any:
             if local_records:
-                local_meta = pcdt_meta if pcdt_records else az_meta
-                return rank_brazil_guidelines(local_records, query)[:clamped], local_meta
+                return rank_brazil_guidelines(local_records, query)[:clamped], CacheMetadata(
+                    cached=False, cache_age=0, error=False
+                )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         # Merge local gov.br records (first) and BVS records, deduplicating
