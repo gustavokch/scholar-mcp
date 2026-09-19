@@ -90,6 +90,8 @@ MAX_RESULTS = 50
 # roughly 23.6k to 117.8k documents and about triples the hit count of a
 # topical query, so a factor of 3 would truncate targets out of the window
 # before rank_brazil_guidelines ever sees them. At limit=10 this fetches 100.
+# The factor of 10 is fully realized up to limit=20 (200 records); above that,
+# MAX_PAGE_SIZE = 200 governs (e.g. at limit=50 the effective factor is 4).
 OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 50_000
