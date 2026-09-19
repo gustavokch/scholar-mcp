@@ -2088,6 +2088,37 @@ async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monke
         await http_client.aclose()
 
 
+async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_path, monkeypatch):
+    """Marker text inside a record must not be read as a block page."""
+    engine, cache, http_client = await _engine(tmp_path)
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "1",
+                            "ti": "Just a moment: protocolo de triagem",
+                            "ab": "Gateway timeout no sistema de regulacao.",
+                            "pais_publicacao": "^eBrasil",
+                            "da": "202401",
+                            "ur": ["https://bvsms.saude.gov.br/x.pdf"],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    try:
+        docs = await engine._camoufox_search("triagem", count=10, ceiling=5.0)
+        assert [d["id"] for d in docs] == ["1"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+
 
 @respx.mock
 async def test_search_bvs_shielded_403_fast_fails_to_browser_fallback(tmp_path, monkeypatch):
