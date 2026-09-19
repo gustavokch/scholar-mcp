@@ -607,6 +607,36 @@ class BrazilMoHEngine:
                     records = relaxed_title_records
                     break
 
+        # OR-title stage. Every AND conjunction above requires all tokens to
+        # share one title, which a clinical-scenario query rarely satisfies:
+        # measured on the dengue item, the strict stage and all three
+        # relaxation steps return zero while ORing the same tokens in ti:
+        # surfaces the manual inside the over-fetch window for the client
+        # ranker to lift. It runs before the all-field fallback because a
+        # title match is a stronger signal than an abstract match, and it is
+        # skipped for a single token, where it would compose identically to
+        # the strict stage and waste a request.
+        if (
+            not records
+            and len(tokens) >= 2
+            and not title_relaxed_errored
+            and not self._is_bvs_shielded(state)
+        ):
+            or_title_composed = _build_query(
+                query, norm_collection, operator="OR", title_scoped=True
+            )
+            or_title_records, or_title_errored = await self._stage(
+                "title-scoped-or",
+                self._fetch_records(or_title_composed, count, state),
+                ([], True),
+            )
+            errored_any = errored_any or or_title_errored
+            bvs_errored = bvs_errored or or_title_errored
+            if or_title_errored:
+                title_relaxed_errored = True
+            else:
+                records = or_title_records
+
         # Fall back to all-field query when the title-scoped stage yields no
         # Brazilian records — including when it stalled, since a slow strict
         # query says nothing about the relaxed one. When BVS is shielded by

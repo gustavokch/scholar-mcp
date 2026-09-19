@@ -1194,20 +1194,23 @@ async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert route.call_count == 4
+        assert route.call_count == 5
         q_first = route.calls[0].request.url.params["q"]
         q_relaxed_title = route.calls[1].request.url.params["q"]
         third = str(route.calls[2].request.url)
         fourth = str(route.calls[3].request.url)
+        fifth = str(route.calls[4].request.url)
         assert "ti:dengue" in q_first and "ti:hemorragica" in q_first
         assert "ti:dengue" in q_relaxed_title and "ti:hemorragica" not in q_relaxed_title
-        assert "dengue+AND+hemorragica" in third or "dengue%20AND%20hemorragica" in third
-        assert "dengue+OR+hemorragica" in fourth or "dengue%20OR%20hemorragica" in fourth
+        assert "ti%3Adengue+OR+ti%3Ahemorragica" in third or "ti:dengue OR ti:hemorragica" in third
+        assert "dengue+AND+hemorragica" in fourth or "dengue%20AND%20hemorragica" in fourth
+        assert "dengue+OR+hemorragica" in fifth or "dengue%20OR%20hemorragica" in fifth
         assert len(records) == 1
         assert meta.error is False
     finally:
@@ -1488,6 +1491,48 @@ async def test_search_ranks_before_slicing(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_search_falls_back_to_or_title_before_all_field(tmp_path: Path):
+    # A scenario query whose tokens never co-occur in one title: every AND
+    # conjunction returns nothing, and the ladder exhausts without a hit.
+    # ORing the tokens in ti: is what surfaces the manual.
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        target = _bvs_doc(
+            record_id="biblio-dengue",
+            title="Dengue: classificação de risco e manejo do paciente",
+        )
+
+        def _respond(request: httpx.Request) -> httpx.Response:
+            composed = request.url.params["q"]
+            # Only the OR-title composition returns the manual.
+            if "ti:dengue OR" in composed:
+                return httpx.Response(200, json=_bvs_response([target]))
+            return httpx.Response(200, json=_bvs_response([]))
+
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_respond)
+        records, meta = await engine.search_guidelines(
+            "dengue grupo manejo hidratação parenteral", limit=10
+        )
+
+        assert meta.error is False
+        assert [r.record_id for r in records] == ["biblio-dengue"]
+
+        composed_queries = [c.request.url.params["q"] for c in route.calls]
+        or_title = [q for q in composed_queries if "ti:dengue OR" in q]
+        assert or_title, composed_queries
+        # The stage runs after the AND ladder and before the all-field
+        # fallback, so no unscoped query is issued once it succeeds.
+        assert not any(
+            q.startswith('la:"pt"') and "ti:" not in q for q in composed_queries
+        ), composed_queries
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+
 async def _slow_response(request: httpx.Request) -> httpx.Response:
     """A BVS response that arrives long after any sane stage budget."""
     import asyncio as _asyncio
@@ -1667,12 +1712,13 @@ async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_t
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     try:
-        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> all-field (hit)
+        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> or-title (miss) -> all-field (hit)
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),  # full title
                 httpx.Response(200, json=_bvs_response([])),  # title relaxed 1
                 httpx.Response(200, json=_bvs_response([])),  # title relaxed 2
+                httpx.Response(200, json=_bvs_response([])),  # title-scoped-or
                 httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),  # all-field
             ]
         )
@@ -1681,9 +1727,9 @@ async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_t
         assert len(records) == 1
         assert records[0].record_id == "fallback-1"
         assert meta.error is False
-        assert route.call_count == 4
-        # Verify call 4 is all-field
-        assert "(dengue AND zika AND chikungunya)" in route.calls[3].request.url.params["q"]
+        assert route.call_count == 5
+        # Verify call 5 is all-field
+        assert "(dengue AND zika AND chikungunya)" in route.calls[4].request.url.params["q"]
     finally:
         await cache.close()
         await http_client.aclose()
