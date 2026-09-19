@@ -85,7 +85,12 @@ FULLTEXT_ALLOWED_HOSTS = frozenset(
 )
 
 MAX_RESULTS = 50
-OVERFETCH_FACTOR = 3
+# Over-fetch, then re-rank client-side, then slice. The factor is tied to
+# BASE_FILTER's width: admitting the monography class takes the pt pool from
+# roughly 23.6k to 117.8k documents and about triples the hit count of a
+# topical query, so a factor of 3 would truncate targets out of the window
+# before rank_brazil_guidelines ever sees them. At limit=10 this fetches 100.
+OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 50_000
 
@@ -122,7 +127,7 @@ class _SearchState:
     bvs_shielded: bool = False
 
 
-BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
+BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt"})
 
