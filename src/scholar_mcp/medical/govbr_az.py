@@ -10,13 +10,57 @@ crawls those trees, and uses the A-Z index only as a vocabulary that maps
 official abbreviations (``dtha``, ``dcj``, ``dda``) to disease names.
 """
 
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
 from bs4 import BeautifulSoup
 
-from scholar_mcp.medical.govbr_common import normalize_text, parse_folder_index
+from scholar_mcp.config import Settings
+from scholar_mcp.medical.govbr_common import (
+    GOVBR_HEADERS,
+    SEVEN_DAYS_SECONDS,
+    is_login_redirect,
+    normalize_text,
+    parse_folder_index,
+    parse_listing_page,
+)
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+logger = logging.getLogger(__name__)
 
 GOVBR_ROOT = "https://www.gov.br"
 AZ_INDEX_PATH = "/saude/pt-br/assuntos/saude-de-a-a-z"
 AZ_INDEX_URL = f"{GOVBR_ROOT}{AZ_INDEX_PATH}"
+
+SVSA_PATH = "/saude/pt-br/centrais-de-conteudo/publicacoes/svsa"
+GUIAS_PATH = "/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais"
+SVSA_URL = f"{GOVBR_ROOT}{SVSA_PATH}"
+GUIAS_URL = f"{GOVBR_ROOT}{GUIAS_PATH}"
+CATALOG_CACHE_KEY = "govbr_az:catalog"
+
+# Folders paginate 20 items per page. 25 pages is ~500 documents per
+# folder: far above anything observed, and a hard stop against a
+# pagination loop pointing back into itself.
+MAX_PAGES_PER_FOLDER = 25
+
+_TREES = (("svsa", SVSA_URL, SVSA_PATH), ("guias", GUIAS_URL, GUIAS_PATH))
+
+
+def load_seed_catalog() -> dict[str, dict[str, Any]]:
+    """Load the bundled pre-scraped A-Z publication catalog."""
+    seed_path = Path(__file__).resolve().parent.parent / "data" / "govbr_az_catalog.json"
+    if not seed_path.exists():
+        logger.warning("gov.br A-Z seed catalog not found at %s", seed_path)
+        return {}
+    try:
+        with seed_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load gov.br A-Z seed catalog: %s", exc)
+        return {}
 
 
 def parse_az_index(html: str) -> list[str]:
@@ -69,3 +113,161 @@ def build_alias_text(title: str, aliases: dict[str, str]) -> str:
             if disease_norm not in matched and disease_norm not in title_norm:
                 matched.append(disease_norm)
     return " ".join(matched)
+
+
+class GovBrAZEngine:
+    """Catalog crawler and search engine for gov.br publication trees."""
+
+    def __init__(
+        self,
+        http_client: AsyncHttpClient,
+        cache: SQLiteCacheManager,
+        settings: Settings,
+    ) -> None:
+        self.http_client = http_client
+        self.cache = cache
+        self.settings = settings
+        self._memory_catalog: dict[str, dict[str, Any]] | None = None
+
+    async def _fetch_html(self, url: str) -> str | None:
+        """GET ``url`` and return HTML, or None for errors and login gates."""
+        try:
+            resp = await self.http_client.get(url, headers=GOVBR_HEADERS)
+        except Exception as exc:
+            logger.warning("gov.br A-Z fetch failed for %s: %s", url, exc)
+            return None
+        if resp is None or resp.status_code != 200:
+            return None
+        if is_login_redirect(resp.text):
+            logger.info("gov.br A-Z folder is login-gated, skipping: %s", url)
+            return None
+        return resp.text
+
+    async def _load_aliases(self) -> dict[str, str]:
+        """Build the disease alias vocabulary from the A-Z index."""
+        index_html = await self._fetch_html(AZ_INDEX_URL)
+        if not index_html:
+            return {}
+        aliases: dict[str, str] = {}
+        for letter_url in parse_az_index(index_html):
+            letter_html = await self._fetch_html(letter_url)
+            if not letter_html:
+                continue
+            aliases.update(parse_az_letter_page(letter_html))
+        return aliases
+
+    async def _crawl_folder(
+        self, tree: str, folder_url: str, aliases: dict[str, str]
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Crawl one folder with pagination. Returns (rows, ok)."""
+        topic = folder_url.rstrip("/").rsplit("/", 1)[-1]
+        rows: dict[str, dict[str, Any]] = {}
+        queue = [folder_url]
+        visited: set[str] = set()
+        ok = False
+
+        while queue and len(visited) < MAX_PAGES_PER_FOLDER:
+            url = queue.pop(0)
+            if url in visited:
+                continue
+            visited.add(url)
+            html = await self._fetch_html(url)
+            if html is None:
+                continue
+            ok = True
+            items, next_urls = parse_listing_page(html, url)
+            for item in items:
+                record_id = f"govbr-{tree}-{topic}-{item['slug']}"
+                rows[record_id] = {
+                    "record_id": record_id,
+                    "slug": item["slug"],
+                    "title": item["title"],
+                    "description": item["description"],
+                    "tree": tree,
+                    "topic": topic,
+                    "year": topic if tree == "guias" and topic.isdigit() else "",
+                    "aliases": build_alias_text(
+                        f"{item['title']} {topic}", aliases
+                    ),
+                    "view_url": item["view_url"],
+                    "download_url": item["download_url"],
+                }
+            for nurl in next_urls:
+                if nurl not in visited and nurl not in queue:
+                    queue.append(nurl)
+
+        return rows, ok
+
+    async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
+        """Crawl both publication trees from gov.br."""
+        aliases = await self._load_aliases()
+        catalog: dict[str, dict[str, Any]] = {}
+        folders_total = 0
+        folders_ok = 0
+
+        for tree, tree_url, tree_path in _TREES:
+            index_html = await self._fetch_html(tree_url)
+            if index_html is None:
+                logger.warning("gov.br A-Z tree index unavailable: %s", tree_url)
+                folders_total += 1  # a missing index is a failed unit of work
+                continue
+            folder_urls = parse_folder_index(index_html, tree_url, tree_path)
+            for folder_url in folder_urls:
+                folders_total += 1
+                rows, ok = await self._crawl_folder(tree, folder_url, aliases)
+                catalog.update(rows)
+                if ok:
+                    folders_ok += 1
+
+        # Cache only a fully-crawled catalog: a partial crawl pinned with
+        # the 7-day TTL would serve an incomplete catalog for a week while
+        # gov.br is flaky. Partial results are returned for this call but
+        # leave the cached and in-memory catalogs untouched.
+        if catalog and folders_total > 0 and folders_ok == folders_total:
+            self._memory_catalog = catalog
+            await self.cache.set(
+                CATALOG_CACHE_KEY,
+                catalog,
+                source="govbr_az",
+                ttl=SEVEN_DAYS_SECONDS,
+            )
+        return catalog
+
+    async def get_catalog(self) -> dict[str, dict[str, Any]]:
+        """Get the catalog from memory, cache, or the bundled seed."""
+        if self._memory_catalog:
+            return self._memory_catalog
+
+        cached_data, meta = await self.cache.get(CATALOG_CACHE_KEY)
+        if meta.cached and isinstance(cached_data, dict) and cached_data:
+            if meta.cache_age < SEVEN_DAYS_SECONDS:
+                self._memory_catalog = cached_data
+                return self._memory_catalog
+            try:
+                refreshed = await self.refresh_catalog()
+                if refreshed:
+                    return refreshed
+            except Exception as exc:
+                logger.warning("Failed to refresh gov.br A-Z catalog: %s", exc)
+            self._memory_catalog = cached_data
+            return self._memory_catalog
+
+        seed = load_seed_catalog()
+        if seed:
+            self._memory_catalog = seed
+            await self.cache.set(
+                CATALOG_CACHE_KEY,
+                seed,
+                source="govbr_az",
+                ttl=SEVEN_DAYS_SECONDS,
+            )
+            return self._memory_catalog
+
+        try:
+            crawled = await self.refresh_catalog()
+            if crawled:
+                return crawled
+        except Exception as exc:
+            logger.warning("Failed initial crawl of gov.br A-Z catalog: %s", exc)
+
+        return {}
