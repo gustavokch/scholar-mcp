@@ -7,10 +7,12 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
+    BASE_FILTER,
     BVS_SEARCH_URL,
     BrazilMoHEngine,
     _SearchState,
     _as_list,
+    _build_query,
     _derive_fulltext_id,
     _first,
     _parse_country,
@@ -113,92 +115,71 @@ def test_brazil_guideline_from_dict_handles_none():
 
 
 def test_build_query_joins_user_tokens_with_and():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("tratamento tuberculose", "all")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (tratamento AND tuberculose)'
+    assert built == f'{BASE_FILTER} AND (tratamento AND tuberculose)'
 
 
 def test_build_query_appends_brisa_filter():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("dengue", "brisa")
-    assert 'db:"BRISA"' in built
-    assert built.startswith('type:"non-conventional" AND la:"pt"')
+    assert built == f'{BASE_FILTER} AND db:"BRISA" AND (dengue)'
 
 
 def test_build_query_omits_brisa_filter_for_all():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     assert 'db:"BRISA"' not in _build_query("dengue", "all")
 
 
 def test_build_query_with_blank_query_is_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("   ", "all") == 'type:"non-conventional" AND la:"pt"'
+    assert _build_query("   ", "all") == BASE_FILTER
 
 
 def test_build_query_strips_solr_special_characters():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query('a "quote" (b) [c] && d || e', "all")
     # "a" and "e" are Portuguese stopwords and are dropped. The single-char
     # "b", "c", "d" are not Portuguese words, so they survive -- confirming
     # the length floor is not applied to outbound tokens.
-    assert built == 'type:"non-conventional" AND la:"pt" AND (quote AND b AND c AND d)'
+    assert built == f'{BASE_FILTER} AND (quote AND b AND c AND d)'
 
 
 def test_build_query_drops_bare_boolean_words():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("dengue AND zika", "all")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+    assert built == f'{BASE_FILTER} AND (dengue AND zika)'
 
 
 def test_build_query_all_tokens_reserved_yields_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("AND OR NOT", "all") == 'type:"non-conventional" AND la:"pt"'
+    assert _build_query("AND OR NOT", "all") == BASE_FILTER
 
 
 def test_build_query_title_scoped_prefixes_tokens_with_ti():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("tratamento tuberculose", "all", title_scoped=True)
-    assert built == 'type:"non-conventional" AND la:"pt" AND (ti:tratamento AND ti:tuberculose)'
+    assert built == f'{BASE_FILTER} AND (ti:tratamento AND ti:tuberculose)'
 
 
 def test_build_query_caller_supplied_ti_prefix_is_neutralized():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     # Caller cannot control field scoping or poison tokens into tidengue
     scoped = _build_query("ti:dengue", "all", title_scoped=True)
-    assert scoped == 'type:"non-conventional" AND la:"pt" AND (ti:dengue)'
+    assert scoped == f'{BASE_FILTER} AND (ti:dengue)'
 
     all_fields = _build_query("ti:dengue", "all", title_scoped=False)
-    assert all_fields == 'type:"non-conventional" AND la:"pt" AND (dengue)'
+    assert all_fields == f'{BASE_FILTER} AND (dengue)'
 
     # Multi-token test
     scoped_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=True)
-    assert scoped_multi == 'type:"non-conventional" AND la:"pt" AND (ti:dengue AND ti:zika)'
+    assert scoped_multi == f'{BASE_FILTER} AND (ti:dengue AND ti:zika)'
 
     all_fields_multi = _build_query("ti:dengue ti:zika", "all", title_scoped=False)
-    assert all_fields_multi == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+    assert all_fields_multi == f'{BASE_FILTER} AND (dengue AND zika)'
 
     # Leading +/- signs with field prefix
     scoped_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=True)
-    assert scoped_signed == 'type:"non-conventional" AND la:"pt" AND (ti:dengue AND ti:zika)'
+    assert scoped_signed == f'{BASE_FILTER} AND (ti:dengue AND ti:zika)'
 
     all_fields_signed = _build_query("+ti:dengue -ti:zika", "all", title_scoped=False)
-    assert all_fields_signed == 'type:"non-conventional" AND la:"pt" AND (dengue AND zika)'
+    assert all_fields_signed == f'{BASE_FILTER} AND (dengue AND zika)'
 
 
 def test_build_query_title_scoped_blank_or_reserved_yields_filters_only():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
-    assert _build_query("   ", "all", title_scoped=True) == 'type:"non-conventional" AND la:"pt"'
-    assert _build_query("AND OR NOT", "all", title_scoped=True) == 'type:"non-conventional" AND la:"pt"'
+    assert _build_query("   ", "all", title_scoped=True) == BASE_FILTER
+    assert _build_query("AND OR NOT", "all", title_scoped=True) == BASE_FILTER
 
 
 def test_usable_tokens_strips_portuguese_stopwords():
@@ -239,33 +220,23 @@ def test_usable_tokens_all_stopwords_yields_nothing():
 
 
 def test_build_query_strips_stopwords_in_and_mode():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("manejo da dengue", "all")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (manejo AND dengue)'
+    assert built == f'{BASE_FILTER} AND (manejo AND dengue)'
 
 
 def test_build_query_strips_stopwords_in_or_mode():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     built = _build_query("manejo da dengue", "all", operator="OR")
-    assert built == 'type:"non-conventional" AND la:"pt" AND (manejo OR dengue)'
+    assert built == f'{BASE_FILTER} AND (manejo OR dengue)'
 
 
 def test_build_query_or_operator_leaves_base_filters_anded():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     # Only the user-token group relaxes. The filters stay conjunctive, or the
     # query would match non-Portuguese and conventional literature.
     built = _build_query("manejo dengue", "brisa", operator="OR")
-    assert built == (
-        'type:"non-conventional" AND la:"pt" AND db:"BRISA" AND (manejo OR dengue)'
-    )
+    assert built == f'{BASE_FILTER} AND db:"BRISA" AND (manejo OR dengue)'
 
 
 def test_build_query_defaults_to_and():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     assert _build_query("manejo dengue", "all") == _build_query(
         "manejo dengue", "all", operator="AND"
     )
@@ -491,7 +462,7 @@ async def test_search_requests_overfetched_count(tmp_path: Path):
         )
         await engine.search_guidelines("dengue", limit=10)
         requested = route.calls[0].request.url.params
-        assert requested["count"] == "30"
+        assert requested["count"] == "100"
         assert requested["output"] == "json"
     finally:
         await cache.close()
@@ -506,7 +477,7 @@ async def test_search_caps_requested_count_at_page_size(tmp_path: Path):
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         await engine.search_guidelines("dengue", limit=50)
-        assert route.calls[0].request.url.params["count"] == "150"
+        assert route.calls[0].request.url.params["count"] == "200"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -598,7 +569,7 @@ async def test_search_clamps_limit_inside_engine(tmp_path: Path):
             return_value=httpx.Response(200, json=_bvs_response([]))
         )
         await engine.search_guidelines("dengue", limit=9999)
-        assert route.calls[0].request.url.params["count"] == "150"
+        assert route.calls[0].request.url.params["count"] == "200"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -617,7 +588,7 @@ async def test_search_network_failure_is_error_and_not_cached(tmp_path: Path):
         records, meta = await engine.search_guidelines("dengue", limit=5)
         assert records == []
         assert meta.error is True
-        composed = 'type:"non-conventional" AND la:"pt" AND (dengue)'
+        composed = 'la:"pt" AND (type:"non-conventional" OR type:"monography") AND (dengue)'
         _payload, cache_meta = await cache.get(f"brazil_moh_search:all:5:{composed}")
         assert cache_meta.cached is False
     finally:
@@ -1089,6 +1060,24 @@ async def test_get_full_text_caps_cached_content_at_ceiling(tmp_path: Path, monk
         await http_client.aclose()
 
 
+def test_base_filter_admits_monography_and_non_conventional():
+    # The Tuberculosis and Dengue Ministry manuals are indexed as
+    # type:"monography"; the previous filter matched only
+    # type:"non-conventional" and excluded them unconditionally.
+    assert 'type:"monography"' in BASE_FILTER
+    assert 'type:"non-conventional"' in BASE_FILTER
+    assert 'la:"pt"' in BASE_FILTER
+
+
+def test_build_query_keeps_the_type_alternation_grouped():
+    # The type alternation must stay parenthesized: composed into a query
+    # whose clauses are joined with AND, a bare OR would bind across the
+    # language filter and match non-Portuguese records.
+    composed = _build_query("dengue", "all")
+    assert '(type:"non-conventional" OR type:"monography")' in composed
+    assert composed.endswith("(dengue)")
+
+
 @respx.mock
 async def test_search_returns_empty_for_query_with_no_usable_tokens(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
@@ -1147,20 +1136,23 @@ async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
             ]
         )
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert route.call_count == 4
+        assert route.call_count == 5
         q_first = route.calls[0].request.url.params["q"]
         q_relaxed_title = route.calls[1].request.url.params["q"]
         third = str(route.calls[2].request.url)
         fourth = str(route.calls[3].request.url)
+        fifth = str(route.calls[4].request.url)
         assert "ti:dengue" in q_first and "ti:hemorragica" in q_first
         assert "ti:dengue" in q_relaxed_title and "ti:hemorragica" not in q_relaxed_title
-        assert "dengue+AND+hemorragica" in third or "dengue%20AND%20hemorragica" in third
-        assert "dengue+OR+hemorragica" in fourth or "dengue%20OR%20hemorragica" in fourth
+        assert "ti%3Adengue+OR+ti%3Ahemorragica" in third or "ti:dengue OR ti:hemorragica" in third
+        assert "dengue+AND+hemorragica" in fourth or "dengue%20AND%20hemorragica" in fourth
+        assert "dengue+OR+hemorragica" in fifth or "dengue%20OR%20hemorragica" in fifth
         assert len(records) == 1
         assert meta.error is False
     finally:
@@ -1239,9 +1231,9 @@ async def test_search_relaxed_request_reuses_the_same_count(tmp_path: Path):
         assert route.call_count == 3
         # count=0 returns HTTP 500 from this endpoint, so all requests
         # must reuse the over-fetch count, never a count-only probe.
-        assert route.calls[0].request.url.params["count"] == "15"
-        assert route.calls[1].request.url.params["count"] == "15"
-        assert route.calls[2].request.url.params["count"] == "15"
+        assert route.calls[0].request.url.params["count"] == "50"
+        assert route.calls[1].request.url.params["count"] == "50"
+        assert route.calls[2].request.url.params["count"] == "50"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1441,6 +1433,45 @@ async def test_search_ranks_before_slicing(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_search_falls_back_to_or_title_before_all_field(tmp_path: Path):
+    # A scenario query whose tokens never co-occur in one title: every AND
+    # conjunction returns nothing, and the ladder exhausts without a hit.
+    # ORing the tokens in ti: is what surfaces the manual.
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        target = _bvs_doc(
+            record_id="biblio-dengue",
+            title="Dengue: classificação de risco e manejo do paciente",
+        )
+
+        def _respond(request: httpx.Request) -> httpx.Response:
+            composed = request.url.params["q"]
+            # Only the OR-title composition returns the manual.
+            if "ti:dengue OR" in composed:
+                return httpx.Response(200, json=_bvs_response([target]))
+            return httpx.Response(200, json=_bvs_response([]))
+
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_respond)
+        records, meta = await engine.search_guidelines(
+            "dengue grupo manejo hidratação parenteral", limit=10
+        )
+
+        assert meta.error is False
+        assert [r.record_id for r in records] == ["biblio-dengue"]
+
+        composed_queries = [c.request.url.params["q"] for c in route.calls]
+        or_title = [q for q in composed_queries if "ti:dengue OR" in q]
+        assert or_title, composed_queries
+        # The stage runs after the AND ladder and before the all-field
+        # fallback, so no unscoped query is issued once it succeeds.
+        assert not any("ti:" not in q for q in composed_queries), composed_queries
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def _slow_response(request: httpx.Request) -> httpx.Response:
     """A BVS response that arrives long after any sane stage budget."""
     import asyncio as _asyncio
@@ -1531,8 +1562,6 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
 
 
 def test_build_query_accepts_token_override():
-    from scholar_mcp.medical.brazil_moh import _build_query
-
     composed = _build_query(
         "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
     )
@@ -1620,12 +1649,13 @@ async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_t
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     try:
-        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> all-field (hit)
+        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> or-title (miss) -> all-field (hit)
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),  # full title
                 httpx.Response(200, json=_bvs_response([])),  # title relaxed 1
                 httpx.Response(200, json=_bvs_response([])),  # title relaxed 2
+                httpx.Response(200, json=_bvs_response([])),  # title-scoped-or
                 httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),  # all-field
             ]
         )
@@ -1634,9 +1664,9 @@ async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_t
         assert len(records) == 1
         assert records[0].record_id == "fallback-1"
         assert meta.error is False
-        assert route.call_count == 4
-        # Verify call 4 is all-field
-        assert "(dengue AND zika AND chikungunya)" in route.calls[3].request.url.params["q"]
+        assert route.call_count == 5
+        # Verify call 5 is all-field
+        assert "(dengue AND zika AND chikungunya)" in route.calls[4].request.url.params["q"]
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1963,8 +1993,6 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         assert records == []
         assert meta.error is True
         # Nothing cached: a second call must not be served a cached empty list.
-        from scholar_mcp.medical.brazil_moh import _build_query
-
         composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
         _cached, cached_meta = await cache.get(f"brazil_moh_search:all:10:{composed}")
         assert not cached_meta.cached
@@ -2105,3 +2133,61 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
+
+
+@respx.mock
+async def test_monography_noise_does_not_displace_the_matching_guideline(
+    tmp_path: Path,
+):
+    # The widened BASE_FILTER admits monographs. BVS returns them ahead of
+    # the guideline in relevance order; rank_brazil_guidelines must still
+    # lift the title that actually matches the query.
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        noise = _bvs_doc(
+            record_id="mono-noise",
+            title="Dengue: aspectos históricos da doença no Brasil",
+        )
+        target = _bvs_doc(
+            record_id="biblio-target",
+            title="Dengue: classificação de risco e manejo do paciente",
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([noise, target])
+            )
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue classificação risco manejo", limit=2
+        )
+        assert meta.error is False
+        assert records[0].record_id == "biblio-target"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_or_title_stage_after_a_stalled_strict_stage(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                _slow_response,  # strict title stalls
+                httpx.Response(200, json=_bvs_response([])),
+                httpx.Response(200, json=_bvs_response([])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue manejo", limit=5)
+        composed = [c.request.url.params["q"] for c in route.calls]
+        or_title = [q for q in composed if "ti:dengue OR" in q]
+        # Assert the chosen behaviour: `assert not or_title` if the stage is
+        # gated on the strict error, `assert or_title` if it is not.
+        assert not or_title, composed
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
