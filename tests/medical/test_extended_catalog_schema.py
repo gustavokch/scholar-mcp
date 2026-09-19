@@ -1,6 +1,7 @@
 """Schema and content checks for the extended MoH corpus (Task 2)."""
 
 import json
+import unicodedata
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "src" / "scholar_mcp" / "data"
@@ -87,8 +88,6 @@ def test_catalog_declares_license():
 
 
 def _fold(text: str) -> str:
-    import unicodedata
-
     return (
         unicodedata.normalize("NFKD", text)
         .encode("ascii", "ignore")
@@ -103,8 +102,5 @@ def test_titles_carry_match_tokens():
     catalog = _load_catalog()
     for record_id, tokens in TITLE_TOKENS.items():
         title = _fold(catalog[record_id]["title"])
-        if record_id == "ms-portaria-aps-cofinanciamento-2024":
-            assert any(t in title for t in tokens), f"{record_id} title lacks {tokens}"
-        else:
-            for token in tokens:
-                assert token in title, f"{record_id} title lacks {token}"
+        for token in tokens:
+            assert _fold(token) in title, f"{record_id} title lacks {token}"
