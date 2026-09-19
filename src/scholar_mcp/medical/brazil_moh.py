@@ -44,6 +44,7 @@ import re
 import time
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from bs4 import BeautifulSoup
@@ -908,6 +909,64 @@ class BrazilMoHEngine:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
             return "", True
 
+    async def _serve_local_text(
+        self,
+        cache_key: str,
+        base: dict[str, Any],
+        record: BrazilGuideline,
+        max_chars: int | None,
+    ) -> tuple[dict[str, Any], CacheMetadata]:
+        """Serve a bundled ``local:`` corpus file from disk, offline.
+
+        The full file is read into memory (hundreds of KB, accepted) and the
+        Task 1 ``total_chars``/ceiling/cache contract applies unchanged. No
+        network, PDF parsing, or BVS lookup happens on this path.
+        """
+        rel = (record.document_url or "")[len("local:"):]
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            return (
+                {**base, "status": "not_found", "error": "no record for id",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+        try:
+            data_dir = (Path(__file__).resolve().parent.parent / "data").resolve()
+            path = (data_dir / rel).resolve()
+            path.relative_to(data_dir)
+        except ValueError:
+            return (
+                {**base, "status": "not_found", "error": "no record for id",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return (
+                {**base, "status": "not_found", "error": "no record for id",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+        except (UnicodeDecodeError, OSError) as exc:
+            logger.warning("brazil_moh local text read failed (%s): %s", path, exc)
+            return (
+                {**base, "status": "error", "error": "local text read failed",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+        total_chars = len(text)
+        payload = {
+            **base, "status": "success", "title": record.title,
+            "content_type": "text",
+            "content": text[:MAX_FULL_TEXT_CHARS],
+            "total_chars": total_chars,
+        }
+        await self.cache.set(cache_key, payload, source="brazil_moh")
+        return (
+            self._serve_full_text(payload, max_chars),
+            CacheMetadata(cached=False, cache_age=0, error=False),
+        )
+
     async def get_full_text(
         self,
         record_id: str,
@@ -954,6 +1013,10 @@ class BrazilMoHEngine:
             )
 
         base["document_url"] = record.document_url
+        if record.document_url.startswith("local:"):
+            return await self._serve_local_text(
+                cache_key, base, record, max_chars
+            )
         pdf_text, errored = await self._extract_pdf_text(record.document_url)
 
         if pdf_text:
