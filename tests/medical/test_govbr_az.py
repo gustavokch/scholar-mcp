@@ -1,9 +1,11 @@
 # tests/medical/test_govbr_az.py
 from scholar_mcp.medical.govbr_az import (
     build_alias_text,
+    load_seed_catalog,
     parse_az_index,
     parse_az_letter_page,
 )
+from scholar_mcp.medical.govbr_common import normalize_text
 
 AZ_INDEX_HTML = """
 <div id="content-core">
@@ -116,7 +118,8 @@ def _make_engine(tmp_path, responses):
     http.get = AsyncMock(side_effect=fake_get)
     settings = Settings()
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
-    return GovBrAZEngine(http, cache, settings), http
+    engine = GovBrAZEngine(http, cache, settings)
+    return engine, http
 
 
 SVSA = "/saude/pt-br/centrais-de-conteudo/publicacoes/svsa"
@@ -228,6 +231,7 @@ async def test_refresh_catalog_follows_pagination_once_per_url(tmp_path, respons
 async def test_search_ranks_exact_topic_match_first(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         results, meta = await engine.search("tuberculose", limit=5)
 
         assert meta.error is False
@@ -246,6 +250,7 @@ async def test_search_ranks_exact_topic_match_first(tmp_path, responses):
 async def test_search_returns_empty_for_blank_query(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         results, meta = await engine.search("   ", limit=5)
         assert results == []
         assert meta.error is False
@@ -256,6 +261,7 @@ async def test_search_returns_empty_for_blank_query(tmp_path, responses):
 async def test_search_respects_limit(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         results, _ = await engine.search("dengue", limit=1)
         assert len(results) == 1
     finally:
@@ -265,6 +271,7 @@ async def test_search_respects_limit(tmp_path, responses):
 async def test_search_uses_cache_on_second_call(tmp_path, responses):
     engine, http = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         await engine.search("dengue", limit=5)
         calls_after_first = http.get.await_count
         results, meta = await engine.search("dengue", limit=5)
@@ -278,6 +285,7 @@ async def test_search_uses_cache_on_second_call(tmp_path, responses):
 async def test_get_guideline_by_record_id(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         record = await engine.get_guideline("govbr-svsa-dengue-dengue-manejo-clinico")
         assert record is not None
         assert record.title.startswith("Dengue")
@@ -288,6 +296,7 @@ async def test_get_guideline_by_record_id(tmp_path, responses):
 async def test_get_guideline_by_slug(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         record = await engine.get_guideline("dengue-manejo-clinico")
         assert record is not None
         assert record.record_id == "govbr-svsa-dengue-dengue-manejo-clinico"
@@ -298,6 +307,7 @@ async def test_get_guideline_by_slug(tmp_path, responses):
 async def test_get_guideline_unknown_returns_none(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         assert await engine.get_guideline("nao-existe") is None
     finally:
         await engine.cache.close()
@@ -306,9 +316,30 @@ async def test_get_guideline_unknown_returns_none(tmp_path, responses):
 async def test_guias_records_carry_year(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
+        await engine.refresh_catalog()
         record = await engine.get_guideline("govbr-guias-2024-guia-vigilancia")
         assert record is not None
         assert record.year == "2024"
         assert record.collections == ["GUIAS-E-MANUAIS"]
     finally:
         await engine.cache.close()
+
+
+def test_seed_catalog_is_bundled_and_non_empty():
+    seed = load_seed_catalog()
+    assert len(seed) > 50
+
+
+def test_seed_catalog_rows_have_required_fields():
+    seed = load_seed_catalog()
+    for record_id, row in seed.items():
+        assert row["record_id"] == record_id
+        assert row["title"]
+        assert row["download_url"].endswith("/@@download/file")
+        assert row["tree"] in {"svsa", "guias"}
+
+
+def test_seed_catalog_contains_dengue_and_tuberculosis_manuals():
+    titles = [normalize_text(row["title"]) for row in load_seed_catalog().values()]
+    assert any("dengue" in title for title in titles)
+    assert any("tuberculose" in title for title in titles)
