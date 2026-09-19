@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **gov.br "Saúde de A a Z" publication scraper (`GovBrAZEngine`)**: Indexing `/centrais-de-conteudo/publicacoes/svsa/<topic>` and `/centrais-de-conteudo/publicacoes/guias-e-manuais/<year>`, including the Dengue clinical management and Tuberculosis control manuals.
+- **`collection="az"` for `brazil_guidelines` tool**: New collection option in `search_brazil_moh_guidelines`; records also appear in the default `collection="all"` results and full text resolves via `get_brazil_moh_full_text`.
+- **`scripts/update_govbr_az_catalog.py`**: CLI script to regenerate the bundled `govbr_az_catalog.json` seed catalog.
 - **Brazilian MoH guidelines tools**: `search_brazil_moh_guidelines` and `get_brazil_moh_full_text` MCP tools for Brazilian Ministry of Health technical publications (PCDT, CONITEC, cadernos, manuais) via BVS/iAHx API with allowlisted PDF full-text extraction, Portuguese language support, and exact-id deduplication (PR #19).
 - **`CACHE_TTL_BRAZIL_MOH` setting**: Configurable cache TTL (default 2,592,000s / 30d) for caching Brazilian MoH searches and document full text in SQLite (PR #19).
 - **`fonttools>=4.40.0` dependency**: Added to `pyproject.toml` for `pypdf` optional font processing support (PR #18).
