@@ -13,6 +13,7 @@ official abbreviations (``dtha``, ``dcj``, ``dda``) to disease names.
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -107,13 +108,16 @@ def build_alias_text(title: str, aliases: dict[str, str]) -> str:
         slug_norm = normalize_text(slug)
         if not disease_norm:
             continue
-        if disease_norm in title_norm:
-            if slug_norm not in matched and slug_norm not in title_norm:
+        disease_matched = bool(re.search(r"\b" + re.escape(disease_norm) + r"\b", title_norm))
+        slug_matched = bool(re.search(r"\b" + re.escape(slug_norm) + r"\b", title_norm)) if slug_norm else False
+
+        if disease_matched:
+            if slug_norm not in matched and not slug_matched:
                 matched.append(slug_norm)
             elif slug_norm == disease_norm and slug_norm not in matched:
                 matched.append(slug_norm)
-        elif slug_norm in title_norm:
-            if disease_norm not in matched and disease_norm not in title_norm:
+        elif slug_matched:
+            if disease_norm not in matched and not disease_matched:
                 matched.append(disease_norm)
     return " ".join(matched)
 
