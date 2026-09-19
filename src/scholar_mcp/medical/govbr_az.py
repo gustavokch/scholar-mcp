@@ -109,34 +109,67 @@ def _alias_pattern(term: str) -> re.Pattern[str]:
     return re.compile(r"\b" + re.escape(term) + r"s?\b")
 
 
-def build_alias_text(title: str, aliases: dict[str, str]) -> str:
+def compile_alias_patterns(
+    aliases: dict[str, str],
+) -> list[tuple[str, re.Pattern[str], str, re.Pattern[str] | None]]:
+    """Compile the A-Z alias vocabulary once, for reuse across titles.
+
+    A crawl scores hundreds of items against hundreds of aliases. Building
+    the patterns inline overruns ``re``'s internal cache, so every title
+    pays for a full recompile of the vocabulary.
+    """
+    compiled: list[tuple[str, re.Pattern[str], str, re.Pattern[str] | None]] = []
+    for slug, disease in aliases.items():
+        disease_norm = normalize_text(disease)
+        if not disease_norm:
+            continue
+        slug_norm = normalize_text(slug)
+        compiled.append(
+            (
+                disease_norm,
+                _alias_pattern(disease_norm),
+                slug_norm,
+                _alias_pattern(slug_norm) if slug_norm else None,
+            )
+        )
+    return compiled
+
+
+def build_alias_text_compiled(
+    title: str,
+    patterns: list[tuple[str, re.Pattern[str], str, re.Pattern[str] | None]],
+) -> str:
     """Return space-joined A-Z aliases that apply to ``title``.
 
-    An alias applies when the disease name appears in the document title,
-    so "Manual ... da Tuberculose" also scores for the query "tuberculose"
-    and for abbreviations such as "dtha".
+    For each alias, the *counterpart* term is emitted: a title carrying the
+    disease name gains the abbreviation, and a title carrying the
+    abbreviation gains the disease name.
     """
     title_norm = normalize_text(title)
     if not title_norm:
         return ""
     matched: list[str] = []
-    for slug, disease in aliases.items():
-        disease_norm = normalize_text(disease)
-        slug_norm = normalize_text(slug)
-        if not disease_norm:
-            continue
-        disease_matched = bool(_alias_pattern(disease_norm).search(title_norm))
-        slug_matched = bool(_alias_pattern(slug_norm).search(title_norm)) if slug_norm else False
+    for disease_norm, disease_re, slug_norm, slug_re in patterns:
+        disease_matched = bool(disease_re.search(title_norm))
+        slug_matched = bool(slug_re.search(title_norm)) if slug_re else False
 
         if disease_matched:
             if slug_norm not in matched and not slug_matched:
                 matched.append(slug_norm)
             elif slug_norm == disease_norm and slug_norm not in matched:
                 matched.append(slug_norm)
-        elif slug_matched:
-            if disease_norm not in matched and not disease_matched:
-                matched.append(disease_norm)
+        elif slug_matched and disease_norm not in matched:
+            matched.append(disease_norm)
     return " ".join(matched)
+
+
+def build_alias_text(title: str, aliases: dict[str, str]) -> str:
+    """Compile ``aliases`` and apply them to a single ``title``.
+
+    Convenience wrapper for one-off calls; crawls should compile once with
+    ``compile_alias_patterns`` and call ``build_alias_text_compiled``.
+    """
+    return build_alias_text_compiled(title, compile_alias_patterns(aliases))
 
 
 _COLLECTION_BY_TREE = {"svsa": "SVSA", "guias": "GUIAS-E-MANUAIS"}
@@ -203,7 +236,10 @@ class GovBrAZEngine:
         return aliases
 
     async def _crawl_folder(
-        self, tree: str, folder_url: str, aliases: dict[str, str]
+        self,
+        tree: str,
+        folder_url: str,
+        patterns: list[tuple[str, re.Pattern[str], str, re.Pattern[str] | None]],
     ) -> tuple[dict[str, dict[str, Any]], bool]:
         """Crawl one folder with pagination. Returns (rows, ok)."""
         topic = folder_url.rstrip("/").rsplit("/", 1)[-1]
@@ -232,8 +268,8 @@ class GovBrAZEngine:
                     "tree": tree,
                     "topic": topic,
                     "year": topic if tree == "guias" and topic.isdigit() else "",
-                    "aliases": build_alias_text(
-                        f"{item['title']} {topic}", aliases
+                    "aliases": build_alias_text_compiled(
+                        f"{item['title']} {topic}", patterns
                     ),
                     "view_url": item["view_url"],
                     "download_url": item["download_url"],
@@ -253,7 +289,8 @@ class GovBrAZEngine:
         as a size reference: a crawl that returns a fraction of it is a
         parser break rather than a smaller site, and must not be pinned.
         """
-        aliases = await self._load_aliases()
+        # Compiled once here and reused for every item in every folder.
+        patterns = compile_alias_patterns(await self._load_aliases())
         catalog: dict[str, dict[str, Any]] = {}
         folders_total = 0
         folders_ok = 0
@@ -267,7 +304,7 @@ class GovBrAZEngine:
             folder_urls = parse_folder_index(index_html, tree_url, tree_path)
             for folder_url in folder_urls:
                 folders_total += 1
-                rows, ok = await self._crawl_folder(tree, folder_url, aliases)
+                rows, ok = await self._crawl_folder(tree, folder_url, patterns)
                 catalog.update(rows)
                 if ok:
                     folders_ok += 1
