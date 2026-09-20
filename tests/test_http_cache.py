@@ -913,4 +913,22 @@ async def test_bvs_403_html_challenge_fails_fast_without_retries():
         await client.aclose()
 
 
+def test_matches_html_markers():
+    """_matches_html_markers returns True only when text/html and marker present."""
+    from scholar_mcp.utils.http import _matches_html_markers
+
+    resp_match = httpx.Response(200, text="<html><body>captcha required</body></html>", headers={"content-type": "text/html; charset=utf-8"})
+    assert _matches_html_markers(resp_match, ("captcha", "cloudflare")) is True
+
+    resp_no_marker = httpx.Response(200, text="<html><body>welcome</body></html>", headers={"content-type": "text/html"})
+    assert _matches_html_markers(resp_no_marker, ("captcha", "cloudflare")) is False
+
+    resp_not_html = httpx.Response(200, text="captcha required", headers={"content-type": "application/json"})
+    assert _matches_html_markers(resp_not_html, ("captcha", "cloudflare")) is False
+
+    resp_no_header = httpx.Response(200, text="captcha required")
+    assert _matches_html_markers(resp_no_header, ("captcha", "cloudflare")) is False
+
+
+
 

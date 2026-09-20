@@ -9,6 +9,7 @@ import ssl
 import threading
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Literal
@@ -53,6 +54,27 @@ BOT_SHIELD_HTML_MARKERS = (
     "captcha",
     "attention required",
 )
+
+UNEXPECTED_HTML_MARKERS = (
+    "cloudflare",
+    "ddg",
+    "challenge-platform",
+    "just a moment",
+    "captcha",
+    "attention required",
+)
+
+
+def _matches_html_markers(
+    resp: httpx.Response,
+    markers: Sequence[str],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp has text/html content-type and matches any marker."""
+    if "text/html" not in resp.headers.get("content-type", "").lower():
+        return False
+    sample = resp.text[:max_chars].lower()
+    return any(marker in sample for marker in markers)
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -414,28 +436,10 @@ class AsyncHttpClient:
         return url
 
     def is_unexpected_html(self, resp: httpx.Response) -> bool:
-        content_type = resp.headers.get("content-type", "").lower()
-        if "text/html" in content_type:
-            text_sample = resp.text[:1000].lower()
-            if any(
-                marker in text_sample
-                for marker in (
-                    "cloudflare",
-                    "ddg",
-                    "challenge-platform",
-                    "just a moment",
-                    "captcha",
-                    "attention required",
-                )
-            ):
-                return True
-        return False
+        return _matches_html_markers(resp, UNEXPECTED_HTML_MARKERS)
 
     def _is_challenge_html(self, resp: httpx.Response) -> bool:
-        if "text/html" not in resp.headers.get("content-type", "").lower():
-            return False
-        sample = resp.text[:1000].lower()
-        return any(marker in sample for marker in BOT_SHIELD_HTML_MARKERS)
+        return _matches_html_markers(resp, BOT_SHIELD_HTML_MARKERS)
 
     _is_unexpected_html = is_unexpected_html
 
