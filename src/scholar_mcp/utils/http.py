@@ -4,12 +4,14 @@ import logging
 import math
 import random
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import httpx
 
@@ -44,6 +46,13 @@ BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 # other request to that host -- for hours.
 MAX_RETRY_AFTER = 60.0
 
+# How long a "permanently dead" host verdict (DNS failure, bad cert) is
+# trusted before the next request re-probes the host. Long enough that a
+# stage chain does not eat the retry cost mid-run, short enough that a fixed
+# mirror recovers within one server uptime window instead of needing a
+# restart.
+DEAD_HOST_TTL_S = 1800.0
+
 
 @dataclass(frozen=True)
 class FetchFailure:
@@ -77,6 +86,31 @@ def _host_key(host: str | None) -> str:
     if hostname == "pesquisa.bvsalud.org" or hostname.endswith(".bvsalud.org"):
         return "pesquisa.bvsalud.org"
     return hostname
+
+
+_PERMANENT_TRANSPORT_EXCEPTIONS = (
+    socket.gaierror,
+    ssl.SSLCertVerificationError,
+)
+
+
+def _is_permanent_transport_error(exc: BaseException) -> bool:
+    """True when exc or any chained cause/context is a permanent network failure.
+
+    socket.gaierror (DNS lookup failure) and ssl.SSLCertVerificationError (untrusted
+    or self-signed certificate) do not clear on retry with backoff.
+
+    The chain walk keeps a visited set: ``__context__`` can link exceptions in a
+    cycle (respx wraps handler exceptions that way), which would hang the walk.
+    """
+    seen: set[int] = set()
+    curr: BaseException | None = exc
+    while curr is not None and id(curr) not in seen:
+        seen.add(id(curr))
+        if isinstance(curr, _PERMANENT_TRANSPORT_EXCEPTIONS):
+            return True
+        curr = curr.__cause__ or curr.__context__
+    return False
 
 
 def _parse_retry_after(resp: httpx.Response) -> float | None:
@@ -203,6 +237,15 @@ class AsyncHttpClient:
     _limiters: dict[str, AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
+    # Cache of hosts with permanent transport failures (DNS resolution or SSL
+    # certificate verification errors). Subsequent requests to these hosts
+    # short-circuit immediately without making network calls. Keyed on host,
+    # valued on the monotonic deadline the verdict expires -- a DNS blip or a
+    # cert renewal window must not blackhole a host for the rest of the
+    # process's life, so the verdict is re-probed after DEAD_HOST_TTL_S.
+    _dead_hosts: ClassVar[dict[str, float]] = {}
+    _dead_hosts_lock = threading.Lock()
+
     # Typed record of the most recent terminal failure, per requesting task.
     # ContextScoped: the client is a shared singleton, so a plain attribute
     # would leak one request's failure into every concurrent call.
@@ -264,9 +307,36 @@ class AsyncHttpClient:
 
     @classmethod
     def reset_limiters(cls) -> None:
-        """Drop every limiter bucket. For tests; never call it on a live server."""
+        """Drop every limiter bucket and dead host. For tests; never call it on a live server."""
         with cls._limiters_lock:
             cls._limiters.clear()
+        with cls._dead_hosts_lock:
+            cls._dead_hosts.clear()
+
+    @classmethod
+    def reset_dead_hosts(cls) -> None:
+        """Drop every dead-host verdict. For tests; never call it on a live server."""
+        with cls._dead_hosts_lock:
+            cls._dead_hosts.clear()
+
+    @classmethod
+    def is_dead_host(cls, host: str) -> bool:
+        """True when host suffered a permanent transport failure within DEAD_HOST_TTL_S."""
+        key = _host_key(host)
+        with cls._dead_hosts_lock:
+            deadline = cls._dead_hosts.get(key)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                del cls._dead_hosts[key]
+                return False
+            return True
+
+    @classmethod
+    def mark_dead_host(cls, host: str) -> None:
+        """Record host as dead until DEAD_HOST_TTL_S from now."""
+        with cls._dead_hosts_lock:
+            cls._dead_hosts[_host_key(host)] = time.monotonic() + DEAD_HOST_TTL_S
 
     def is_throttled(self, host: str) -> bool:
         """True when ``host``'s limiter holds a throttle deadline in the future.
@@ -380,6 +450,11 @@ class AsyncHttpClient:
         limiter = self._limiter_for_url(target_url)
         host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
 
+        if self.is_dead_host(host_key):
+            self.last_failure = FetchFailure("transport", None, "DeadHostCached")
+            logger.info("HTTP GET %s skipped: host %s is marked permanently dead", log_url, host_key)
+            return None
+
         for attempt in range(self.max_retries):
             await limiter.acquire()
             try:
@@ -455,6 +530,16 @@ class AsyncHttpClient:
                 self.last_failure = None
                 return resp
             except (httpx.TransportError, httpx.TimeoutException) as exc:
+                if _is_permanent_transport_error(exc):
+                    self.mark_dead_host(host_key)
+                    self.last_failure = FetchFailure("transport", None, type(exc).__name__)
+                    logger.warning(
+                        "HTTP GET %s failed permanently on attempt %d: %s",
+                        log_url,
+                        attempt + 1,
+                        exc,
+                    )
+                    return None
                 if attempt < self.max_retries - 1:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base

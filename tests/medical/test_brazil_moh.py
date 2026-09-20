@@ -1,6 +1,8 @@
+import asyncio
 import dataclasses
 import json
 import logging
+import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -2405,6 +2407,89 @@ async def test_search_guidelines_local_records_returns_success_metadata(tmp_path
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_bvs_origin_502_skips_further_bvs_stages(tmp_path: Path):
+    """When BVS returns 502 Bad Gateway, title-scoped stage records the failure and
+    all subsequent BVS HTTP stages (title relaxation, OR-title, all-field, relaxed)
+    are skipped to avoid burning up to seven 20s timeouts."""
+    settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(502, text="Bad Gateway")
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue classificacao risco manejo", limit=5
+        )
+        assert route.call_count == 1
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_bvs_empty_200_runs_progressive_relaxation_chain(tmp_path: Path):
+    """Empty-result 200s are query-shape misses, not origin outages.
+    Progressive relaxation must run fully across the chain."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    _stub_pcdt_empty(engine)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        records, meta = await engine.search_guidelines(
+            "dengue classificacao risco manejo", limit=5
+        )
+        # title-scoped + 3 relaxations + or-title + all-field + relaxed = 7 calls
+        assert route.call_count == 7
+        assert records == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_timeout_bounds_within_chain_remaining(tmp_path: Path):
+    """A stage must be bounded by min(brazil_stage_timeout_s, chain_budget_remaining)."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 20.0
+    engine.settings.brazil_chain_timeout_s = 5.0
+    chain_start = time.monotonic() - 4.5  # 0.5s left in chain
+    stage_budget = engine._stage_budget(chain_start)
+    assert 0.4 <= stage_budget <= 0.6
+    await cache.close()
+    await http_client.aclose()
+
+
+@respx.mock
+async def test_stage_chain_terminates_within_chain_timeout(tmp_path: Path):
+    """With brazil_chain_timeout_s=1.0 and stages that hang, the chain returns in ~1s."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 20.0
+    engine.settings.brazil_chain_timeout_s = 1.0
+    engine.settings.enable_browser_fallback = False
+    _stub_pcdt_empty(engine)
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(10.0)
+        return httpx.Response(200, json=_bvs_response([]))
+
+    route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_hang)
+    t0 = time.monotonic()
+    records, meta = await engine.search_guidelines("dengue classificacao", limit=5)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.5
+    assert records == []
+    await cache.close()
+    await http_client.aclose()
 
 
 async def test_full_text_resolves_az_record(tmp_path):

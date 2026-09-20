@@ -2,14 +2,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Sci-Hub mirrors, pruned 2026-09-19. Removed as permanently dead (probed with a
+# DOI request): sci-hub.hkvisa.net (403 "Just a moment" bot shield on every path),
+# sci-hub.st (TLS serves a self-signed certificate), sci-hub.se (NXDOMAIN —
+# domain gone). Re-check liveness before re-adding any mirror.
 DEFAULT_SCIHUB_MIRRORS = [
     "https://sci-hub.mksa.top",
     "https://sci-hub.ru",
     "https://sci-hub.ren",
     "https://sci-hub.ee",
-    "https://sci-hub.hkvisa.net",
-    "https://sci-hub.st",
-    "https://sci-hub.se",
 ]
 
 
@@ -77,19 +78,18 @@ class Settings:
     # own hard timeout. Twenty seconds per stage keeps one stalled stage from
     # eating the share of the ceiling the remaining stages need.
     brazil_stage_timeout_s: float = 20.0
-    # Whole-chain ceiling for BrazilMoHEngine. Only the browser tier enforces
-    # it directly -- it gets min(brazil_browser_timeout_s, chain time still
-    # left) (BrazilMoHEngine._browser_ceiling). The HTTP stages each get a
-    # flat brazil_stage_timeout_s, so PCDT plus up to seven 20 s BVS stages can
-    # overrun this bound (worst case 140 s); the caller's hard timeout is what
-    # cancels that. 90 s covers the shielded fast-fail path (PCDT + one BVS
-    # stage + the ~25 s camoufox tier) with headroom. <= 0 disables the bound.
+    # Whole-chain ceiling for BrazilMoHEngine. Both the HTTP stages and the
+    # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,
+    # chain budget left), and the browser tier receives min(brazil_browser_timeout_s,
+    # chain budget left). PCDT plus BVS stages cannot exceed this bound.
+    # 90 s covers the shielded fast-fail path (PCDT + one BVS stage + the ~25 s
+    # camoufox tier) with headroom. <= 0 disables the bound.
     brazil_chain_timeout_s: float = 90.0
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
     scihub_mirror_timeout_s: float = 12.0
-    # Whole-tier ceiling for the scihub mirror loop: 7 mirrors x 12 s would
-    # be 84 s against the 45 s total_budget_seconds the waterfall enforces.
+    # Whole-tier ceiling for the scihub mirror loop: 4 mirrors x 12 s would
+    # be 48 s against the 45 s total_budget_seconds the waterfall enforces.
     # The loop stops starting new mirrors once the tier deadline passes.
     scihub_tier_timeout_s: float = 20.0
     enable_browser_fallback: bool = True
