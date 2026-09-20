@@ -146,6 +146,7 @@ class _SearchState:
 
     bvs_shielded: bool = False
     bvs_origin_down: bool = False
+    bvs_timed_out: bool = False
 
 
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
@@ -519,8 +520,8 @@ class BrazilMoHEngine:
         return self.http_client.is_throttled(_BVS_HOST)
 
     def _bvs_unavailable(self, state: _SearchState) -> bool:
-        """True when BVS is shielded by CDN 403, throttled, or origin 5xx."""
-        return self._is_bvs_shielded(state) or state.bvs_origin_down
+        """True when BVS is shielded by CDN 403, throttled, origin 5xx, or timed out."""
+        return self._is_bvs_shielded(state) or state.bvs_origin_down or state.bvs_timed_out
 
     def _stage_budget(self, chain_start: float | None = None) -> float:
         """Effective time budget for one retrieval stage.
@@ -539,7 +540,14 @@ class BrazilMoHEngine:
             return remaining
         return min(stage_budget, remaining)
 
-    async def _stage(self, stage: str, coro: Any, default: Any, chain_start: float | None = None) -> Any:
+    async def _stage(
+        self,
+        stage: str,
+        coro: Any,
+        default: Any,
+        chain_start: float | None = None,
+        state: _SearchState | None = None,
+    ) -> Any:
         """Run one retrieval stage under its own time budget.
 
         Callers wrap the whole ``search_guidelines`` chain in a hard ceiling
@@ -547,6 +555,10 @@ class BrazilMoHEngine:
         rate limiter must die here so the remaining stages — or the PCDT
         fallback — still get their share of that ceiling, and so the chain
         degrades to partial results instead of a cancelled coroutine.
+
+        Passing ``state`` arms the BVS circuit breaker: timing out marks BVS
+        unavailable on ``state`` to halt remaining BVS HTTP stages. Only BVS
+        stages should pass ``state``.
 
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
@@ -577,6 +589,8 @@ class BrazilMoHEngine:
             logger.warning(
                 "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
             )
+            if state is not None:
+                state.bvs_timed_out = True
             return default
 
     async def search_guidelines(
@@ -646,7 +660,11 @@ class BrazilMoHEngine:
             else None
         )
         records, errored = await self._stage(
-            "title-scoped", self._fetch_records(title_composed, count, state), ([], True), chain_start=chain_start
+            "title-scoped",
+            self._fetch_records(title_composed, count, state),
+            ([], True),
+            chain_start=chain_start,
+            state=state,
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -671,6 +689,7 @@ class BrazilMoHEngine:
                     self._fetch_records(relaxed_title_composed, count, state),
                     ([], True),
                     chain_start=chain_start,
+                    state=state,
                 )
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
@@ -707,6 +726,7 @@ class BrazilMoHEngine:
                 self._fetch_records(or_title_composed, count, state),
                 ([], True),
                 chain_start=chain_start,
+                state=state,
             )
             errored_any = errored_any or or_title_errored
             bvs_errored = bvs_errored or or_title_errored
@@ -728,7 +748,11 @@ class BrazilMoHEngine:
             and not self._bvs_unavailable(state)
         ):
             fallback_records, fallback_errored = await self._stage(
-                "all-field", self._fetch_records(all_composed, count, state), ([], True), chain_start=chain_start
+                "all-field",
+                self._fetch_records(all_composed, count, state),
+                ([], True),
+                chain_start=chain_start,
+                state=state,
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
@@ -746,7 +770,11 @@ class BrazilMoHEngine:
         ):
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
             relaxed_records, relaxed_errored = await self._stage(
-                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True), chain_start=chain_start
+                "relaxed",
+                self._fetch_records(composed_relaxed, count, state),
+                ([], True),
+                chain_start=chain_start,
+                state=state,
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored

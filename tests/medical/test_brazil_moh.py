@@ -1567,6 +1567,53 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
         await http_client.aclose()
 
 
+async def test_stage_timeout_sets_bvs_timed_out_and_makes_bvs_unavailable(tmp_path: Path):
+    """A timed-out BVS stage must mark the host unavailable for later stages."""
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        state = _SearchState()
+        assert engine._bvs_unavailable(state) is False
+
+        async def _hang():
+            await _asyncio.sleep(5.0)
+
+        result = await engine._stage(
+            "title-scoped", _hang(), default=None, chain_start=None, state=state
+        )
+
+        assert result is None
+        assert state.bvs_timed_out is True
+        assert engine._bvs_unavailable(state) is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_timeout_without_state_does_not_trip_breaker(tmp_path: Path):
+    """A govbr stage times out with state=None and must not raise or trip BVS."""
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        state = _SearchState()
+
+        async def _hang():
+            await _asyncio.sleep(5.0)
+
+        result = await engine._stage("govbr_pcdt", _hang(), default=None, chain_start=None)
+
+        assert result is None
+        assert state.bvs_timed_out is False
+        assert engine._bvs_unavailable(state) is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def test_build_query_accepts_token_override():
     composed = _build_query(
         "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
