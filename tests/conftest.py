@@ -1,5 +1,6 @@
 import pytest
 
+from scholar_mcp.config import Settings
 from scholar_mcp.utils.http import AsyncHttpClient
 
 
@@ -19,3 +20,11 @@ def reset_limiter_registry():
     AsyncHttpClient.reset_limiters()
     yield
     AsyncHttpClient.reset_limiters()
+
+
+@pytest.fixture
+async def retrying_client():
+    """Client with the production default max_retries so retry behaviour is observable."""
+    c = AsyncHttpClient(settings=Settings(), max_retries=4, backoff_base=0.001)
+    yield c
+    await c.aclose()

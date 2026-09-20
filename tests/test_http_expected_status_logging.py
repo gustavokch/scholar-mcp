@@ -14,14 +14,6 @@ async def client():
     await c.aclose()
 
 
-@pytest.fixture
-async def retrying_client():
-    """Client with the production default max_retries so retry behaviour is observable."""
-    c = AsyncHttpClient(settings=Settings(), max_retries=4, backoff_base=0.001)
-    yield c
-    await c.aclose()
-
-
 @respx.mock
 async def test_quiet_status_returns_none_and_logs_debug(client, caplog):
     route = respx.get("https://example.org/missing").mock(
@@ -178,21 +170,3 @@ async def test_empty_set_retryable_statuses_disables_all_retries(retrying_client
     )
     assert route.call_count == 1
     assert resp is None
-
-
-@respx.mock
-async def test_get_bytes_forwards_retryable_statuses(retrying_client, caplog):
-    route = respx.get("https://example.org/fail-fast.pdf").mock(
-        return_value=httpx.Response(500, text="Server Error")
-    )
-    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
-        data = await retrying_client.get_bytes(
-            "https://example.org/fail-fast.pdf",
-            retryable_statuses=RETRYABLE_STATUS_CODES - {500},
-            quiet_statuses={500},
-        )
-
-    assert route.call_count == 1
-    assert data is None
-    assert _http_records(caplog, "WARNING") == []
-    assert len(_http_records(caplog, "DEBUG")) == 1

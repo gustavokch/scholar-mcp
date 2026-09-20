@@ -454,7 +454,7 @@ class AsyncHttpClient:
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
         host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
-        retry_statuses = retryable_statuses if retryable_statuses is not None else RETRYABLE_STATUS_CODES
+        effective_retry_statuses = retryable_statuses if retryable_statuses is not None else RETRYABLE_STATUS_CODES
 
         if self.is_dead_host(host_key):
             self.last_failure = FetchFailure("transport", None, "DeadHostCached")
@@ -481,7 +481,7 @@ class AsyncHttpClient:
                     and b"Status: Timeout" in resp.content
                 )
                 if (
-                    resp.status_code in retry_statuses
+                    resp.status_code in effective_retry_statuses
                     or shielded_403
                     or ncbi_viewer_timeout
                 ) and attempt < self.max_retries - 1:
@@ -586,14 +586,12 @@ class AsyncHttpClient:
         headers: dict[str, str] | None = None,
         params: dict[str, Any] | None = None,
         quiet_statuses: frozenset[int] | set[int] | None = None,
-        retryable_statuses: frozenset[int] | set[int] | None = None,
     ) -> bytes | None:
         resp = await self.get(
             url,
             headers=headers,
             params=params,
             quiet_statuses=quiet_statuses,
-            retryable_statuses=retryable_statuses,
         )
         if resp is not None and resp.status_code == 200:
             if not self._is_unexpected_html(resp):

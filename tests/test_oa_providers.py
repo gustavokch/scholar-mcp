@@ -37,14 +37,6 @@ async def client():
     await c.aclose()
 
 
-@pytest.fixture
-async def retrying_client():
-    """Client with the production default max_retries so retry behaviour is observable."""
-    c = AsyncHttpClient(settings=Settings(), max_retries=4, backoff_base=0.001)
-    yield c
-    await c.aclose()
-
-
 @respx.mock
 async def test_pmc_provider_hit(client):
     respx.get(url__startswith=EFETCH).mock(return_value=httpx.Response(200, content=PMC_XML))
