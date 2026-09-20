@@ -88,8 +88,8 @@ class Settings:
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
     scihub_mirror_timeout_s: float = 12.0
-    # Whole-tier ceiling for the scihub mirror loop: 7 mirrors x 12 s would
-    # be 84 s against the 45 s total_budget_seconds the waterfall enforces.
+    # Whole-tier ceiling for the scihub mirror loop: 4 mirrors x 12 s would
+    # be 48 s against the 45 s total_budget_seconds the waterfall enforces.
     # The loop stops starting new mirrors once the tier deadline passes.
     scihub_tier_timeout_s: float = 20.0
     enable_browser_fallback: bool = True
