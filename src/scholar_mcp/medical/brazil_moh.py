@@ -596,6 +596,28 @@ class BrazilMoHEngine:
                     logger.exception("brazil_moh %s on_timeout callback failed", stage)
             return default
 
+    def _mark_bvs_timed_out(self, state: _SearchState) -> None:
+        state.bvs_timed_out = True
+
+    async def _bvs_stage(
+        self,
+        stage: str,
+        composed_query: str,
+        count: int,
+        state: _SearchState,
+        chain_start: float | None = None,
+    ) -> tuple[list[BrazilGuideline], bool]:
+        def _on_timeout() -> None:
+            self._mark_bvs_timed_out(state)
+
+        return await self._stage(
+            stage,
+            self._fetch_records(composed_query, count, state),
+            ([], True),
+            chain_start=chain_start,
+            on_timeout=_on_timeout,
+        )
+
     async def search_guidelines(
         self,
         query: str,
@@ -662,15 +684,12 @@ class BrazilMoHEngine:
             if tokens
             else None
         )
-        def _on_bvs_timeout() -> None:
-            state.bvs_timed_out = True
-
-        records, errored = await self._stage(
+        records, errored = await self._bvs_stage(
             "title-scoped",
-            self._fetch_records(title_composed, count, state),
-            ([], True),
+            title_composed,
+            count,
+            state,
             chain_start=chain_start,
-            on_timeout=_on_bvs_timeout,
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -690,12 +709,12 @@ class BrazilMoHEngine:
                     query, norm_collection, title_scoped=True, tokens=relaxed_tokens
                 )
 
-                relaxed_title_records, relaxed_title_errored = await self._stage(
+                relaxed_title_records, relaxed_title_errored = await self._bvs_stage(
                     "title-scoped-relaxed",
-                    self._fetch_records(relaxed_title_composed, count, state),
-                    ([], True),
+                    relaxed_title_composed,
+                    count,
+                    state,
                     chain_start=chain_start,
-                    on_timeout=_on_bvs_timeout,
                 )
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
@@ -727,12 +746,12 @@ class BrazilMoHEngine:
             or_title_composed = _build_query(
                 query, norm_collection, operator="OR", title_scoped=True
             )
-            or_title_records, or_title_errored = await self._stage(
+            or_title_records, or_title_errored = await self._bvs_stage(
                 "title-scoped-or",
-                self._fetch_records(or_title_composed, count, state),
-                ([], True),
+                or_title_composed,
+                count,
+                state,
                 chain_start=chain_start,
-                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or or_title_errored
             bvs_errored = bvs_errored or or_title_errored
@@ -753,12 +772,12 @@ class BrazilMoHEngine:
             and not title_chain_errored
             and not self._bvs_unavailable(state)
         ):
-            fallback_records, fallback_errored = await self._stage(
+            fallback_records, fallback_errored = await self._bvs_stage(
                 "all-field",
-                self._fetch_records(all_composed, count, state),
-                ([], True),
+                all_composed,
+                count,
+                state,
                 chain_start=chain_start,
-                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
@@ -775,12 +794,12 @@ class BrazilMoHEngine:
             and not self._bvs_unavailable(state)
         ):
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
-            relaxed_records, relaxed_errored = await self._stage(
+            relaxed_records, relaxed_errored = await self._bvs_stage(
                 "relaxed",
-                self._fetch_records(composed_relaxed, count, state),
-                ([], True),
+                composed_relaxed,
+                count,
+                state,
                 chain_start=chain_start,
-                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored
