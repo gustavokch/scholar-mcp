@@ -4,14 +4,15 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap
-from scholar_mcp.providers.europe_pmc import EuropePMCProvider
+from scholar_mcp.providers.europe_pmc import EuropePMCProvider, OAI_PMH_URL
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.utils.http import AsyncHttpClient
+from log_helpers import HTTP_LOGGER, http_records
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-OAI = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
+OAI = OAI_PMH_URL
 UNPAYWALL = "https://api.unpaywall.org/v2"
 
 PMC_XML = (
@@ -32,6 +33,14 @@ OAI_WRAPPED = (
 @pytest.fixture
 async def client():
     c = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
+    yield c
+    await c.aclose()
+
+
+@pytest.fixture
+async def retrying_client():
+    """Client with the production default max_retries so retry behaviour is observable."""
+    c = AsyncHttpClient(settings=Settings(), max_retries=4, backoff_base=0.001)
     yield c
     await c.aclose()
 
@@ -113,24 +122,22 @@ async def test_europe_pmc_oai_failure_falls_through(client):
 
 
 @respx.mock
-async def test_europe_pmc_500_and_oai_400_quiet_fast_fail(client, caplog):
+async def test_europe_pmc_500_and_oai_400_quiet_fast_fail(retrying_client, caplog):
     """Europe PMC 500 (no XML) and PMC OAI 400 (cannotDisseminateFormat) stay quiet and fast."""
-    HTTP_LOGGER = "scholar_mcp.utils.http"
-    epmc_route = respx.get(url__regex=rf"{EPMC}/PMC7768126/fullTextXML").mock(
+    epmc_route = respx.get(url__startswith=f"{EPMC}/PMC7768126/fullTextXML").mock(
         return_value=httpx.Response(500, json={"status": 500, "error": "Internal Server Error"})
     )
-    oai_route = respx.get(url__startswith="https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/").mock(
-        return_value=httpx.Response(400, text="<error code=\"cannotDisseminateFormat\"/>")
+    oai_route = respx.get(url__startswith=OAI_PMH_URL).mock(
+        return_value=httpx.Response(400, text='<error code="cannotDisseminateFormat"/>')
     )
     with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
-        provider = EuropePMCProvider(client)
+        provider = EuropePMCProvider(retrying_client)
         res = await provider.fetch_full_text(IdentifierMap(pmcid="PMC7768126"))
 
     assert res is None
     assert epmc_route.call_count == 1
     assert oai_route.call_count == 1
-    assert [r for r in caplog.records if r.name == HTTP_LOGGER and r.levelname == "WARNING"] == []
-
+    assert http_records(caplog, "WARNING") == []
 
 
 @respx.mock
