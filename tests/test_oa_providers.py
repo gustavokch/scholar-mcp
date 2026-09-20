@@ -11,7 +11,7 @@ from scholar_mcp.utils.http import AsyncHttpClient
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-OAI = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
+OAI = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
 UNPAYWALL = "https://api.unpaywall.org/v2"
 
 PMC_XML = (
@@ -110,6 +110,27 @@ async def test_europe_pmc_oai_failure_falls_through(client):
     provider = EuropePMCProvider(client)
     assert await provider.fetch_full_text(IdentifierMap(pmcid="PMC1")) is None
     assert provider.last_skip_reason == "EUROPEPMC_FULLTEXT_UNAVAILABLE"
+
+
+@respx.mock
+async def test_europe_pmc_500_and_oai_400_quiet_fast_fail(client, caplog):
+    """Europe PMC 500 (no XML) and PMC OAI 400 (cannotDisseminateFormat) stay quiet and fast."""
+    HTTP_LOGGER = "scholar_mcp.utils.http"
+    epmc_route = respx.get(url__regex=rf"{EPMC}/PMC7768126/fullTextXML").mock(
+        return_value=httpx.Response(500, json={"status": 500, "error": "Internal Server Error"})
+    )
+    oai_route = respx.get(url__startswith="https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/").mock(
+        return_value=httpx.Response(400, text="<error code=\"cannotDisseminateFormat\"/>")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        provider = EuropePMCProvider(client)
+        res = await provider.fetch_full_text(IdentifierMap(pmcid="PMC7768126"))
+
+    assert res is None
+    assert epmc_route.call_count == 1
+    assert oai_route.call_count == 1
+    assert [r for r in caplog.records if r.name == HTTP_LOGGER and r.levelname == "WARNING"] == []
+
 
 
 @respx.mock

@@ -138,3 +138,22 @@ async def test_get_bytes_without_quiet_statuses_still_warns(client, caplog):
     assert route.called
     assert data is None
     assert len(_http_records(caplog, "WARNING")) == 1
+
+
+@respx.mock
+async def test_custom_retryable_statuses_fast_fails_and_respects_quiet(client, caplog):
+    route = respx.get("https://example.org/internal-error").mock(
+        return_value=httpx.Response(500, text="No XML available")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        resp = await client.get(
+            "https://example.org/internal-error",
+            retryable_statuses=set(),
+            quiet_statuses={500},
+        )
+
+    assert route.call_count == 1
+    assert resp is None
+    assert _http_records(caplog, "WARNING") == []
+    assert len(_http_records(caplog, "DEBUG")) == 1
+

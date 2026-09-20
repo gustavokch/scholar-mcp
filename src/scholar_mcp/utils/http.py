@@ -427,6 +427,7 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
         ok_statuses: frozenset[int] | set[int] | None = None,
         quiet_statuses: frozenset[int] | set[int] | None = None,
+        retryable_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
@@ -441,6 +442,10 @@ class AsyncHttpClient:
         warning (e.g. a scholarly registry answering 404 for a DOI it does not
         hold). Callers needing the response object want ``ok_statuses`` instead.
 
+        ``retryable_statuses`` overrides default ``RETRYABLE_STATUS_CODES`` for
+        this call. If provided, only statuses in this set (plus transient
+        exceptions/bot-shields) will be retried.
+
         A status in either set is still logged at DEBUG when it is ``>= 400``, so
         a 404 caused by a bad URL or a misconfigured parameter stays recoverable
         at ``LOG_LEVEL=DEBUG`` rather than vanishing.
@@ -449,6 +454,7 @@ class AsyncHttpClient:
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
         host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
+        retries = retryable_statuses if retryable_statuses is not None else RETRYABLE_STATUS_CODES
 
         if self.is_dead_host(host_key):
             self.last_failure = FetchFailure("transport", None, "DeadHostCached")
@@ -475,7 +481,7 @@ class AsyncHttpClient:
                     and b"Status: Timeout" in resp.content
                 )
                 if (
-                    resp.status_code in RETRYABLE_STATUS_CODES
+                    resp.status_code in retries
                     or shielded_403
                     or ncbi_viewer_timeout
                 ) and attempt < self.max_retries - 1:

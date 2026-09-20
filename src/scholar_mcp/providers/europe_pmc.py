@@ -5,10 +5,12 @@ from scholar_mcp.models import CitationItem, FullTextResponse, IdentifierMap, Pa
 from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
 
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-OAI_PMH_URL = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
+OAI_PMH_URL = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
+EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
+
 
 
 
@@ -71,7 +73,11 @@ class EuropePMCProvider(BaseProvider):
                 pmcid = f"PMC{pmcid}"
             url = f"{EPMC_REST_BASE}/{pmcid}/fullTextXML"
             try:
-                resp = await self.http_client.get(url)
+                resp = await self.http_client.get(
+                    url,
+                    quiet_statuses={404, 500},
+                    retryable_statuses=EPMC_XML_RETRYABLE,
+                )
                 if resp is not None and resp.status_code == 200 and resp.content:
                     md = jats_to_markdown(resp.content)
                     if len(md.strip()) >= MIN_USEFUL_CHARS:
@@ -118,7 +124,11 @@ class EuropePMCProvider(BaseProvider):
                             if not found_pmcid.upper().startswith("PMC"):
                                 found_pmcid = f"PMC{found_pmcid}"
                             xml_url = f"{EPMC_REST_BASE}/{found_pmcid}/fullTextXML"
-                            xml_resp = await self.http_client.get(xml_url)
+                            xml_resp = await self.http_client.get(
+                                xml_url,
+                                quiet_statuses={404, 500},
+                                retryable_statuses=EPMC_XML_RETRYABLE,
+                            )
                             if xml_resp is not None and xml_resp.status_code == 200 and xml_resp.content:
                                 md = jats_to_markdown(xml_resp.content)
                                 if len(md.strip()) >= MIN_USEFUL_CHARS:
@@ -165,6 +175,7 @@ class EuropePMCProvider(BaseProvider):
                     "identifier": f"oai:pubmedcentral.nih.gov:{numeric}",
                     "metadataPrefix": "pmc",
                 },
+                quiet_statuses={400, 404},
             )
             if resp is None or resp.status_code != 200 or not resp.content:
                 return None
