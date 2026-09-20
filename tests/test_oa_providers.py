@@ -195,3 +195,28 @@ async def test_unpaywall_pdf_yielding_no_text_is_miss(client, monkeypatch):
         IdentifierMap(doi="10.1038/scan")
     )
     assert res is None
+
+
+@respx.mock
+async def test_discovery_path_prefers_caller_pmid(client):
+    """ids.pmid wins over the Europe PMC search record when both are present."""
+    respx.get(url__startswith=f"{EPMC}/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [{"pmcid": "PMC9999999", "hasXML": "Y", "pmid": "99999999"}]
+                }
+            },
+        )
+    )
+    respx.get(url__startswith=f"{EPMC}/PMC9999999/fullTextXML").mock(
+        return_value=httpx.Response(200, content=PMC_XML)
+    )
+
+    res = await EuropePMCProvider(client).fetch_full_text(
+        IdentifierMap(doi="10.1/x", pmid="11111111")
+    )
+
+    assert res is not None
+    assert res.pmid == "11111111"
