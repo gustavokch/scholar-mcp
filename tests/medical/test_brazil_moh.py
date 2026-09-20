@@ -1735,6 +1735,53 @@ async def test_stage_timeout_without_callback_does_not_raise(tmp_path: Path):
         await http_client.aclose()
 
 
+async def test_stage_timeout_callback_exception_is_suppressed(tmp_path: Path):
+    """A raising on_timeout is logged and swallowed; the stage still falls back."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        def _exploding_cb():
+            raise RuntimeError("callback exploded")
+
+        async def _hang():
+            await asyncio.sleep(5.0)
+
+        result = await engine._stage(
+            "test_stage",
+            _hang(),
+            default="fallback_val",
+            on_timeout=_exploding_cb,
+        )
+        assert result == "fallback_val"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pre_expired_budget_callback_exception_is_suppressed(tmp_path: Path):
+    """The expired-budget path shares the same guard as the timeout path."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        def _exploding_cb():
+            raise RuntimeError("callback exploded")
+
+        async def _noop():
+            return "ok"
+
+        result = await engine._stage(
+            "test_expired",
+            _noop(),
+            default="fallback_val",
+            chain_start=time.monotonic() - 10.0,
+            on_timeout=_exploding_cb,
+        )
+        assert result == "fallback_val"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def test_build_query_accepts_token_override():
     composed = _build_query(
         "dengue manejo intratavel", "all", title_scoped=True, tokens=["dengue", "manejo"]
