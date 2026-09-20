@@ -735,12 +735,12 @@ class BrazilMoHEngine:
             else:
                 records = or_title_records
 
-        # Fall back to all-field query when the title-scoped stage yields no
-        # Brazilian records — including when it stalled, since a slow strict
-        # query says nothing about the relaxed one. When BVS is shielded by
-        # CDN anti-bot 403s or origin 5xx is down, subsequent HTTP stages are
-        # guaranteed to fail or timeout; skip them to preserve budget for
-        # browser fallback.
+        # Fall back to an all-field query when the title-scoped stage yields no
+        # Brazilian records. A stalled, shielded (CDN anti-bot 403) or 5xx BVS
+        # is treated as unhealthy for the rest of the call: further HTTP stages
+        # would each burn a full stage budget against the same bad host, and the
+        # browser tier -- which is what actually beats a shield -- needs what is
+        # left of the chain budget more than they do.
         if (
             not records
             and tokens

@@ -1512,14 +1512,18 @@ async def test_search_stage_timeout_returns_error_instead_of_hanging(tmp_path: P
 
 
 @respx.mock
-async def test_search_title_stage_timeout_falls_through_to_fallback(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
-    # Budget must exceed the BVS host limiter's 1/s refill so the fallback
-    # stage can still acquire a token after the stalled first stage dies.
-    engine.settings.brazil_stage_timeout_s = 1.5
-    try:
-        import asyncio as _asyncio
+async def test_search_title_stage_timeout_halts_remaining_bvs_stages(tmp_path: Path):
+    """A stalled title stage trips the BVS breaker; no further HTTP stage runs.
 
+    Replaces the former fall-through-to-fallback contract: a stalled BVS host is
+    now assumed unhealthy for the rest of the call, so the chain budget is left
+    to the browser tier instead of being spent on more doomed HTTP stages.
+    """
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.05
+    try:
         calls = {"n": 0}
 
         async def _first_slow_then_fast(request: httpx.Request) -> httpx.Response:
@@ -1531,7 +1535,67 @@ async def test_search_title_stage_timeout_falls_through_to_fallback(tmp_path: Pa
         respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_first_slow_then_fast)
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert records, "fallback stage should still serve records"
+        assert calls["n"] == 1, "the breaker must stop further BVS requests"
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_browser(
+    tmp_path, monkeypatch
+):
+    """A title-scoped timeout must skip all-field and relaxed, then use the browser."""
+    import asyncio as _asyncio
+
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        brazil_stage_timeout_s=0.05,
+        brazil_chain_timeout_s=10.0,
+        brazil_browser_timeout_s=5.0,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01, min_429_wait=0.0)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    _stub_pcdt_empty(engine)
+
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "1",
+                            "ti": "Manejo da dengue",
+                            "pais_publicacao": "^eBrasil",
+                            "da": "202401",
+                            "ur": ["https://bvsms.saude.gov.br/dengue.pdf"],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    calls = []
+
+    async def _slow_response(request):
+        calls.append(request)
+        await _asyncio.sleep(1.0)
+        return httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+
+    try:
+        with respx.mock:
+            respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
+            records, meta = await engine.search_guidelines("dengue grave", limit=10)
+
+        assert len(calls) == 1, "all-field and relaxed must not issue requests"
+        assert attempts == [True], "exactly one browser launch"
+        assert [r.title for r in records] == ["Manejo da dengue"]
         assert meta.error is False
     finally:
         await cache.close()
