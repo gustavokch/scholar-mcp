@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
-- **`retryable_statuses` parameter on `AsyncHttpClient.get()`**: callers can override the default `RETRYABLE_STATUS_CODES` per request; Europe PMC `fullTextXML` uses it to fail fast on the 500 that means "no OA XML" instead of burning four attempts (PR #39).
+- **`retryable_statuses` parameter on `AsyncHttpClient.get()`**: callers can override the default `RETRYABLE_STATUS_CODES` per request; Europe PMC `fullTextXML` uses it to fail fast on the 500 that means "no OA XML" instead of making four attempts (PR #39).
 - **gov.br "Saúde de A a Z" publication scraper (`GovBrAZEngine`)**: Indexing `/centrais-de-conteudo/publicacoes/svsa/<topic>` and `/centrais-de-conteudo/publicacoes/guias-e-manuais/<year>`, including the Dengue clinical management and Tuberculosis control manuals.
 - **`collection="az"` for `brazil_guidelines` tool**: New collection option in `search_brazil_moh_guidelines`; records also appear in the default `collection="all"` results and full text resolves via `get_brazil_moh_full_text`.
 - **`scripts/update_govbr_az_catalog.py`**: CLI script to regenerate the bundled `govbr_az_catalog.json` seed catalog.
@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **`RETRYABLE_STATUS_CODES` is now a `frozenset`**: the shared retry-status default can no longer be mutated in place by an importer (PR #39).
 - **PMC OAI-PMH base URL**: `OAI_PMH_URL` now points at the canonical `https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/`, removing a 301 redirect from every OAI request (PR #39).
 - **Expected-error logging for Europe PMC and PMC OAI**: `fullTextXML` 404/500 and OAI `cannotDisseminateFormat` 400 now log at DEBUG instead of WARNING (PR #39).
 - **Sci-Hub mirror ordering**: Re-ordered `DEFAULT_SCIHUB_MIRRORS` to put active mirror `https://sci-hub.mksa.top` first (PR #17).

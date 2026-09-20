@@ -442,13 +442,18 @@ class AsyncHttpClient:
         warning (e.g. a scholarly registry answering 404 for a DOI it does not
         hold). Callers needing the response object want ``ok_statuses`` instead.
 
-        ``retryable_statuses`` overrides default ``RETRYABLE_STATUS_CODES`` for
-        this call. If provided, only statuses in this set (plus transient
-        exceptions/bot-shields) will be retried.
+        ``retryable_statuses`` narrows the default ``RETRYABLE_STATUS_CODES``
+        for this call, but does not disable the two host-specific retry
+        bypasses: a bot-shield 403 and the NCBI external-viewer timeout 400
+        are retried even when the override excludes them.
 
-        A status in either set is still logged at DEBUG when it is ``>= 400``, so
-        a 404 caused by a bad URL or a misconfigured parameter stays recoverable
-        at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+        A status in any of these sets is still logged at DEBUG when it is
+        ``>= 400``, so a 404 caused by a bad URL or a misconfigured parameter
+        stays recoverable at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+
+        The three status kwargs are deliberately independent and are not
+        merged into a single status-policy object; call sites pass them by
+        keyword, and that convention is not enforced with a ``*`` marker.
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)

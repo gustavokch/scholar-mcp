@@ -10,6 +10,8 @@ from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 OAI_PMH_URL = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
 OAI_QUIET = frozenset({400, 404})
+
+# EPMC_XML_QUIET and EPMC_XML_RETRYABLE travel together as one policy for fullTextXML.
 EPMC_XML_QUIET = frozenset({404, 500})
 EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
 
