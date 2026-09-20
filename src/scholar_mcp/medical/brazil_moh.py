@@ -541,6 +541,21 @@ class BrazilMoHEngine:
             return remaining
         return min(stage_budget, remaining)
 
+    def _fire_on_timeout(
+        self, stage: str, on_timeout: Callable[[], None] | None
+    ) -> None:
+        """Run a stage's timeout callback, never letting it break the stage.
+
+        The callback exists to arm a circuit breaker. A callback that raises
+        must not turn a handled stage timeout into a chain-level failure.
+        """
+        if on_timeout is None:
+            return
+        try:
+            on_timeout()
+        except Exception:
+            logger.exception("brazil_moh %s on_timeout callback failed", stage)
+
     async def _stage(
         self,
         stage: str,
@@ -562,8 +577,8 @@ class BrazilMoHEngine:
 
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
-        and expired), the stage is skipped and ``default`` is returned. If both
-        bounds are disabled (<= 0), ``coro`` runs unbounded.
+        and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
+        is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
         stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
         chain_setting = (
@@ -582,6 +597,7 @@ class BrazilMoHEngine:
             )
             if asyncio.iscoroutine(coro):
                 coro.close()
+            self._fire_on_timeout(stage, on_timeout)
             return default
         try:
             return await asyncio.wait_for(coro, budget)
@@ -589,11 +605,7 @@ class BrazilMoHEngine:
             logger.warning(
                 "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
             )
-            if on_timeout is not None:
-                try:
-                    on_timeout()
-                except Exception:
-                    logger.exception("brazil_moh %s on_timeout callback failed", stage)
+            self._fire_on_timeout(stage, on_timeout)
             return default
 
     def _mark_bvs_timed_out(self, state: _SearchState) -> None:

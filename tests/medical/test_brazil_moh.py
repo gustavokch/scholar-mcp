@@ -1655,6 +1655,68 @@ async def test_stage_timeout_calls_on_timeout_callback(tmp_path: Path):
         await http_client.aclose()
 
 
+async def test_stage_pre_expired_budget_calls_on_timeout_callback(tmp_path: Path):
+    """A stage entered with no chain budget left must still fire on_timeout."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        called = {"count": 0}
+
+        def _cb():
+            called["count"] += 1
+
+        async def _noop():
+            return "ok"
+
+        # Chain started far enough in the past that no budget remains.
+        chain_start = time.monotonic() - 10.0
+        result = await engine._stage(
+            "test_expired",
+            _noop(),
+            default="fallback",
+            chain_start=chain_start,
+            on_timeout=_cb,
+        )
+
+        assert result == "fallback"
+        assert called["count"] == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_bvs_stage_pre_expired_budget_arms_circuit_breaker(tmp_path: Path):
+    """An expired chain budget must open the breaker and dispatch no request.
+
+    This is the behaviour the callback exists for: once `bvs_timed_out` is
+    set, `_bvs_unavailable` gates the all-field and relaxed stages out of the
+    chain instead of letting each one re-enter `_bvs_stage`.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        fetch = AsyncMock()
+        engine._fetch_records = fetch
+        state = _SearchState()
+
+        records, errored = await engine._bvs_stage(
+            "title-scoped",
+            "tw:(dengue)",
+            10,
+            state,
+            chain_start=time.monotonic() - 10.0,
+        )
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_timed_out is True
+        assert engine._bvs_unavailable(state) is True
+        fetch.assert_not_awaited()
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_stage_timeout_without_callback_does_not_raise(tmp_path: Path):
     """A stage times out without callback and must not raise."""
     import asyncio as _asyncio
