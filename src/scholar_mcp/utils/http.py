@@ -74,7 +74,7 @@ def _matches_html_markers(
     if "text/html" not in resp.headers.get("content-type", "").lower():
         return False
     sample = resp.text[:max_chars].lower()
-    return any(marker in sample for marker in markers)
+    return any(marker.lower() in sample for marker in markers)
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -486,16 +486,13 @@ class AsyncHttpClient:
                 # host bucket and retry. The exception is a 403 carrying a JS
                 # challenge page, which no number of plain HTTP retries can pass.
                 # A 403 from any other host stays fatal.
+                is_shield_host_403 = (
+                    resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
+                )
                 is_challenge_html = (
-                    resp.status_code == 403
-                    and host_key in BOT_SHIELD_403_HOSTS
-                    and self._is_challenge_html(resp)
+                    is_shield_host_403 and self._is_challenge_html(resp)
                 )
-                shielded_403 = (
-                    resp.status_code == 403
-                    and host_key in BOT_SHIELD_403_HOSTS
-                    and not is_challenge_html
-                )
+                shielded_403 = is_shield_host_403 and not is_challenge_html
                 # NCBI E-utilities reports an internal viewer timeout as HTTP 400:
                 # 'Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout'
                 # Only the timeout variant is transient -- a viewer error without it

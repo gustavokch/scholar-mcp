@@ -919,6 +919,8 @@ def test_matches_html_markers():
 
     resp_match = httpx.Response(200, text="<html><body>captcha required</body></html>", headers={"content-type": "text/html; charset=utf-8"})
     assert _matches_html_markers(resp_match, ("captcha", "cloudflare")) is True
+    # A caller-supplied marker must match regardless of its own casing.
+    assert _matches_html_markers(resp_match, ("CAPTCHA", "CloudFlare")) is True
 
     resp_no_marker = httpx.Response(200, text="<html><body>welcome</body></html>", headers={"content-type": "text/html"})
     assert _matches_html_markers(resp_no_marker, ("captcha", "cloudflare")) is False
