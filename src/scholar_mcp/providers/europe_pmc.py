@@ -134,7 +134,7 @@ class EuropePMCProvider(BaseProvider):
                             if not found_pmcid.upper().startswith("PMC"):
                                 found_pmcid = f"PMC{found_pmcid}"
                             full_text = await self._fetch_full_text_xml(
-                                found_pmcid, ids, pmid=rec.get("pmid")
+                                found_pmcid, ids, pmid=ids.pmid or rec.get("pmid")
                             )
                             if full_text is not None:
                                 return full_text
