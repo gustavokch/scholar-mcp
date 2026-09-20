@@ -1631,48 +1631,43 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
         await http_client.aclose()
 
 
-async def test_stage_timeout_sets_bvs_timed_out_and_makes_bvs_unavailable(tmp_path: Path):
-    """A timed-out BVS stage must mark the host unavailable for later stages."""
+async def test_stage_timeout_calls_on_timeout_callback(tmp_path: Path):
+    """A timed-out stage must invoke on_timeout callback if provided."""
     import asyncio as _asyncio
 
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_stage_timeout_s = 0.01
     try:
-        state = _SearchState()
-        assert engine._bvs_unavailable(state) is False
+        called = {"count": 0}
+
+        def _cb():
+            called["count"] += 1
 
         async def _hang():
             await _asyncio.sleep(5.0)
 
-        result = await engine._stage(
-            "title-scoped", _hang(), default=None, chain_start=None, state=state
-        )
+        result = await engine._stage("test_stage", _hang(), default=None, on_timeout=_cb)
 
         assert result is None
-        assert state.bvs_timed_out is True
-        assert engine._bvs_unavailable(state) is True
+        assert called["count"] == 1
     finally:
         await cache.close()
         await http_client.aclose()
 
 
-async def test_stage_timeout_without_state_does_not_trip_breaker(tmp_path: Path):
-    """A govbr stage times out with state=None and must not raise or trip BVS."""
+async def test_stage_timeout_without_callback_does_not_raise(tmp_path: Path):
+    """A stage times out without callback and must not raise."""
     import asyncio as _asyncio
 
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_stage_timeout_s = 0.01
     try:
-        state = _SearchState()
-
         async def _hang():
             await _asyncio.sleep(5.0)
 
         result = await engine._stage("govbr_pcdt", _hang(), default=None, chain_start=None)
 
         assert result is None
-        assert state.bvs_timed_out is False
-        assert engine._bvs_unavailable(state) is False
     finally:
         await cache.close()
         await http_client.aclose()

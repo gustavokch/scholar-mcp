@@ -43,6 +43,7 @@ import logging
 import re
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -546,7 +547,7 @@ class BrazilMoHEngine:
         coro: Any,
         default: Any,
         chain_start: float | None = None,
-        state: _SearchState | None = None,
+        on_timeout: Callable[[], None] | None = None,
     ) -> Any:
         """Run one retrieval stage under its own time budget.
 
@@ -556,9 +557,8 @@ class BrazilMoHEngine:
         fallback — still get their share of that ceiling, and so the chain
         degrades to partial results instead of a cancelled coroutine.
 
-        Passing ``state`` arms the BVS circuit breaker: timing out marks BVS
-        unavailable on ``state`` to halt remaining BVS HTTP stages. Only BVS
-        stages should pass ``state``.
+        Passing ``on_timeout`` allows callers to register a timeout callback,
+        e.g. to arm a circuit breaker to halt remaining stages.
 
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
@@ -589,8 +589,11 @@ class BrazilMoHEngine:
             logger.warning(
                 "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
             )
-            if state is not None:
-                state.bvs_timed_out = True
+            if on_timeout is not None:
+                try:
+                    on_timeout()
+                except Exception:
+                    logger.exception("brazil_moh %s on_timeout callback failed", stage)
             return default
 
     async def search_guidelines(
@@ -659,12 +662,15 @@ class BrazilMoHEngine:
             if tokens
             else None
         )
+        def _on_bvs_timeout() -> None:
+            state.bvs_timed_out = True
+
         records, errored = await self._stage(
             "title-scoped",
             self._fetch_records(title_composed, count, state),
             ([], True),
             chain_start=chain_start,
-            state=state,
+            on_timeout=_on_bvs_timeout,
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -689,7 +695,7 @@ class BrazilMoHEngine:
                     self._fetch_records(relaxed_title_composed, count, state),
                     ([], True),
                     chain_start=chain_start,
-                    state=state,
+                    on_timeout=_on_bvs_timeout,
                 )
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
@@ -726,7 +732,7 @@ class BrazilMoHEngine:
                 self._fetch_records(or_title_composed, count, state),
                 ([], True),
                 chain_start=chain_start,
-                state=state,
+                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or or_title_errored
             bvs_errored = bvs_errored or or_title_errored
@@ -752,7 +758,7 @@ class BrazilMoHEngine:
                 self._fetch_records(all_composed, count, state),
                 ([], True),
                 chain_start=chain_start,
-                state=state,
+                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
@@ -774,7 +780,7 @@ class BrazilMoHEngine:
                 self._fetch_records(composed_relaxed, count, state),
                 ([], True),
                 chain_start=chain_start,
-                state=state,
+                on_timeout=_on_bvs_timeout,
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored
