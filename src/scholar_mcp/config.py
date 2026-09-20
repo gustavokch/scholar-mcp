@@ -2,14 +2,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Sci-Hub mirrors, pruned 2026-09-19. Removed as permanently dead (probed with a
+# DOI request): sci-hub.hkvisa.net (403 "Just a moment" bot shield on every path),
+# sci-hub.st (TLS serves a self-signed certificate), sci-hub.se (NXDOMAIN —
+# domain gone). Re-check liveness before re-adding any mirror.
 DEFAULT_SCIHUB_MIRRORS = [
     "https://sci-hub.mksa.top",
     "https://sci-hub.ru",
     "https://sci-hub.ren",
     "https://sci-hub.ee",
-    "https://sci-hub.hkvisa.net",
-    "https://sci-hub.st",
-    "https://sci-hub.se",
 ]
 
 
