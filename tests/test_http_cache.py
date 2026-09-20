@@ -885,4 +885,32 @@ async def test_ncbi_viewer_timeout_gives_up_after_max_retries():
         await client.aclose()
 
 
+@respx.mock
+async def test_bvs_403_html_challenge_fails_fast_without_retries():
+    """A BVS 403 carrying an HTML challenge must fail on attempt 0, unthrottled."""
+    challenge_html = (
+        '<html><body><iframe '
+        'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+        "</iframe></body></html>"
+    )
+    route = respx.get(url__startswith="https://pesquisa.bvsalud.org/portal/").mock(
+        return_value=httpx.Response(
+            403, text=challenge_html, headers={"content-type": "text/html"}
+        )
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), max_retries=4, backoff_base=0.01
+    )
+    try:
+        resp = await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue")
+
+        assert resp is None
+        assert route.call_count == 1
+        assert client.last_failure is not None
+        assert client.last_failure.status == 403
+        assert not client.is_throttled("pesquisa.bvsalud.org")
+    finally:
+        await client.aclose()
+
+
 

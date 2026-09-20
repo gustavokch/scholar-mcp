@@ -41,6 +41,19 @@ DEFAULT_FALLBACK_RATE = 5.0
 # and retry, like a 429. Elsewhere a 403 stays fatal.
 BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 
+# A 403 whose body is one of these shield/challenge pages cannot be cleared by a
+# plain HTTP retry -- it wants a real browser. Retrying only burns the stage
+# budget and throttles the shared host bucket for every concurrent coroutine.
+BOT_SHIELD_HTML_MARKERS = (
+    "shield-templates-prod",
+    "b-cdn.net",
+    "block.html",
+    "challenge-platform",
+    "just a moment",
+    "captcha",
+    "attention required",
+)
+
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
 # other request to that host -- for hours.
@@ -418,6 +431,12 @@ class AsyncHttpClient:
                 return True
         return False
 
+    def _is_challenge_html(self, resp: httpx.Response) -> bool:
+        if "text/html" not in resp.headers.get("content-type", "").lower():
+            return False
+        sample = resp.text[:1000].lower()
+        return any(marker in sample for marker in BOT_SHIELD_HTML_MARKERS)
+
     _is_unexpected_html = is_unexpected_html
 
     async def get(
@@ -459,10 +478,19 @@ class AsyncHttpClient:
             await limiter.acquire()
             try:
                 resp = await self.client.get(target_url, headers=headers)
-                # A bot-shield 403 must behave like a 429: throttle the whole
-                # host bucket and retry. A 403 from any other host stays fatal.
+                # A bot-shield 403 normally behaves like a 429: throttle the whole
+                # host bucket and retry. The exception is a 403 carrying a JS
+                # challenge page, which no number of plain HTTP retries can pass.
+                # A 403 from any other host stays fatal.
+                is_challenge_html = (
+                    resp.status_code == 403
+                    and host_key in BOT_SHIELD_403_HOSTS
+                    and self._is_challenge_html(resp)
+                )
                 shielded_403 = (
-                    resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
+                    resp.status_code == 403
+                    and host_key in BOT_SHIELD_403_HOSTS
+                    and not is_challenge_html
                 )
                 # NCBI E-utilities reports an internal viewer timeout as HTTP 400:
                 # 'Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout'
