@@ -743,3 +743,13 @@ async def test_cache_stats_and_close_serialize_with_writers(tmp_path: Path):
     )
     assert (await cache.get_stats())["total_entries"] >= 16
     await cache.close()
+
+
+def test_config_garbage_brazil_timeout_falls_back(monkeypatch):
+    monkeypatch.setenv("BRAZIL_FULLTEXT_TIMEOUT_S", "30s")
+    assert Settings.load().brazil_fulltext_timeout_s == 30.0
+
+
+def test_config_valid_brazil_timeout_env_wins(monkeypatch):
+    monkeypatch.setenv("BRAZIL_FULLTEXT_TIMEOUT_S", "12.5")
+    assert Settings.load().brazil_fulltext_timeout_s == 12.5
