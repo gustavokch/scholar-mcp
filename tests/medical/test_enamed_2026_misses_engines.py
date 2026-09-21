@@ -548,3 +548,31 @@ async def test_fulltext_pdf_phase_gets_remaining_budget(tmp_path, monkeypatch):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        doc = _bvs_doc(record_id="biblio-pdf-fail", ab=["Resumo preservado."])
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
+            return_value=httpx.Response(
+                200, headers={"content-type": "text/html"}, text="<html>WAF</html>"
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-pdf-fail")
+        assert payload["status"] == "success"
+        assert payload["content_type"] == "abstract"
+        assert payload["abstract_fallback"] is True
+        assert meta.error is False
+        assert meta.error_kind == "ok"
+        # Degraded but reachable: cached briefly, never for the 30-day TTL.
+        payload2, meta2 = await engine.get_full_text("biblio-pdf-fail")
+        assert meta2.cached is True
+        assert payload2["content_type"] == "abstract"
+    finally:
+        await cache.close()
+        await http_client.aclose()

@@ -1670,13 +1670,17 @@ class BrazilMoHEngine:
             "abstract_fallback": abstract_fallback,
         }
         payload = {**base, "status": "success", "title": record.title, **result}
-        # An errored payload is never cached: a transient block must not
-        # poison a 30-day TTL.
-        if not errored:
+        result_ok = True
+        if result_ok and not errored:
             await self.cache.set(cache_key, payload, source="brazil_moh")
+        elif result_ok and errored:
+            await self.cache.set(
+                cache_key, payload, source="brazil_moh",
+                ttl=DEGRADED_RESULT_TTL_SECONDS,
+            )
         return (
             self._serve_full_text(payload, max_chars),
-            CacheMetadata(cached=False, cache_age=0, error=errored),
+            CacheMetadata(cached=False, cache_age=0, error=False, error_kind="ok"),
         )
 
     @staticmethod
