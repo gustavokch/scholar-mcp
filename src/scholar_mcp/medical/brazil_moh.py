@@ -1537,6 +1537,17 @@ class BrazilMoHEngine:
             getattr(self.settings, "brazil_fulltext_timeout_s", 0.0) or 0.0
         )
 
+        def _timeout_result(title_str: str) -> tuple[dict[str, Any], CacheMetadata]:
+            return (
+                {**base, "status": "error", "error": "full text fetch timed out",
+                 "title": title_str, "content_type": "none", "content": "",
+                 "abstract_fallback": False},
+                CacheMetadata(
+                    cached=False, cache_age=0, error=True,
+                    error_kind="timeout", timeout=True,
+                ),
+            )
+
         async def _resolve() -> tuple[
             BrazilGuideline | None, bool, dict[str, Any], CacheMetadata | None
         ]:
@@ -1572,6 +1583,7 @@ class BrazilMoHEngine:
                 )
             return record, False, {}, None
 
+        budget_start = time.monotonic()
         try:
             if ceiling > 0:
                 record, errored, early_payload, early_meta = await asyncio.wait_for(
@@ -1585,15 +1597,7 @@ class BrazilMoHEngine:
                 normalized,
                 ceiling,
             )
-            return (
-                {**base, "status": "error", "error": "full text fetch timed out",
-                 "title": "", "content_type": "none", "content": "",
-                 "abstract_fallback": False},
-                CacheMetadata(
-                    cached=False, cache_age=0, error=True,
-                    error_kind="timeout", timeout=True,
-                ),
-            )
+            return _timeout_result("")
         if early_meta is not None:
             return early_payload, early_meta
 
@@ -1602,10 +1606,21 @@ class BrazilMoHEngine:
             return await self._serve_local_text(
                 cache_key, base, record, max_chars
             )
+        if ceiling > 0:
+            remaining = ceiling - (time.monotonic() - budget_start)
+            if remaining <= 0:
+                logger.warning(
+                    "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                    normalized,
+                    ceiling,
+                )
+                return _timeout_result(record.title)
+        else:
+            remaining = ceiling
         try:
             if ceiling > 0:
                 pdf_text, errored = await asyncio.wait_for(
-                    self._extract_pdf_text(record.document_url), timeout=ceiling
+                    self._extract_pdf_text(record.document_url), timeout=remaining
                 )
             else:
                 pdf_text, errored = await self._extract_pdf_text(record.document_url)
@@ -1615,15 +1630,7 @@ class BrazilMoHEngine:
                 normalized,
                 ceiling,
             )
-            return (
-                {**base, "status": "error", "error": "full text fetch timed out",
-                 "title": record.title, "content_type": "none", "content": "",
-                 "abstract_fallback": False},
-                CacheMetadata(
-                    cached=False, cache_age=0, error=True,
-                    error_kind="timeout", timeout=True,
-                ),
-            )
+            return _timeout_result(record.title)
 
         if pdf_text:
             source_text = pdf_text

@@ -509,3 +509,42 @@ def test_config_fulltext_ceiling_defaults_and_env(monkeypatch):
     assert Settings.load().brazil_fulltext_timeout_s == 30.0
     monkeypatch.setenv("BRAZIL_FULLTEXT_TIMEOUT_S", "12.5")
     assert Settings.load().brazil_fulltext_timeout_s == 12.5
+
+
+@respx.mock
+async def test_fulltext_pdf_phase_gets_remaining_budget(tmp_path, monkeypatch):
+    from scholar_mcp.medical.brazil_moh import _build_record
+
+    engine, cache, http_client = await _engine(tmp_path, brazil_fulltext_timeout_s=0.4)
+    try:
+        doc = _bvs_doc(record_id="biblio-rem", ab=["Resumo."])
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+
+        async def _slow_lookup(record_id):
+            await asyncio.sleep(0.3)
+            return _build_record(doc), False
+
+        async def _fast_pdf(url):
+            return "texto do pdf", False
+
+        engine._lookup_record = _slow_lookup  # type: ignore[method-assign]
+        engine._extract_pdf_text = _fast_pdf  # type: ignore[method-assign]
+
+        from scholar_mcp.medical import brazil_moh as bm
+
+        real_wait_for = bm.asyncio.wait_for
+        seen: list[float] = []
+
+        async def _spy(awaitable, timeout=None, **kw):
+            seen.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout, **kw)
+
+        monkeypatch.setattr(bm.asyncio, "wait_for", _spy)
+        payload, meta = await engine.get_full_text("biblio-rem")
+        assert payload["status"] == "success"
+        assert seen[-1] <= 0.15, f"PDF phase must get only the remainder, got {seen[-1]}"
+    finally:
+        await cache.close()
+        await http_client.aclose()
