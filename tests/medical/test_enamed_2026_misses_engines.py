@@ -25,6 +25,7 @@ from scholar_mcp.medical.brazil_moh import (
     _SearchState,
     bvs_budget_contract,
 )
+from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -609,6 +610,27 @@ async def test_lookup_record_does_not_retry_5xx(tmp_path: Path):
         assert record is None
         assert kind == "origin_outage"
         assert len(route.calls) == 1, "a 5xx lookup must fail fast like the search path"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pcdt_collection_applies_since_year(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path, stub_local=False)
+    try:
+        async def _pcdt_search(query, limit=10):
+            return (
+                [
+                    BrazilGuideline(record_id="old", title="Guia antigo", year="2012", abstract="x"),
+                    BrazilGuideline(record_id="new", title="Guia atual", year="2025", abstract="y"),
+                ],
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+
+        engine.pcdt_engine.search = _pcdt_search
+        records, meta = await engine.search_guidelines("guia", collection="pcdt", since_year=2024)
+        assert [r.record_id for r in records] == ["new"]
+        assert meta.error_kind == "ok"
     finally:
         await cache.close()
         await http_client.aclose()

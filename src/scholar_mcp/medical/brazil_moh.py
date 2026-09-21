@@ -931,11 +931,22 @@ class BrazilMoHEngine:
 
         clamped = min(max(1, limit), MAX_RESULTS)
 
-        if norm_collection == "pcdt":
-            return await self.pcdt_engine.search(query, limit=clamped)
-
-        if norm_collection == "az":
-            return await self.az_engine.search(query, limit=clamped)
+        if norm_collection in ("pcdt", "az"):
+            sub_engine = (
+                self.pcdt_engine if norm_collection == "pcdt" else self.az_engine
+            )
+            records, sub_meta = await sub_engine.search(query, limit=clamped)
+            records = self._apply_since_year(records, since_year)
+            return records, CacheMetadata(
+                cached=sub_meta.cached,
+                cache_age=sub_meta.cache_age,
+                error=sub_meta.error,
+                error_kind=sub_meta.error_kind
+                or ("ok" if records else "successful_empty"),
+                http_status=sub_meta.http_status,
+                challenge_hit=sub_meta.challenge_hit,
+                timeout=sub_meta.timeout,
+            )
 
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
