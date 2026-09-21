@@ -9,6 +9,7 @@ import ssl
 import threading
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Literal
@@ -40,6 +41,66 @@ DEFAULT_FALLBACK_RATE = 5.0
 # configured rate; for these hosts a 403 must back the whole host bucket off
 # and retry, like a 429. Elsewhere a 403 stays fatal.
 BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
+
+# A 403 whose body is a Bunny shield/challenge page cannot be cleared by a
+# plain HTTP retry -- it wants a real browser. Retrying only burns the stage
+# budget and throttles the shared host bucket for every concurrent coroutine.
+# Bunny-specific only: generic challenge phrases ("just a moment", "captcha",
+# ...) stay in UNEXPECTED_HTML_MARKERS and must retry with backoff, since a
+# mere mention of them is not proof of an impassable shield.
+BOT_SHIELD_HTML_MARKER_GROUPS = (
+    ("shield-templates-prod",),
+    ("b-cdn.net", "block.html"),
+)
+
+UNEXPECTED_HTML_MARKERS = (
+    "cloudflare",
+    "ddg",
+    "challenge-platform",
+    "just a moment",
+    "captcha",
+    "attention required",
+)
+
+
+def _html_sample(resp: httpx.Response, max_chars: int = 1000) -> str | None:
+    """Return a lowercased HTML body sample, or None if affirmatively non-HTML.
+
+    Only a present, affirmatively non-HTML content-type rejects the match
+    (e.g. ``application/json``); a missing or empty content-type falls
+    through to body sniffing so a CDN that omits the header cannot silently
+    revert to retry-burn. Decoding is bounded: bytes are sliced before
+    decoding so a multi-megabyte body is never decoded in full.
+    """
+    content_type = resp.headers.get("content-type", "").lower()
+    if content_type and "text/html" not in content_type:
+        return None
+    charset = resp.charset_encoding or "utf-8"
+    return resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
+
+
+def _matches_html_markers(
+    resp: httpx.Response,
+    markers: Sequence[str],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp looks like HTML and matches any marker."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
+    return any(marker.lower() in sample for marker in markers)
+
+
+def _matches_html_marker_groups(
+    resp: httpx.Response,
+    groups: Sequence[Sequence[str]],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp matches any conjunctive marker group."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
+    return any(all(m in sample for m in group) for group in groups)
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -401,22 +462,12 @@ class AsyncHttpClient:
         return url
 
     def is_unexpected_html(self, resp: httpx.Response) -> bool:
-        content_type = resp.headers.get("content-type", "").lower()
-        if "text/html" in content_type:
-            text_sample = resp.text[:1000].lower()
-            if any(
-                marker in text_sample
-                for marker in (
-                    "cloudflare",
-                    "ddg",
-                    "challenge-platform",
-                    "just a moment",
-                    "captcha",
-                    "attention required",
-                )
-            ):
-                return True
-        return False
+        return _matches_html_markers(resp, UNEXPECTED_HTML_MARKERS)
+
+    def is_challenge_html(self, resp: httpx.Response) -> bool:
+        return _matches_html_marker_groups(resp, BOT_SHIELD_HTML_MARKER_GROUPS)
+
+    _is_challenge_html = is_challenge_html  # mirrors _is_unexpected_html at :466
 
     _is_unexpected_html = is_unexpected_html
 
@@ -470,11 +521,17 @@ class AsyncHttpClient:
             await limiter.acquire()
             try:
                 resp = await self.client.get(target_url, headers=headers)
-                # A bot-shield 403 must behave like a 429: throttle the whole
-                # host bucket and retry. A 403 from any other host stays fatal.
-                shielded_403 = (
+                # A bot-shield 403 normally behaves like a 429: throttle the whole
+                # host bucket and retry. The exception is a 403 carrying a JS
+                # challenge page, which no number of plain HTTP retries can pass.
+                # A 403 from any other host stays fatal.
+                is_shield_host_403 = (
                     resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
                 )
+                is_challenge_html = (
+                    is_shield_host_403 and self._is_challenge_html(resp)
+                )
+                shielded_403 = is_shield_host_403 and not is_challenge_html
                 # NCBI E-utilities reports an internal viewer timeout as HTTP 400:
                 # 'Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout'
                 # Only the timeout variant is transient -- a viewer error without it

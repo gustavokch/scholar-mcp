@@ -43,6 +43,7 @@ import logging
 import re
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -141,11 +142,15 @@ class _SearchState:
     ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
     read it afterwards (the write happened in the child task).
     ``bvs_origin_down`` records a 5xx origin error (500, 502, 503, 504), which
-    short-circuits subsequent BVS stages in the same call.
+    short-circuits subsequent BVS stages in the same call. ``bvs_shielded``
+    is also set when a 200 carries block-HTML instead of JSON; truncated
+    JSON or other garbage sets no flag, since a single extra stage is not
+    a cascade.
     """
 
     bvs_shielded: bool = False
     bvs_origin_down: bool = False
+    bvs_timed_out: bool = False
 
 
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
@@ -484,7 +489,10 @@ class BrazilMoHEngine:
 
         Returns ``(records, errored)``. Extracted so the strict and relaxed
         stages cannot drift apart in how they parse or filter. A shield 403
-        verdict is recorded on ``state`` for ``_is_bvs_shielded``.
+        verdict is recorded on ``state`` for ``_is_bvs_shielded``. A 200
+        carrying block-HTML (shield/challenge page) instead of JSON also
+        sets ``state.bvs_shielded`` so later BVS stages short-circuit;
+        truncated JSON or other garbage sets no flag.
         """
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
@@ -507,7 +515,13 @@ class BrazilMoHEngine:
         try:
             data = resp.json()
         except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
+            if self.http_client.is_unexpected_html(
+                resp
+            ) or self.http_client.is_challenge_html(resp):
+                logger.warning("brazil_moh search returned block-HTML payload")
+                state.bvs_shielded = True
+            else:
+                logger.warning("brazil_moh search returned non-JSON payload")
             return [], True
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
@@ -519,8 +533,8 @@ class BrazilMoHEngine:
         return self.http_client.is_throttled(_BVS_HOST)
 
     def _bvs_unavailable(self, state: _SearchState) -> bool:
-        """True when BVS is shielded by CDN 403, throttled, or origin 5xx."""
-        return self._is_bvs_shielded(state) or state.bvs_origin_down
+        """True when BVS is shielded by CDN 403, throttled, origin 5xx, or timed out."""
+        return self._is_bvs_shielded(state) or state.bvs_origin_down or state.bvs_timed_out
 
     def _stage_budget(self, chain_start: float | None = None) -> float:
         """Effective time budget for one retrieval stage.
@@ -539,7 +553,29 @@ class BrazilMoHEngine:
             return remaining
         return min(stage_budget, remaining)
 
-    async def _stage(self, stage: str, coro: Any, default: Any, chain_start: float | None = None) -> Any:
+    def _fire_on_timeout(
+        self, stage: str, on_timeout: Callable[[], None] | None
+    ) -> None:
+        """Run a stage's timeout callback, never letting it break the stage.
+
+        The callback exists to arm a circuit breaker. A callback that raises
+        must not turn a handled stage timeout into a chain-level failure.
+        """
+        if on_timeout is None:
+            return
+        try:
+            on_timeout()
+        except Exception:
+            logger.exception("brazil_moh %s on_timeout callback failed", stage)
+
+    async def _stage(
+        self,
+        stage: str,
+        coro: Any,
+        default: Any,
+        chain_start: float | None = None,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> Any:
         """Run one retrieval stage under its own time budget.
 
         Callers wrap the whole ``search_guidelines`` chain in a hard ceiling
@@ -548,10 +584,13 @@ class BrazilMoHEngine:
         fallback — still get their share of that ceiling, and so the chain
         degrades to partial results instead of a cancelled coroutine.
 
+        Passing ``on_timeout`` allows callers to register a timeout callback,
+        e.g. to arm a circuit breaker to halt remaining stages.
+
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
-        and expired), the stage is skipped and ``default`` is returned. If both
-        bounds are disabled (<= 0), ``coro`` runs unbounded.
+        and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
+        is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
         stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
         chain_setting = (
@@ -570,6 +609,7 @@ class BrazilMoHEngine:
             )
             if asyncio.iscoroutine(coro):
                 coro.close()
+            self._fire_on_timeout(stage, on_timeout)
             return default
         try:
             return await asyncio.wait_for(coro, budget)
@@ -577,7 +617,30 @@ class BrazilMoHEngine:
             logger.warning(
                 "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
             )
+            self._fire_on_timeout(stage, on_timeout)
             return default
+
+    def _mark_bvs_timed_out(self, state: _SearchState) -> None:
+        state.bvs_timed_out = True
+
+    async def _bvs_stage(
+        self,
+        stage: str,
+        composed_query: str,
+        count: int,
+        state: _SearchState,
+        chain_start: float | None = None,
+    ) -> tuple[list[BrazilGuideline], bool]:
+        def _on_timeout() -> None:
+            self._mark_bvs_timed_out(state)
+
+        return await self._stage(
+            stage,
+            self._fetch_records(composed_query, count, state),
+            ([], True),
+            chain_start=chain_start,
+            on_timeout=_on_timeout,
+        )
 
     async def search_guidelines(
         self,
@@ -645,8 +708,12 @@ class BrazilMoHEngine:
             if tokens
             else None
         )
-        records, errored = await self._stage(
-            "title-scoped", self._fetch_records(title_composed, count, state), ([], True), chain_start=chain_start
+        records, errored = await self._bvs_stage(
+            "title-scoped",
+            title_composed,
+            count,
+            state,
+            chain_start=chain_start,
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -666,10 +733,11 @@ class BrazilMoHEngine:
                     query, norm_collection, title_scoped=True, tokens=relaxed_tokens
                 )
 
-                relaxed_title_records, relaxed_title_errored = await self._stage(
+                relaxed_title_records, relaxed_title_errored = await self._bvs_stage(
                     "title-scoped-relaxed",
-                    self._fetch_records(relaxed_title_composed, count, state),
-                    ([], True),
+                    relaxed_title_composed,
+                    count,
+                    state,
                     chain_start=chain_start,
                 )
                 errored_any = errored_any or relaxed_title_errored
@@ -702,10 +770,11 @@ class BrazilMoHEngine:
             or_title_composed = _build_query(
                 query, norm_collection, operator="OR", title_scoped=True
             )
-            or_title_records, or_title_errored = await self._stage(
+            or_title_records, or_title_errored = await self._bvs_stage(
                 "title-scoped-or",
-                self._fetch_records(or_title_composed, count, state),
-                ([], True),
+                or_title_composed,
+                count,
+                state,
                 chain_start=chain_start,
             )
             errored_any = errored_any or or_title_errored
@@ -715,20 +784,24 @@ class BrazilMoHEngine:
             else:
                 records = or_title_records
 
-        # Fall back to all-field query when the title-scoped stage yields no
-        # Brazilian records — including when it stalled, since a slow strict
-        # query says nothing about the relaxed one. When BVS is shielded by
-        # CDN anti-bot 403s or origin 5xx is down, subsequent HTTP stages are
-        # guaranteed to fail or timeout; skip them to preserve budget for
-        # browser fallback.
+        # Fall back to an all-field query when the title-scoped stage yields no
+        # Brazilian records. A stalled, shielded (CDN anti-bot 403) or 5xx BVS
+        # is treated as unhealthy for the rest of the call: further HTTP stages
+        # would each burn a full stage budget against the same bad host, and the
+        # browser tier -- which is what actually beats a shield -- needs what is
+        # left of the chain budget more than they do.
         if (
             not records
             and tokens
             and not title_chain_errored
             and not self._bvs_unavailable(state)
         ):
-            fallback_records, fallback_errored = await self._stage(
-                "all-field", self._fetch_records(all_composed, count, state), ([], True), chain_start=chain_start
+            fallback_records, fallback_errored = await self._bvs_stage(
+                "all-field",
+                all_composed,
+                count,
+                state,
+                chain_start=chain_start,
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
@@ -745,8 +818,12 @@ class BrazilMoHEngine:
             and not self._bvs_unavailable(state)
         ):
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
-            relaxed_records, relaxed_errored = await self._stage(
-                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True), chain_start=chain_start
+            relaxed_records, relaxed_errored = await self._bvs_stage(
+                "relaxed",
+                composed_relaxed,
+                count,
+                state,
+                chain_start=chain_start,
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored

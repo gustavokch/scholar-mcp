@@ -1512,14 +1512,18 @@ async def test_search_stage_timeout_returns_error_instead_of_hanging(tmp_path: P
 
 
 @respx.mock
-async def test_search_title_stage_timeout_falls_through_to_fallback(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
-    # Budget must exceed the BVS host limiter's 1/s refill so the fallback
-    # stage can still acquire a token after the stalled first stage dies.
-    engine.settings.brazil_stage_timeout_s = 1.5
-    try:
-        import asyncio as _asyncio
+async def test_search_title_stage_timeout_halts_remaining_bvs_stages(tmp_path: Path):
+    """A stalled title stage trips the BVS breaker; no further HTTP stage runs.
 
+    Replaces the former fall-through-to-fallback contract: a stalled BVS host is
+    now assumed unhealthy for the rest of the call, so the chain budget is left
+    to the browser tier instead of being spent on more doomed HTTP stages.
+    """
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.05
+    try:
         calls = {"n": 0}
 
         async def _first_slow_then_fast(request: httpx.Request) -> httpx.Response:
@@ -1531,7 +1535,67 @@ async def test_search_title_stage_timeout_falls_through_to_fallback(tmp_path: Pa
         respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_first_slow_then_fast)
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert records, "fallback stage should still serve records"
+        assert calls["n"] == 1, "the breaker must stop further BVS requests"
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_browser(
+    tmp_path, monkeypatch
+):
+    """A title-scoped timeout must skip all-field and relaxed, then use the browser."""
+    import asyncio as _asyncio
+
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        brazil_stage_timeout_s=0.05,
+        brazil_chain_timeout_s=10.0,
+        brazil_browser_timeout_s=5.0,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01, min_429_wait=0.0)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    _stub_pcdt_empty(engine)
+
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {
+                            "id": "1",
+                            "ti": "Manejo da dengue",
+                            "pais_publicacao": "^eBrasil",
+                            "da": "202401",
+                            "ur": ["https://bvsms.saude.gov.br/dengue.pdf"],
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    calls = []
+
+    async def _slow_response(request):
+        calls.append(request)
+        await _asyncio.sleep(1.0)
+        return httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+
+    try:
+        with respx.mock:
+            respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
+            records, meta = await engine.search_guidelines("dengue grave", limit=10)
+
+        assert len(calls) == 1, "all-field and relaxed must not issue requests"
+        assert attempts == [True], "exactly one browser launch"
+        assert [r.title for r in records] == ["Manejo da dengue"]
         assert meta.error is False
     finally:
         await cache.close()
@@ -1562,6 +1626,157 @@ async def test_search_pcdt_timeout_still_serves_bvs_records(tmp_path: Path):
         assert elapsed < 2.0
         assert records and records[0].record_id == "biblio-1"
         assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_timeout_calls_on_timeout_callback(tmp_path: Path):
+    """A timed-out stage must invoke on_timeout callback if provided."""
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        called = {"count": 0}
+
+        def _cb():
+            called["count"] += 1
+
+        async def _hang():
+            await _asyncio.sleep(5.0)
+
+        result = await engine._stage("test_stage", _hang(), default=None, on_timeout=_cb)
+
+        assert result is None
+        assert called["count"] == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_pre_expired_budget_calls_on_timeout_callback(tmp_path: Path):
+    """A stage entered with no chain budget left must still fire on_timeout."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        called = {"count": 0}
+
+        def _cb():
+            called["count"] += 1
+
+        async def _noop():
+            return "ok"
+
+        # Chain started far enough in the past that no budget remains.
+        chain_start = time.monotonic() - 10.0
+        result = await engine._stage(
+            "test_expired",
+            _noop(),
+            default="fallback",
+            chain_start=chain_start,
+            on_timeout=_cb,
+        )
+
+        assert result == "fallback"
+        assert called["count"] == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_bvs_stage_pre_expired_budget_arms_circuit_breaker(tmp_path: Path):
+    """An expired chain budget must open the breaker and dispatch no request.
+
+    This is the behaviour the callback exists for: once `bvs_timed_out` is
+    set, `_bvs_unavailable` gates the all-field and relaxed stages out of the
+    chain instead of letting each one re-enter `_bvs_stage`.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        fetch = AsyncMock()
+        engine._fetch_records = fetch
+        state = _SearchState()
+
+        records, errored = await engine._bvs_stage(
+            "title-scoped",
+            "tw:(dengue)",
+            10,
+            state,
+            chain_start=time.monotonic() - 10.0,
+        )
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_timed_out is True
+        assert engine._bvs_unavailable(state) is True
+        fetch.assert_not_awaited()
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_timeout_without_callback_does_not_raise(tmp_path: Path):
+    """A stage times out without callback and must not raise."""
+    import asyncio as _asyncio
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        async def _hang():
+            await _asyncio.sleep(5.0)
+
+        result = await engine._stage("govbr_pcdt", _hang(), default=None, chain_start=None)
+
+        assert result is None
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_stage_timeout_callback_exception_is_suppressed(tmp_path: Path):
+    """A raising on_timeout is logged and swallowed; the stage still falls back."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_stage_timeout_s = 0.01
+    try:
+        def _exploding_cb():
+            raise RuntimeError("callback exploded")
+
+        async def _hang():
+            await asyncio.sleep(5.0)
+
+        result = await engine._stage(
+            "test_stage",
+            _hang(),
+            default="fallback_val",
+            on_timeout=_exploding_cb,
+        )
+        assert result == "fallback_val"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pre_expired_budget_callback_exception_is_suppressed(tmp_path: Path):
+    """The expired-budget path shares the same guard as the timeout path."""
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.brazil_chain_timeout_s = 0.05
+    try:
+        def _exploding_cb():
+            raise RuntimeError("callback exploded")
+
+        async def _noop():
+            return "ok"
+
+        result = await engine._stage(
+            "test_expired",
+            _noop(),
+            default="fallback_val",
+            chain_start=time.monotonic() - 10.0,
+            on_timeout=_exploding_cb,
+        )
+        assert result == "fallback_val"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2217,6 +2432,57 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
+
+
+@respx.mock
+async def test_fetch_records_non_json_block_html_marks_shielded(tmp_path):
+    """A 200 carrying block-HTML instead of JSON must trip the BVS breaker."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        challenge_html = (
+            '<html><body><iframe '
+            'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+            "</iframe></body></html>"
+        )
+        respx.get(BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, text=challenge_html, headers={"content-type": "text/html"}
+            )
+        )
+        state = _SearchState()
+        records, errored = await engine._fetch_records("tw:(dengue)", 10, state)
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_shielded is True
+        assert engine._bvs_unavailable(state) is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fetch_records_non_json_garbage_does_not_trip_breaker(tmp_path):
+    """Truncated JSON sets no flag: one extra stage, not a cascade."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, text="{truncated", headers={"content-type": "text/plain"}
+            )
+        )
+        state = _SearchState()
+        records, errored = await engine._fetch_records("tw:(dengue)", 10, state)
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_shielded is False
+        assert state.bvs_origin_down is False
+        assert state.bvs_timed_out is False
+        assert engine._bvs_unavailable(state) is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
