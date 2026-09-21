@@ -751,6 +751,28 @@ async def test_cache_stats_and_close_serialize_with_writers(tmp_path: Path):
     await cache.close()
 
 
+@respx.mock
+async def test_cache_hit_emits_s0_1_diagnostics(tmp_path: Path, caplog):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import logging
+
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        await engine.search_guidelines("dengue", limit=10)
+        with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
+            records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert meta.cached is True
+        lines = [r.getMessage() for r in caplog.records if "rerank_in=" in (r.getMessage() or "")]
+        assert lines, "cache hit must still emit the S0.1 line"
+        for field in ("http_status=", "challenge_hit=", "cache_hit=True", "overfetch_window="):
+            assert field in lines[-1]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def test_config_garbage_brazil_timeout_falls_back(monkeypatch):
     monkeypatch.setenv("BRAZIL_FULLTEXT_TIMEOUT_S", "30s")
     assert Settings.load().brazil_fulltext_timeout_s == 30.0

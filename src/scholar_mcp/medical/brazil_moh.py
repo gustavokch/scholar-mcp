@@ -991,17 +991,16 @@ class BrazilMoHEngine:
                 error=False,
                 error_kind="ok" if cached_records else "successful_empty",
             )
-            logger.info(
-                "brazil_moh search query=%r collection=%s limit=%d "
-                "elapsed=%.2fs http_status=None challenge_hit=False "
-                "cache_hit=True timeout=False overfetch_window=0 stages=0 "
-                "rerank_in=0 rerank_out=%d error=False error_kind=%s",
-                query,
-                norm_collection,
-                clamped,
-                elapsed_s,
-                len(cached_records),
-                hit_meta.error_kind,
+            self._log_diagnostics(
+                query=query,
+                norm_collection=norm_collection,
+                clamped=clamped,
+                state=_SearchState(),
+                meta=hit_meta,
+                elapsed_s=elapsed_s,
+                cache_hit=True,
+                rerank_in=0,
+                rerank_out=len(cached_records),
             )
             return cached_records, hit_meta
 
