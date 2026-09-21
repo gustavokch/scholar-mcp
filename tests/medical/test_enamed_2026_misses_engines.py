@@ -781,3 +781,13 @@ def test_config_garbage_brazil_timeout_falls_back(monkeypatch):
 def test_config_valid_brazil_timeout_env_wins(monkeypatch):
     monkeypatch.setenv("BRAZIL_FULLTEXT_TIMEOUT_S", "12.5")
     assert Settings.load().brazil_fulltext_timeout_s == 12.5
+
+
+def test_extract_doi_strips_query_and_braces():
+    from scholar_mcp.medical.brazil_moh import _extract_doi
+
+    assert _extract_doi({"ur": ["https://doi.org/10.1016/j.lana.2024.100123?utm_source=x"]}) == (
+        "10.1016/j.lana.2024.100123"
+    )
+    assert _extract_doi({"ur": ["https://doi.org/10.1590/abc}"]}) == "10.1590/abc"
+    assert _extract_doi({"ur": ["http://site/v10.1234/5678/file.pdf"]}) == ""

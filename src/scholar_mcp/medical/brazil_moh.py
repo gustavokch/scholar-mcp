@@ -170,7 +170,7 @@ ABSTRACT_MAX_CHARS = 2000
 # burst retry still applies inside the HTTP layer even under this override.
 _BVS_RETRYABLE_STATUSES = frozenset({429})
 
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
+_DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
 # Challenge-pass state (S1.2): the last monotonic timestamp at which BVS
 # answered a plain-HTTP request with parseable JSON. A fresh pass means the
@@ -492,13 +492,16 @@ def _extract_doi(doc: dict[str, Any]) -> str:
 
     BVS non-conventional records usually carry no DOI; the field stays
     empty rather than guessed. Scans ``ur`` for a bare ``10.xxxx/...``
-    string or a ``doi.org`` URL and strips trailing punctuation the Solr
-    field occasionally appends.
+    string or a ``doi.org`` URL, cuts URL query/fragment, and strips
+    trailing punctuation the Solr field occasionally appends. The left
+    boundary keeps mid-string numeric paths (``v10.1234/...``) from
+    matching.
     """
     for url in _as_list(doc.get("ur")):
         match = _DOI_RE.search(url or "")
         if match:
-            return match.group(0).rstrip(".,;)]")
+            doi = re.split(r"[?#]", match.group(0), maxsplit=1)[0]
+            return doi.rstrip(".,;:)]}")
     return ""
 
 
