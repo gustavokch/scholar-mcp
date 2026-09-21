@@ -5,11 +5,15 @@ from scholar_mcp.models import CitationItem, FullTextResponse, IdentifierMap, Pa
 from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
 
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-OAI_PMH_URL = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
+OAI_PMH_URL = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
+OAI_QUIET = frozenset({400, 404})
 
+# EPMC_XML_QUIET and EPMC_XML_RETRYABLE travel together as one policy for fullTextXML.
+EPMC_XML_QUIET = frozenset({404, 500})
+EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
 
 
 class EuropePMCProvider(BaseProvider):
@@ -63,30 +67,45 @@ class EuropePMCProvider(BaseProvider):
         except Exception:
             return None
 
+    async def _fetch_full_text_xml(
+        self, pmcid: str, ids: IdentifierMap, pmid: str | None = None
+    ) -> FullTextResponse | None:
+        """Fetch and parse JATS XML from Europe PMC fullTextXML endpoint."""
+        if not pmcid.upper().startswith("PMC"):
+            pmcid = f"PMC{pmcid}"
+        url = f"{EPMC_REST_BASE}/{pmcid}/fullTextXML"
+        resp = await self.http_client.get(
+            url,
+            quiet_statuses=EPMC_XML_QUIET,
+            retryable_statuses=EPMC_XML_RETRYABLE,
+        )
+        if resp is not None and resp.status_code == 200 and resp.content:
+            md = jats_to_markdown(resp.content)
+            if len(md.strip()) >= MIN_USEFUL_CHARS:
+                return FullTextResponse(
+                    status="full_text",
+                    source="europepmc",
+                    format="markdown",
+                    content=md,
+                    total_chars=len(md),
+                    sections_available=list_sections(md),
+                    doi=ids.doi,
+                    pmid=pmid or ids.pmid,
+                    pmcid=pmcid,
+                    url=f"https://europepmc.org/article/PMC/{pmcid}",
+                )
+        return None
+
     async def fetch_full_text(self, ids: IdentifierMap) -> FullTextResponse | None:
         self.last_skip_reason = ""
         pmcid = ids.pmcid
         if pmcid:
             if not pmcid.upper().startswith("PMC"):
                 pmcid = f"PMC{pmcid}"
-            url = f"{EPMC_REST_BASE}/{pmcid}/fullTextXML"
             try:
-                resp = await self.http_client.get(url)
-                if resp is not None and resp.status_code == 200 and resp.content:
-                    md = jats_to_markdown(resp.content)
-                    if len(md.strip()) >= MIN_USEFUL_CHARS:
-                        return FullTextResponse(
-                            status="full_text",
-                            source="europepmc",
-                            format="markdown",
-                            content=md,
-                            total_chars=len(md),
-                            sections_available=list_sections(md),
-                            doi=ids.doi,
-                            pmid=ids.pmid,
-                            pmcid=pmcid,
-                            url=f"https://europepmc.org/article/PMC/{pmcid}",
-                        )
+                res = await self._fetch_full_text_xml(pmcid, ids)
+                if res is not None:
+                    return res
             except Exception:
                 pass
             # Spec §4 Investigate 3 fallback: a fullTextXML 404 (the run-9
@@ -117,23 +136,11 @@ class EuropePMCProvider(BaseProvider):
                         if found_pmcid and has_xml:
                             if not found_pmcid.upper().startswith("PMC"):
                                 found_pmcid = f"PMC{found_pmcid}"
-                            xml_url = f"{EPMC_REST_BASE}/{found_pmcid}/fullTextXML"
-                            xml_resp = await self.http_client.get(xml_url)
-                            if xml_resp is not None and xml_resp.status_code == 200 and xml_resp.content:
-                                md = jats_to_markdown(xml_resp.content)
-                                if len(md.strip()) >= MIN_USEFUL_CHARS:
-                                    return FullTextResponse(
-                                        status="full_text",
-                                        source="europepmc",
-                                        format="markdown",
-                                        content=md,
-                                        total_chars=len(md),
-                                        sections_available=list_sections(md),
-                                        doi=ids.doi,
-                                        pmid=ids.pmid or rec.get("pmid"),
-                                        pmcid=found_pmcid,
-                                        url=f"https://europepmc.org/article/PMC/{found_pmcid}",
-                                    )
+                            full_text = await self._fetch_full_text_xml(
+                                found_pmcid, ids, pmid=ids.pmid or rec.get("pmid")
+                            )
+                            if full_text is not None:
+                                return full_text
                             oai = await self._fetch_via_oai(found_pmcid, ids)
                             if oai is not None:
                                 return oai
@@ -165,6 +172,7 @@ class EuropePMCProvider(BaseProvider):
                     "identifier": f"oai:pubmedcentral.nih.gov:{numeric}",
                     "metadataPrefix": "pmc",
                 },
+                quiet_statuses=OAI_QUIET,
             )
             if resp is None or resp.status_code != 200 or not resp.content:
                 return None

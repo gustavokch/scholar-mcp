@@ -4,12 +4,15 @@ import logging
 import math
 import random
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import httpx
 
@@ -19,7 +22,7 @@ from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 DEFAULT_HOST_RATES: dict[str, float] = {
     "arxiv.org": 0.33,
@@ -39,10 +42,77 @@ DEFAULT_FALLBACK_RATE = 5.0
 # and retry, like a 429. Elsewhere a 403 stays fatal.
 BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 
+# A 403 whose body is a Bunny shield/challenge page cannot be cleared by a
+# plain HTTP retry -- it wants a real browser. Retrying only burns the stage
+# budget and throttles the shared host bucket for every concurrent coroutine.
+# Bunny-specific only: generic challenge phrases ("just a moment", "captcha",
+# ...) stay in UNEXPECTED_HTML_MARKERS and must retry with backoff, since a
+# mere mention of them is not proof of an impassable shield.
+BOT_SHIELD_HTML_MARKER_GROUPS = (
+    ("shield-templates-prod",),
+    ("b-cdn.net", "block.html"),
+)
+
+UNEXPECTED_HTML_MARKERS = (
+    "cloudflare",
+    "ddg",
+    "challenge-platform",
+    "just a moment",
+    "captcha",
+    "attention required",
+)
+
+
+def _html_sample(resp: httpx.Response, max_chars: int = 1000) -> str | None:
+    """Return a lowercased HTML body sample, or None if affirmatively non-HTML.
+
+    Only a present, affirmatively non-HTML content-type rejects the match
+    (e.g. ``application/json``); a missing or empty content-type falls
+    through to body sniffing so a CDN that omits the header cannot silently
+    revert to retry-burn. Decoding is bounded: bytes are sliced before
+    decoding so a multi-megabyte body is never decoded in full.
+    """
+    content_type = resp.headers.get("content-type", "").lower()
+    if content_type and "text/html" not in content_type:
+        return None
+    charset = resp.charset_encoding or "utf-8"
+    return resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
+
+
+def _matches_html_markers(
+    resp: httpx.Response,
+    markers: Sequence[str],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp looks like HTML and matches any marker."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
+    return any(marker.lower() in sample for marker in markers)
+
+
+def _matches_html_marker_groups(
+    resp: httpx.Response,
+    groups: Sequence[Sequence[str]],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp matches any conjunctive marker group."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
+    return any(all(m in sample for m in group) for group in groups)
+
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
 # other request to that host -- for hours.
 MAX_RETRY_AFTER = 60.0
+
+# How long a "permanently dead" host verdict (DNS failure, bad cert) is
+# trusted before the next request re-probes the host. Long enough that a
+# stage chain does not eat the retry cost mid-run, short enough that a fixed
+# mirror recovers within one server uptime window instead of needing a
+# restart.
+DEAD_HOST_TTL_S = 1800.0
 
 
 @dataclass(frozen=True)
@@ -77,6 +147,31 @@ def _host_key(host: str | None) -> str:
     if hostname == "pesquisa.bvsalud.org" or hostname.endswith(".bvsalud.org"):
         return "pesquisa.bvsalud.org"
     return hostname
+
+
+_PERMANENT_TRANSPORT_EXCEPTIONS = (
+    socket.gaierror,
+    ssl.SSLCertVerificationError,
+)
+
+
+def _is_permanent_transport_error(exc: BaseException) -> bool:
+    """True when exc or any chained cause/context is a permanent network failure.
+
+    socket.gaierror (DNS lookup failure) and ssl.SSLCertVerificationError (untrusted
+    or self-signed certificate) do not clear on retry with backoff.
+
+    The chain walk keeps a visited set: ``__context__`` can link exceptions in a
+    cycle (respx wraps handler exceptions that way), which would hang the walk.
+    """
+    seen: set[int] = set()
+    curr: BaseException | None = exc
+    while curr is not None and id(curr) not in seen:
+        seen.add(id(curr))
+        if isinstance(curr, _PERMANENT_TRANSPORT_EXCEPTIONS):
+            return True
+        curr = curr.__cause__ or curr.__context__
+    return False
 
 
 def _parse_retry_after(resp: httpx.Response) -> float | None:
@@ -203,6 +298,15 @@ class AsyncHttpClient:
     _limiters: dict[str, AsyncRateLimiter] = {}
     _limiters_lock = threading.Lock()
 
+    # Cache of hosts with permanent transport failures (DNS resolution or SSL
+    # certificate verification errors). Subsequent requests to these hosts
+    # short-circuit immediately without making network calls. Keyed on host,
+    # valued on the monotonic deadline the verdict expires -- a DNS blip or a
+    # cert renewal window must not blackhole a host for the rest of the
+    # process's life, so the verdict is re-probed after DEAD_HOST_TTL_S.
+    _dead_hosts: ClassVar[dict[str, float]] = {}
+    _dead_hosts_lock = threading.Lock()
+
     # Typed record of the most recent terminal failure, per requesting task.
     # ContextScoped: the client is a shared singleton, so a plain attribute
     # would leak one request's failure into every concurrent call.
@@ -264,9 +368,36 @@ class AsyncHttpClient:
 
     @classmethod
     def reset_limiters(cls) -> None:
-        """Drop every limiter bucket. For tests; never call it on a live server."""
+        """Drop every limiter bucket and dead host. For tests; never call it on a live server."""
         with cls._limiters_lock:
             cls._limiters.clear()
+        with cls._dead_hosts_lock:
+            cls._dead_hosts.clear()
+
+    @classmethod
+    def reset_dead_hosts(cls) -> None:
+        """Drop every dead-host verdict. For tests; never call it on a live server."""
+        with cls._dead_hosts_lock:
+            cls._dead_hosts.clear()
+
+    @classmethod
+    def is_dead_host(cls, host: str) -> bool:
+        """True when host suffered a permanent transport failure within DEAD_HOST_TTL_S."""
+        key = _host_key(host)
+        with cls._dead_hosts_lock:
+            deadline = cls._dead_hosts.get(key)
+            if deadline is None:
+                return False
+            if deadline <= time.monotonic():
+                del cls._dead_hosts[key]
+                return False
+            return True
+
+    @classmethod
+    def mark_dead_host(cls, host: str) -> None:
+        """Record host as dead until DEAD_HOST_TTL_S from now."""
+        with cls._dead_hosts_lock:
+            cls._dead_hosts[_host_key(host)] = time.monotonic() + DEAD_HOST_TTL_S
 
     def is_throttled(self, host: str) -> bool:
         """True when ``host``'s limiter holds a throttle deadline in the future.
@@ -331,22 +462,12 @@ class AsyncHttpClient:
         return url
 
     def is_unexpected_html(self, resp: httpx.Response) -> bool:
-        content_type = resp.headers.get("content-type", "").lower()
-        if "text/html" in content_type:
-            text_sample = resp.text[:1000].lower()
-            if any(
-                marker in text_sample
-                for marker in (
-                    "cloudflare",
-                    "ddg",
-                    "challenge-platform",
-                    "just a moment",
-                    "captcha",
-                    "attention required",
-                )
-            ):
-                return True
-        return False
+        return _matches_html_markers(resp, UNEXPECTED_HTML_MARKERS)
+
+    def is_challenge_html(self, resp: httpx.Response) -> bool:
+        return _matches_html_marker_groups(resp, BOT_SHIELD_HTML_MARKER_GROUPS)
+
+    _is_challenge_html = is_challenge_html  # mirrors _is_unexpected_html at :466
 
     _is_unexpected_html = is_unexpected_html
 
@@ -357,6 +478,7 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
         ok_statuses: frozenset[int] | set[int] | None = None,
         quiet_statuses: frozenset[int] | set[int] | None = None,
+        retryable_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
@@ -371,26 +493,59 @@ class AsyncHttpClient:
         warning (e.g. a scholarly registry answering 404 for a DOI it does not
         hold). Callers needing the response object want ``ok_statuses`` instead.
 
-        A status in either set is still logged at DEBUG when it is ``>= 400``, so
-        a 404 caused by a bad URL or a misconfigured parameter stays recoverable
-        at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+        ``retryable_statuses`` narrows the default ``RETRYABLE_STATUS_CODES``
+        for this call, but does not disable the two host-specific retry
+        bypasses: a bot-shield 403 and the NCBI external-viewer timeout 400
+        are retried even when the override excludes them.
+
+        A status in any of these sets is still logged at DEBUG when it is
+        ``>= 400``, so a 404 caused by a bad URL or a misconfigured parameter
+        stays recoverable at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+
+        The three status kwargs are deliberately independent and are not
+        merged into a single status-policy object; call sites pass them by
+        keyword, and that convention is not enforced with a ``*`` marker.
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
         host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
+        effective_retry_statuses = retryable_statuses if retryable_statuses is not None else RETRYABLE_STATUS_CODES
+
+        if self.is_dead_host(host_key):
+            self.last_failure = FetchFailure("transport", None, "DeadHostCached")
+            logger.info("HTTP GET %s skipped: host %s is marked permanently dead", log_url, host_key)
+            return None
 
         for attempt in range(self.max_retries):
             await limiter.acquire()
             try:
                 resp = await self.client.get(target_url, headers=headers)
-                # A bot-shield 403 must behave like a 429: throttle the whole
-                # host bucket and retry. A 403 from any other host stays fatal.
-                shielded_403 = (
+                # A bot-shield 403 normally behaves like a 429: throttle the whole
+                # host bucket and retry. The exception is a 403 carrying a JS
+                # challenge page, which no number of plain HTTP retries can pass.
+                # A 403 from any other host stays fatal.
+                is_shield_host_403 = (
                     resp.status_code == 403 and host_key in BOT_SHIELD_403_HOSTS
                 )
+                is_challenge_html = (
+                    is_shield_host_403 and self._is_challenge_html(resp)
+                )
+                shielded_403 = is_shield_host_403 and not is_challenge_html
+                # NCBI E-utilities reports an internal viewer timeout as HTTP 400:
+                # 'Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout'
+                # Only the timeout variant is transient -- a viewer error without it
+                # is a permanent request defect and must stay fatal on the first try.
+                ncbi_viewer_timeout = (
+                    resp.status_code == 400
+                    and host_key == "ncbi.nlm.nih.gov"
+                    and b"External viewer error" in resp.content
+                    and b"Status: Timeout" in resp.content
+                )
                 if (
-                    resp.status_code in RETRYABLE_STATUS_CODES or shielded_403
+                    resp.status_code in effective_retry_statuses
+                    or shielded_403
+                    or ncbi_viewer_timeout
                 ) and attempt < self.max_retries - 1:
                     retry_after = _parse_retry_after(resp)
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
@@ -443,6 +598,16 @@ class AsyncHttpClient:
                 self.last_failure = None
                 return resp
             except (httpx.TransportError, httpx.TimeoutException) as exc:
+                if _is_permanent_transport_error(exc):
+                    self.mark_dead_host(host_key)
+                    self.last_failure = FetchFailure("transport", None, type(exc).__name__)
+                    logger.warning(
+                        "HTTP GET %s failed permanently on attempt %d: %s",
+                        log_url,
+                        attempt + 1,
+                        exc,
+                    )
+                    return None
                 if attempt < self.max_retries - 1:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
@@ -485,7 +650,10 @@ class AsyncHttpClient:
         quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> bytes | None:
         resp = await self.get(
-            url, headers=headers, params=params, quiet_statuses=quiet_statuses
+            url,
+            headers=headers,
+            params=params,
+            quiet_statuses=quiet_statuses,
         )
         if resp is not None and resp.status_code == 200:
             if not self._is_unexpected_html(resp):

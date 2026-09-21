@@ -43,7 +43,9 @@ import logging
 import re
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from bs4 import BeautifulSoup
@@ -86,7 +88,14 @@ FULLTEXT_ALLOWED_HOSTS = frozenset(
 )
 
 MAX_RESULTS = 50
-OVERFETCH_FACTOR = 3
+# Over-fetch, then re-rank client-side, then slice. The factor is tied to
+# BASE_FILTER's width: admitting the monography class takes the pt pool from
+# roughly 23.6k to 117.8k documents and about triples the hit count of a
+# topical query, so a factor of 3 would truncate targets out of the window
+# before rank_brazil_guidelines ever sees them. At limit=10 this fetches 100.
+# The factor of 10 is fully realized up to limit=20 (200 records); above that,
+# MAX_PAGE_SIZE = 200 governs (e.g. at limit=50 the effective factor is 4).
+OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 50_000
 
@@ -107,6 +116,20 @@ _BVS_CHALLENGE_MARKERS = (
     "just a moment",
 )
 
+# The Bunny CDN challenge is upstream of the origin; once it passes, a sick origin
+# answers with its own Portuguese error page ("Erro 504 - Gateway Timeout"). That is
+# an outage, not a block, and mislabelling it sends the next debugging session at the
+# wrong layer.
+_BVS_OUTAGE_MARKERS = (
+    "erro 502",
+    "erro 503",
+    "erro 504",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+)
+
+
 
 @dataclass
 class _SearchState:
@@ -118,12 +141,19 @@ class _SearchState:
     ``_fetch_records`` — the client's ``last_failure`` is a per-task
     ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
     read it afterwards (the write happened in the child task).
+    ``bvs_origin_down`` records a 5xx origin error (500, 502, 503, 504), which
+    short-circuits subsequent BVS stages in the same call. ``bvs_shielded``
+    is also set when a 200 carries block-HTML instead of JSON; truncated
+    JSON or other garbage sets no flag, since a single extra stage is not
+    a cascade.
     """
 
     bvs_shielded: bool = False
+    bvs_origin_down: bool = False
+    bvs_timed_out: bool = False
 
 
-BASE_FILTER = 'type:"non-conventional" AND la:"pt"'
+BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
 
@@ -459,7 +489,10 @@ class BrazilMoHEngine:
 
         Returns ``(records, errored)``. Extracted so the strict and relaxed
         stages cannot drift apart in how they parse or filter. A shield 403
-        verdict is recorded on ``state`` for ``_is_bvs_shielded``.
+        verdict is recorded on ``state`` for ``_is_bvs_shielded``. A 200
+        carrying block-HTML (shield/challenge page) instead of JSON also
+        sets ``state.bvs_shielded`` so later BVS stages short-circuit;
+        truncated JSON or other garbage sets no flag.
         """
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
@@ -472,14 +505,23 @@ class BrazilMoHEngine:
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            if failure is not None and failure.status == 403:
-                state.bvs_shielded = True
+            if failure is not None:
+                if failure.status == 403:
+                    state.bvs_shielded = True
+                elif failure.status is not None and 500 <= failure.status < 600:
+                    state.bvs_origin_down = True
             return [], True
 
         try:
             data = resp.json()
         except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
+            if self.http_client.is_unexpected_html(
+                resp
+            ) or self.http_client.is_challenge_html(resp):
+                logger.warning("brazil_moh search returned block-HTML payload")
+                state.bvs_shielded = True
+            else:
+                logger.warning("brazil_moh search returned non-JSON payload")
             return [], True
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
@@ -490,7 +532,50 @@ class BrazilMoHEngine:
             return True
         return self.http_client.is_throttled(_BVS_HOST)
 
-    async def _stage(self, stage: str, coro: Any, default: Any) -> Any:
+    def _bvs_unavailable(self, state: _SearchState) -> bool:
+        """True when BVS is shielded by CDN 403, throttled, origin 5xx, or timed out."""
+        return self._is_bvs_shielded(state) or state.bvs_origin_down or state.bvs_timed_out
+
+    def _stage_budget(self, chain_start: float | None = None) -> float:
+        """Effective time budget for one retrieval stage.
+
+        Returns min(brazil_stage_timeout_s, chain_budget_remaining).
+        A setting <= 0 disables that bound.
+        """
+        stage_budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        if chain_start is None:
+            return stage_budget
+        chain_budget = float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+        if chain_budget <= 0:
+            return stage_budget
+        remaining = max(chain_budget - (time.monotonic() - chain_start), 0.0)
+        if stage_budget <= 0:
+            return remaining
+        return min(stage_budget, remaining)
+
+    def _fire_on_timeout(
+        self, stage: str, on_timeout: Callable[[], None] | None
+    ) -> None:
+        """Run a stage's timeout callback, never letting it break the stage.
+
+        The callback exists to arm a circuit breaker. A callback that raises
+        must not turn a handled stage timeout into a chain-level failure.
+        """
+        if on_timeout is None:
+            return
+        try:
+            on_timeout()
+        except Exception:
+            logger.exception("brazil_moh %s on_timeout callback failed", stage)
+
+    async def _stage(
+        self,
+        stage: str,
+        coro: Any,
+        default: Any,
+        chain_start: float | None = None,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> Any:
         """Run one retrieval stage under its own time budget.
 
         Callers wrap the whole ``search_guidelines`` chain in a hard ceiling
@@ -499,19 +584,63 @@ class BrazilMoHEngine:
         fallback — still get their share of that ceiling, and so the chain
         degrades to partial results instead of a cancelled coroutine.
 
-        ``brazil_stage_timeout_s <= 0`` disables the budget. On expiry the
-        stage counts as errored and ``default`` is returned.
+        Passing ``on_timeout`` allows callers to register a timeout callback,
+        e.g. to arm a circuit breaker to halt remaining stages.
+
+        Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
+        is provided. If the chain budget is already exhausted (or stage budget <= 0
+        and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
+        is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
-        budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
-        if budget <= 0:
+        stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        chain_setting = (
+            float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+            if chain_start is not None
+            else 0.0
+        )
+        # If neither setting is active, timeout is disabled.
+        if stage_setting <= 0 and chain_setting <= 0:
             return await coro
+
+        budget = self._stage_budget(chain_start)
+        if budget <= 0:
+            logger.warning(
+                "brazil_moh %s stage skipped: chain budget expired", stage
+            )
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            self._fire_on_timeout(stage, on_timeout)
+            return default
         try:
             return await asyncio.wait_for(coro, budget)
         except (asyncio.TimeoutError, TimeoutError):
             logger.warning(
                 "brazil_moh %s stage exceeded its %.1fs budget", stage, budget
             )
+            self._fire_on_timeout(stage, on_timeout)
             return default
+
+    def _mark_bvs_timed_out(self, state: _SearchState) -> None:
+        state.bvs_timed_out = True
+
+    async def _bvs_stage(
+        self,
+        stage: str,
+        composed_query: str,
+        count: int,
+        state: _SearchState,
+        chain_start: float | None = None,
+    ) -> tuple[list[BrazilGuideline], bool]:
+        def _on_timeout() -> None:
+            self._mark_bvs_timed_out(state)
+
+        return await self._stage(
+            stage,
+            self._fetch_records(composed_query, count, state),
+            ([], True),
+            chain_start=chain_start,
+            on_timeout=_on_timeout,
+        )
 
     async def search_guidelines(
         self,
@@ -561,8 +690,8 @@ class BrazilMoHEngine:
         state = _SearchState()
         stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
         (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
-            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta)),
-            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta)),
+            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
+            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
         )
         errored_any = pcdt_meta.error or az_meta.error
         # The browser tier answers BVS failures (the CDN shield 403s plain
@@ -579,8 +708,12 @@ class BrazilMoHEngine:
             if tokens
             else None
         )
-        records, errored = await self._stage(
-            "title-scoped", self._fetch_records(title_composed, count, state), ([], True)
+        records, errored = await self._bvs_stage(
+            "title-scoped",
+            title_composed,
+            count,
+            state,
+            chain_start=chain_start,
         )
         errored_any = errored_any or errored
         bvs_errored = bvs_errored or errored
@@ -589,52 +722,108 @@ class BrazilMoHEngine:
         # returns zero records without error, drop trailing tokens and retry.
         # Scenario queries frequently contain clinical descriptors ('grupo',
         # 'criterios', 'hidratacao') that do not appear in formal manual titles.
-        # An errored relaxation step halts the whole BVS chain: the endpoint is
-        # already misbehaving, so further variants likely fail the same way.
-        title_relaxed_errored = False
-        if not records and not errored and tokens:
+        # An errored title stage halts the remaining BVS stages regardless of
+        # which title stage failed: the endpoint is already misbehaving, so
+        # further variants likely fail the same way. When BVS is unavailable
+        # (shielded by CDN 403 or origin 5xx down), skip further stages.
+        title_chain_errored = False
+        if not records and not errored and tokens and not self._bvs_unavailable(state):
             for relaxed_tokens in _title_token_relaxations(tokens):
                 relaxed_title_composed = _build_query(
                     query, norm_collection, title_scoped=True, tokens=relaxed_tokens
                 )
 
-                relaxed_title_records, relaxed_title_errored = await self._stage(
+                relaxed_title_records, relaxed_title_errored = await self._bvs_stage(
                     "title-scoped-relaxed",
-                    self._fetch_records(relaxed_title_composed, count, state),
-                    ([], True),
+                    relaxed_title_composed,
+                    count,
+                    state,
+                    chain_start=chain_start,
                 )
                 errored_any = errored_any or relaxed_title_errored
                 bvs_errored = bvs_errored or relaxed_title_errored
                 if relaxed_title_errored:
-                    title_relaxed_errored = True
+                    title_chain_errored = True
                     break
                 if relaxed_title_records:
                     records = relaxed_title_records
                     break
 
-        # Fall back to all-field query when the title-scoped stage yields no
-        # Brazilian records — including when it stalled, since a slow strict
-        # query says nothing about the relaxed one. When BVS is shielded by
-        # CDN anti-bot 403s, subsequent HTTP stages are guaranteed to fail
-        # or timeout; skip them to preserve budget for browser fallback.
-        bvs_shielded = self._is_bvs_shielded(state)
-        if not records and tokens and not title_relaxed_errored and not bvs_shielded:
-            fallback_records, fallback_errored = await self._stage(
-                "all-field", self._fetch_records(all_composed, count, state), ([], True)
+        # OR-title stage. Every AND conjunction above requires all tokens to
+        # share one title, which a clinical-scenario query rarely satisfies:
+        # measured on the dengue item, the strict stage and all three
+        # relaxation steps return zero while ORing the same tokens in ti:
+        # surfaces the manual inside the over-fetch window for the client
+        # ranker to lift. It runs before the all-field fallback because a
+        # title match is a stronger signal than an abstract match, and it is
+        # skipped for a single token, where it would compose identically to
+        # the strict stage and waste a request. It is also skipped if the
+        # strict title stage errored (stalled/failed) to avoid paying an extra
+        # stage budget against a misbehaving endpoint.
+        if (
+            not records
+            and not errored
+            and len(tokens) >= 2
+            and not title_chain_errored
+            and not self._bvs_unavailable(state)
+        ):
+            or_title_composed = _build_query(
+                query, norm_collection, operator="OR", title_scoped=True
+            )
+            or_title_records, or_title_errored = await self._bvs_stage(
+                "title-scoped-or",
+                or_title_composed,
+                count,
+                state,
+                chain_start=chain_start,
+            )
+            errored_any = errored_any or or_title_errored
+            bvs_errored = bvs_errored or or_title_errored
+            if or_title_errored:
+                title_chain_errored = True
+            else:
+                records = or_title_records
+
+        # Fall back to an all-field query when the title-scoped stage yields no
+        # Brazilian records. A stalled, shielded (CDN anti-bot 403) or 5xx BVS
+        # is treated as unhealthy for the rest of the call: further HTTP stages
+        # would each burn a full stage budget against the same bad host, and the
+        # browser tier -- which is what actually beats a shield -- needs what is
+        # left of the chain budget more than they do.
+        if (
+            not records
+            and tokens
+            and not title_chain_errored
+            and not self._bvs_unavailable(state)
+        ):
+            fallback_records, fallback_errored = await self._bvs_stage(
+                "all-field",
+                all_composed,
+                count,
+                state,
+                chain_start=chain_start,
             )
             errored_any = errored_any or fallback_errored
             bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
-            bvs_shielded = bvs_shielded or self._is_bvs_shielded(state)
 
         # The strict conjunction found nothing usable -- either no hits at all,
         # or only records the Brazil assertion dropped. Retry the same tokens
         # ORed. A single substantive token is skipped: the two groups would be
         # byte-identical, so the request would be pure waste.
-        if not records and len(tokens) >= 2 and not title_relaxed_errored and not bvs_shielded:
+        if (
+            not records
+            and len(tokens) >= 2
+            and not title_chain_errored
+            and not self._bvs_unavailable(state)
+        ):
             composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
-            relaxed_records, relaxed_errored = await self._stage(
-                "relaxed", self._fetch_records(composed_relaxed, count, state), ([], True)
+            relaxed_records, relaxed_errored = await self._bvs_stage(
+                "relaxed",
+                composed_relaxed,
+                count,
+                state,
+                chain_start=chain_start,
             )
             errored_any = errored_any or relaxed_errored
             bvs_errored = bvs_errored or relaxed_errored
@@ -772,20 +961,21 @@ class BrazilMoHEngine:
                     target, wait_until="domcontentloaded", timeout=_CAMOUFOX_NAV_TIMEOUT_MS
                 )
                 content = await page.content()
-            # A JSON payload rendered in a browser arrives wrapped in
-            # <html><body><pre>...</pre></body></html>; tag-stripping must
-            # leave a bare JSON body untouched.
-            lowered = content.lower()
-            if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
-                logger.info("brazil_moh: BVS browser fallback received challenge or block page")
-                return []
             soup = BeautifulSoup(content, "html.parser")
             pre = soup.find("pre")
             text = pre.get_text() if pre else soup.get_text()
             try:
                 data = json.loads(text)
             except (json.JSONDecodeError, ValueError):
-                logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
+                # Only an unparseable payload can be a shield or an error page; a
+                # marker phrase inside a parsed record is just record text.
+                lowered = content.lower()
+                if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
+                    logger.info("brazil_moh: BVS browser fallback received challenge or block page")
+                elif any(marker in lowered for marker in _BVS_OUTAGE_MARKERS):
+                    logger.info("brazil_moh: BVS origin returned an error page")
+                else:
+                    logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
                 return []
             return _extract_docs(data)
 
@@ -860,12 +1050,66 @@ class BrazilMoHEngine:
             )
             return "", True
         try:
-            # Bounded before it is cached: an unbounded extraction would write
-            # a multi-megabyte row into the shared cache for a long manual.
-            return pdf_bytes_to_text(resp.content)[:MAX_FULL_TEXT_CHARS], False
+            # Unbounded here: the ceiling is applied at cache/serve time so
+            # the pre-truncation length survives as ``total_chars``.
+            return pdf_bytes_to_text(resp.content), False
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
             return "", True
+
+    async def _serve_local_text(
+        self,
+        cache_key: str,
+        base: dict[str, Any],
+        record: BrazilGuideline,
+        max_chars: int | None,
+    ) -> tuple[dict[str, Any], CacheMetadata]:
+        """Serve a bundled ``local:`` corpus file from disk, offline.
+
+        The full file is read into memory (hundreds of KB, accepted) and the
+        Task 1 ``total_chars``/ceiling/cache contract applies unchanged. No
+        network, PDF parsing, or BVS lookup happens on this path.
+        """
+
+        def _local_error(status: str, error_text: str) -> tuple[dict[str, Any], CacheMetadata]:
+            return (
+                {**base, "status": status, "error": error_text,
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+
+        rel = (record.document_url or "")[len("local:"):]
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            return _local_error("not_found", "invalid local corpus path")
+        try:
+            data_dir = (Path(__file__).resolve().parent.parent / "data").resolve()
+            path = (data_dir / rel).resolve()
+            path.relative_to(data_dir)
+        except ValueError:
+            return _local_error("not_found", "invalid local corpus path")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return _local_error("not_found", "local corpus file missing")
+        except (UnicodeDecodeError, OSError) as exc:
+            logger.warning("brazil_moh local text read failed (%s): %s", path, exc)
+            return (
+                {**base, "status": "error", "error": "local text read failed",
+                 "title": record.title, "content_type": "none", "content": ""},
+                CacheMetadata(cached=False, cache_age=0, error=True),
+            )
+        total_chars = len(text)
+        payload = {
+            **base, "status": "success", "title": record.title,
+            "content_type": "text",
+            "content": text[:MAX_FULL_TEXT_CHARS],
+            "total_chars": total_chars,
+        }
+        await self.cache.set(cache_key, payload, source="brazil_moh")
+        return (
+            self._serve_full_text(payload, max_chars),
+            CacheMetadata(cached=False, cache_age=0, error=False),
+        )
 
     async def get_full_text(
         self,
@@ -913,12 +1157,18 @@ class BrazilMoHEngine:
             )
 
         base["document_url"] = record.document_url
+        if record.document_url.startswith("local:"):
+            return await self._serve_local_text(
+                cache_key, base, record, max_chars
+            )
         pdf_text, errored = await self._extract_pdf_text(record.document_url)
 
         if pdf_text:
-            result = {"content_type": "pdf", "content": pdf_text}
+            source_text = pdf_text
+            content_type = "pdf"
         elif record.abstract:
-            result = {"content_type": "abstract", "content": record.abstract}
+            source_text = record.abstract
+            content_type = "abstract"
         else:
             # A transient fetch failure with nothing to fall back on is an
             # error, not an absence: callers must retry, not move on.
@@ -935,6 +1185,14 @@ class BrazilMoHEngine:
                 CacheMetadata(cached=False, cache_age=0, error=errored),
             )
 
+        total_chars = len(source_text)
+        # Bounded before it is cached: an unbounded extraction would write
+        # a multi-megabyte row into the shared cache for a long manual.
+        result = {
+            "content_type": content_type,
+            "content": source_text[:MAX_FULL_TEXT_CHARS],
+            "total_chars": total_chars,
+        }
         payload = {**base, "status": "success", "title": record.title, **result}
         # An errored payload is never cached: a transient block must not
         # poison a 30-day TTL.
@@ -955,5 +1213,10 @@ class BrazilMoHEngine:
             if max_chars is None
             else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )
-        content, truncated = truncate_content(payload.get("content", ""), limit)
-        return {**payload, "content": content, "truncated": truncated}
+        stored = payload.get("content", "")
+        # Old cache rows predate ``total_chars`` and degrade to the stored
+        # length (truncation at the ceiling reads as False) — accepted.
+        total = payload.get("total_chars", len(stored))
+        content, truncated = truncate_content(stored, limit)
+        is_truncated = truncated or (len(content) < total)
+        return {**payload, "content": content, "truncated": is_truncated, "total_chars": total}

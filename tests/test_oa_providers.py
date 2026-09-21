@@ -4,14 +4,15 @@ import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap
-from scholar_mcp.providers.europe_pmc import EuropePMCProvider
+from scholar_mcp.providers.europe_pmc import EuropePMCProvider, OAI_PMH_URL
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.utils.http import AsyncHttpClient
+from log_helpers import HTTP_LOGGER, http_records
 
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
-OAI = "https://www.ncbi.nlm.nih.gov/pmc/oai/oai.cgi"
+OAI = OAI_PMH_URL
 UNPAYWALL = "https://api.unpaywall.org/v2"
 
 PMC_XML = (
@@ -113,6 +114,25 @@ async def test_europe_pmc_oai_failure_falls_through(client):
 
 
 @respx.mock
+async def test_europe_pmc_500_and_oai_400_quiet_fast_fail(retrying_client, caplog):
+    """Europe PMC 500 (no XML) and PMC OAI 400 (cannotDisseminateFormat) stay quiet and fast."""
+    epmc_route = respx.get(url__startswith=f"{EPMC}/PMC7768126/fullTextXML").mock(
+        return_value=httpx.Response(500, json={"status": 500, "error": "Internal Server Error"})
+    )
+    oai_route = respx.get(url__startswith=OAI_PMH_URL).mock(
+        return_value=httpx.Response(400, text='<error code="cannotDisseminateFormat"/>')
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        provider = EuropePMCProvider(retrying_client)
+        res = await provider.fetch_full_text(IdentifierMap(pmcid="PMC7768126"))
+
+    assert res is None
+    assert epmc_route.call_count == 1
+    assert oai_route.call_count == 1
+    assert http_records(caplog, "WARNING") == []
+
+
+@respx.mock
 async def test_unpaywall_skipped_without_email(client):
     provider = UnpaywallProvider(client, email=None)
     assert await provider.fetch_full_text(IdentifierMap(doi="10.1038/sample")) is None
@@ -175,3 +195,28 @@ async def test_unpaywall_pdf_yielding_no_text_is_miss(client, monkeypatch):
         IdentifierMap(doi="10.1038/scan")
     )
     assert res is None
+
+
+@respx.mock
+async def test_discovery_path_prefers_caller_pmid(client):
+    """ids.pmid wins over the Europe PMC search record when both are present."""
+    respx.get(url__startswith=f"{EPMC}/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [{"pmcid": "PMC9999999", "hasXML": "Y", "pmid": "99999999"}]
+                }
+            },
+        )
+    )
+    respx.get(url__startswith=f"{EPMC}/PMC9999999/fullTextXML").mock(
+        return_value=httpx.Response(200, content=PMC_XML)
+    )
+
+    res = await EuropePMCProvider(client).fetch_full_text(
+        IdentifierMap(doi="10.1/x", pmid="11111111")
+    )
+
+    assert res is not None
+    assert res.pmid == "11111111"

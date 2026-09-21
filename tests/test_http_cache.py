@@ -389,7 +389,11 @@ async def test_bvs_403_shield_retries_and_throttles():
     behave like a 429 — throttle the bucket and retry — not return None."""
     route = respx.get("https://pesquisa.bvsalud.org/portal/").mock(
         side_effect=[
-            httpx.Response(403, text="<html>Just a moment...</html>"),
+            httpx.Response(
+                403,
+                text="<html><body>busy, try again</body></html>",
+                headers={"content-type": "text/html"},
+            ),
             httpx.Response(200, text="ok"),
         ]
     )
@@ -403,6 +407,59 @@ async def test_bvs_403_shield_retries_and_throttles():
     limiter = client._limiter_for("pesquisa.bvsalud.org")
     assert limiter.throttled_until >= baseline
     await client.aclose()
+
+
+@respx.mock
+async def test_bvs_403_mentions_captcha_without_shield_scaffold_retries():
+    """A BVS 403 merely mentioning 'captcha' without the Bunny shield
+    scaffold must retry with backoff, not fast-fail."""
+    route = respx.get("https://pesquisa.bvsalud.org/portal/").mock(
+        side_effect=[
+            httpx.Response(
+                403,
+                text="captcha help text, no shield",
+                headers={"content-type": "text/html"},
+            ),
+            httpx.Response(200, text="ok"),
+        ]
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0
+    )
+    try:
+        baseline = time.monotonic()
+        resp = await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue")
+        assert resp is not None and resp.text == "ok"
+        assert route.call_count == 2
+        limiter = client._limiter_for("pesquisa.bvsalud.org")
+        assert limiter.throttled_until >= baseline
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_bvs_403_just_a_moment_without_shield_scaffold_retries():
+    """'Just a moment' plus text/html on BVS retries; only the Bunny shield
+    scaffold fast-fails."""
+    route = respx.get("https://pesquisa.bvsalud.org/portal/").mock(
+        side_effect=[
+            httpx.Response(
+                403,
+                text="<html><body>Just a moment, busy</body></html>",
+                headers={"content-type": "text/html"},
+            ),
+            httpx.Response(200, text="ok"),
+        ]
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), backoff_base=0.01, min_429_wait=0.0
+    )
+    try:
+        resp = await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue")
+        assert resp is not None and resp.text == "ok"
+        assert route.call_count == 2
+    finally:
+        await client.aclose()
 
 
 @respx.mock
@@ -774,3 +831,171 @@ async def test_pmc_article_download_does_not_receive_credentials():
         assert "api_key" not in record
     finally:
         await client.aclose()
+
+
+@respx.mock
+async def test_ncbi_external_viewer_error_400_retried():
+    """NCBI efetch 400 with 'External viewer error' is a transient backend timeout and must be retried."""
+    ncbi_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    route = respx.get(
+        url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*"
+    ).mock(
+        side_effect=[
+            httpx.Response(
+                400,
+                text="Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout",
+            ),
+            httpx.Response(200, text="<PubmedArticleSet><PubmedArticle/></PubmedArticleSet>"),
+        ]
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get(
+            ncbi_url, params={"db": "pubmed", "id": "41778748", "retmode": "xml"}
+        )
+        assert resp is not None
+        assert resp.status_code == 200
+        assert route.call_count == 2
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_generic_400_is_not_retried():
+    """Generic 400 errors must remain fatal and not retry."""
+    route = respx.get(
+        url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*"
+    ).mock(
+        return_value=httpx.Response(400, text="Bad Request: invalid parameter")
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+        )
+        assert resp is None
+        assert route.call_count == 1
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_permanent_external_viewer_error_400_is_not_retried():
+    """A viewer error without 'Status: Timeout' is permanent and must fail fast."""
+    route = respx.get(
+        url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*"
+    ).mock(
+        return_value=httpx.Response(
+            400, text="Error: External viewer error: Unsupported retmode"
+        )
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        resp = await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+            params={"db": "pubmed", "id": "1", "retmode": "bogus"},
+        )
+        assert resp is None
+        assert route.call_count == 1
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_external_viewer_error_400_on_other_host_is_not_retried():
+    """The viewer-timeout retry is NCBI-scoped; the same body elsewhere stays fatal."""
+    route = respx.get("https://api.crossref.org/works/10.1000/x").mock(
+        return_value=httpx.Response(
+            400,
+            text="Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout",
+        )
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get("https://api.crossref.org/works/10.1000/x") is None
+        assert route.call_count == 1
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_ncbi_viewer_timeout_gives_up_after_max_retries():
+    """A viewer timeout that never clears exhausts max_retries and reports failure."""
+    route = respx.get(
+        url__regex=r"^https://eutils\.ncbi\.nlm\.nih\.gov/entrez/eutils/efetch\.fcgi.*"
+    ).mock(
+        return_value=httpx.Response(
+            400,
+            text="Error: External viewer error: Empty Response. Bytes read: 0 Status: Timeout",
+        )
+    )
+    client = AsyncHttpClient(settings=Settings(request_timeout=5), backoff_base=0.01)
+    try:
+        assert await client.get(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+            params={"db": "pubmed", "id": "1"},
+        ) is None
+        assert route.call_count == client.max_retries
+        assert client.last_failure is not None
+        assert client.last_failure.status == 400
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_bvs_403_html_challenge_fails_fast_without_retries():
+    """A BVS 403 carrying an HTML challenge must fail on attempt 0, unthrottled."""
+    challenge_html = (
+        '<html><body><iframe '
+        'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+        "</iframe></body></html>"
+    )
+    route = respx.get(url__startswith="https://pesquisa.bvsalud.org/portal/").mock(
+        return_value=httpx.Response(
+            403, text=challenge_html, headers={"content-type": "text/html"}
+        )
+    )
+    client = AsyncHttpClient(
+        settings=Settings(request_timeout=5), max_retries=4, backoff_base=0.01
+    )
+    try:
+        resp = await client.get("https://pesquisa.bvsalud.org/portal/?q=dengue")
+
+        assert resp is None
+        assert route.call_count == 1
+        assert client.last_failure is not None
+        assert client.last_failure.status == 403
+        assert not client.is_throttled("pesquisa.bvsalud.org")
+    finally:
+        await client.aclose()
+
+
+def test_matches_html_markers():
+    """_matches_html_markers returns True only when text/html and marker present."""
+    from scholar_mcp.utils.http import _matches_html_markers
+
+    resp_match = httpx.Response(200, text="<html><body>captcha required</body></html>", headers={"content-type": "text/html; charset=utf-8"})
+    assert _matches_html_markers(resp_match, ("captcha", "cloudflare")) is True
+    # A caller-supplied marker must match regardless of its own casing.
+    assert _matches_html_markers(resp_match, ("CAPTCHA", "CloudFlare")) is True
+
+    resp_no_marker = httpx.Response(200, text="<html><body>welcome</body></html>", headers={"content-type": "text/html"})
+    assert _matches_html_markers(resp_no_marker, ("captcha", "cloudflare")) is False
+
+    resp_not_html = httpx.Response(200, text="captcha required", headers={"content-type": "application/json"})
+    assert _matches_html_markers(resp_not_html, ("captcha", "cloudflare")) is False
+
+    # A missing content-type falls through to body sniffing (note: text=
+    # would inject a text/plain header, so raw bytes keep headers empty).
+    resp_no_header = httpx.Response(200, content=b"<html>captcha required</html>")
+    assert _matches_html_markers(resp_no_header, ("captcha", "cloudflare")) is True
+
+    # An affirmatively non-HTML content-type still rejects the match.
+    resp_json_marker = httpx.Response(
+        200, text="captcha required", headers={"content-type": "application/json"}
+    )
+    assert _matches_html_markers(resp_json_marker, ("captcha",)) is False
+
+
+
+

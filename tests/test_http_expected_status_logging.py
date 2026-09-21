@@ -3,9 +3,8 @@ import pytest
 import respx
 
 from scholar_mcp.config import Settings
-from scholar_mcp.utils.http import AsyncHttpClient
-
-HTTP_LOGGER = "scholar_mcp.utils.http"
+from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
+from log_helpers import HTTP_LOGGER, http_records as _http_records
 
 
 @pytest.fixture
@@ -13,19 +12,6 @@ async def client():
     c = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
     yield c
     await c.aclose()
-
-
-def _http_records(caplog, level=None):
-    """Records emitted by the HTTP client only, optionally filtered by level.
-
-    `caplog.records` collects every logger that propagates to root, so an
-    unfiltered assertion couples these tests to unrelated modules staying quiet.
-    """
-    return [
-        r
-        for r in caplog.records
-        if r.name == HTTP_LOGGER and (level is None or r.levelname == level)
-    ]
 
 
 @respx.mock
@@ -138,3 +124,49 @@ async def test_get_bytes_without_quiet_statuses_still_warns(client, caplog):
     assert route.called
     assert data is None
     assert len(_http_records(caplog, "WARNING")) == 1
+
+
+@respx.mock
+async def test_retryable_statuses_default_retries_four_times(retrying_client, caplog):
+    """Control: default retryable_statuses retries a 500 up to max_retries."""
+    route = respx.get("https://example.org/internal-error-retried").mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        resp = await retrying_client.get("https://example.org/internal-error-retried")
+
+    assert route.call_count == 4
+    assert resp is None
+    assert len(_http_records(caplog, "WARNING")) == 1
+
+
+@respx.mock
+async def test_custom_retryable_statuses_fast_fails_and_respects_quiet(retrying_client, caplog):
+    route = respx.get("https://example.org/internal-error-fast-fail").mock(
+        return_value=httpx.Response(500, text="No XML available")
+    )
+    with caplog.at_level("DEBUG", logger=HTTP_LOGGER):
+        resp = await retrying_client.get(
+            "https://example.org/internal-error-fast-fail",
+            retryable_statuses=RETRYABLE_STATUS_CODES - {500},
+            quiet_statuses={500},
+        )
+
+    assert route.call_count == 1
+    assert resp is None
+    assert _http_records(caplog, "WARNING") == []
+    assert len(_http_records(caplog, "DEBUG")) == 1
+
+
+@respx.mock
+async def test_empty_set_retryable_statuses_disables_all_retries(retrying_client):
+    """retryable_statuses=set() is falsy; `is not None` must be used so it disables retries."""
+    route = respx.get("https://example.org/falsy-empty-set").mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    resp = await retrying_client.get(
+        "https://example.org/falsy-empty-set",
+        retryable_statuses=set(),
+    )
+    assert route.call_count == 1
+    assert resp is None
