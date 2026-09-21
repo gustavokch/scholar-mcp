@@ -172,26 +172,6 @@ _BVS_RETRYABLE_STATUSES = frozenset({429})
 
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
-# Challenge-pass state (S1.2): the last monotonic timestamp at which BVS
-# answered a plain-HTTP request with parseable JSON. A fresh pass means the
-# Bunny shield is currently letting this egress IP through, so diagnostics
-# can report it and a future change can skip the browser tier outright.
-# Process-global on purpose: zimqa constructs an engine per call, so
-# per-instance state would never survive to the next call.
-_BVS_CHALLENGE_PASS_TTL_S = 300.0
-_BVS_LAST_CHALLENGE_PASS: float | None = None
-
-
-def _note_challenge_pass() -> None:
-    global _BVS_LAST_CHALLENGE_PASS
-    _BVS_LAST_CHALLENGE_PASS = time.monotonic()
-
-
-def _recent_challenge_pass() -> bool:
-    if _BVS_LAST_CHALLENGE_PASS is None:
-        return False
-    return (time.monotonic() - _BVS_LAST_CHALLENGE_PASS) < _BVS_CHALLENGE_PASS_TTL_S
-
 
 def bvs_budget_contract(settings: Settings) -> dict[str, float]:
     """Published BVS budgets the caller must honor instead of one blanket.
@@ -643,8 +623,7 @@ class BrazilMoHEngine:
         5xx here is an origin outage, and burning backoff retries on it
         spends the stage budget the remaining stages need. The failure is
         classified onto ``state`` (``cdn_challenge`` vs ``origin_outage``
-        vs ``timeout`` vs ``backend_error``) for the §2 contract; a clean
-        JSON answer refreshes the process-wide challenge-pass stamp.
+        vs ``timeout`` vs ``backend_error``) for the §2 contract.
         """
         state.stages_attempted += 1
         state.overfetch_window = max(state.overfetch_window, count)
@@ -692,7 +671,6 @@ class BrazilMoHEngine:
                 state.error_kind = "backend_error"
             return [], True
 
-        _note_challenge_pass()
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
         return [record for record in records if _is_brazilian(record)], False
 
