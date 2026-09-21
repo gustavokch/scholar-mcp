@@ -122,6 +122,10 @@ MAX_FULL_TEXT_CHARS = 50_000
 # ceiling (45 s) firing first.
 _CAMOUFOX_NAV_TIMEOUT_MS = 30000
 
+# A Camoufox launch needs tens of seconds; below this floor the browser
+# tier cannot do useful work, so skip the launch outright.
+_CAMOUFOX_MIN_USEFUL_CEILING_S = 5.0
+
 _BVS_CHALLENGE_MARKERS = (
     "shield-templates",
     "b-cdn.net",
@@ -1331,8 +1335,18 @@ class BrazilMoHEngine:
         (see ``_browser_ceiling``), never the flat cap alone. The
         in-browser navigation timeout is clamped to the same ceiling, so a
         flat 30 s navigation can never silently outlive a caller that has
-        less than that left.
+        less than that left. A positive ceiling below
+        ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
+        Camoufox launch needs tens of seconds, so a doomed ceiling would
+        only burn startup time. ``ceiling <= 0`` keeps its current meaning
+        (unbounded chain: flat cap) and is not floored.
         """
+        if 0 < ceiling < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+            logger.info(
+                "brazil_moh camoufox tier skipped: %.1fs ceiling below useful floor",
+                ceiling,
+            )
+            return []
         try:
             from camoufox.async_api import AsyncCamoufox
         except ImportError:

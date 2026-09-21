@@ -670,3 +670,27 @@ async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch)
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_camoufox_skips_when_ceiling_below_useful_floor(tmp_path, monkeypatch):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        constructed: list[int] = []
+
+        class _Exploding:
+            def __init__(self, **kw):
+                constructed.append(1)
+                raise AssertionError("camoufox must not launch under a tiny ceiling")
+
+        api_mod = types.ModuleType("camoufox.async_api")
+        api_mod.AsyncCamoufox = _Exploding
+        camoufox_mod = types.ModuleType("camoufox")
+        camoufox_mod.async_api = api_mod
+        monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+        monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+
+        assert await engine._camoufox_search("dengue", 10, ceiling=0.5) == []
+        assert constructed == [], "camoufox must not launch under a tiny ceiling"
+    finally:
+        await cache.close()
+        await http_client.aclose()
