@@ -21,7 +21,7 @@ from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 
 logger = logging.getLogger(__name__)
 
-RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 DEFAULT_HOST_RATES: dict[str, float] = {
     "arxiv.org": 0.33,
@@ -427,6 +427,7 @@ class AsyncHttpClient:
         params: dict[str, Any] | None = None,
         ok_statuses: frozenset[int] | set[int] | None = None,
         quiet_statuses: frozenset[int] | set[int] | None = None,
+        retryable_statuses: frozenset[int] | set[int] | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
@@ -441,14 +442,24 @@ class AsyncHttpClient:
         warning (e.g. a scholarly registry answering 404 for a DOI it does not
         hold). Callers needing the response object want ``ok_statuses`` instead.
 
-        A status in either set is still logged at DEBUG when it is ``>= 400``, so
-        a 404 caused by a bad URL or a misconfigured parameter stays recoverable
-        at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+        ``retryable_statuses`` narrows the default ``RETRYABLE_STATUS_CODES``
+        for this call, but does not disable the two host-specific retry
+        bypasses: a bot-shield 403 and the NCBI external-viewer timeout 400
+        are retried even when the override excludes them.
+
+        A status in any of these sets is still logged at DEBUG when it is
+        ``>= 400``, so a 404 caused by a bad URL or a misconfigured parameter
+        stays recoverable at ``LOG_LEVEL=DEBUG`` rather than vanishing.
+
+        The three status kwargs are deliberately independent and are not
+        merged into a single status-policy object; call sites pass them by
+        keyword, and that convention is not enforced with a ``*`` marker.
         """
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
         host_key = _host_key(urllib.parse.urlparse(target_url).hostname)
+        effective_retry_statuses = retryable_statuses if retryable_statuses is not None else RETRYABLE_STATUS_CODES
 
         if self.is_dead_host(host_key):
             self.last_failure = FetchFailure("transport", None, "DeadHostCached")
@@ -475,7 +486,7 @@ class AsyncHttpClient:
                     and b"Status: Timeout" in resp.content
                 )
                 if (
-                    resp.status_code in RETRYABLE_STATUS_CODES
+                    resp.status_code in effective_retry_statuses
                     or shielded_403
                     or ncbi_viewer_timeout
                 ) and attempt < self.max_retries - 1:
@@ -582,7 +593,10 @@ class AsyncHttpClient:
         quiet_statuses: frozenset[int] | set[int] | None = None,
     ) -> bytes | None:
         resp = await self.get(
-            url, headers=headers, params=params, quiet_statuses=quiet_statuses
+            url,
+            headers=headers,
+            params=params,
+            quiet_statuses=quiet_statuses,
         )
         if resp is not None and resp.status_code == 200:
             if not self._is_unexpected_html(resp):
