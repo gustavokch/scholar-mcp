@@ -1655,12 +1655,8 @@ async def test_stage_timeout_calls_on_timeout_callback(tmp_path: Path):
         await http_client.aclose()
 
 
-async def test_stage_pre_expired_budget_does_not_fire_on_timeout(tmp_path: Path):
-    """A stage entered with no chain budget left must not fire on_timeout.
-
-    A pre-expired skip means the caller is out of time, not that the host
-    is unhealthy; only an actual ``wait_for`` timeout fires the callback.
-    """
+async def test_stage_pre_expired_budget_calls_on_timeout_callback(tmp_path: Path):
+    """A stage entered with no chain budget left must still fire on_timeout."""
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_chain_timeout_s = 0.05
     try:
@@ -1683,17 +1679,18 @@ async def test_stage_pre_expired_budget_does_not_fire_on_timeout(tmp_path: Path)
         )
 
         assert result == "fallback"
-        assert called["count"] == 0
+        assert called["count"] == 1
     finally:
         await cache.close()
         await http_client.aclose()
 
 
-async def test_bvs_stage_pre_expired_budget_does_not_arm_breaker(tmp_path: Path):
-    """An expired chain budget skips the stage without arming the breaker.
+async def test_bvs_stage_pre_expired_budget_arms_circuit_breaker(tmp_path: Path):
+    """An expired chain budget must open the breaker and dispatch no request.
 
-    The skip means PCDT consumed the chain budget, not that the BVS host
-    is unhealthy, so ``bvs_timed_out`` stays False and no request is sent.
+    This is the behaviour the callback exists for: once `bvs_timed_out` is
+    set, `_bvs_unavailable` gates the all-field and relaxed stages out of the
+    chain instead of letting each one re-enter `_bvs_stage`.
     """
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_chain_timeout_s = 0.05
@@ -1712,8 +1709,8 @@ async def test_bvs_stage_pre_expired_budget_does_not_arm_breaker(tmp_path: Path)
 
         assert records == []
         assert errored is True
-        assert state.bvs_timed_out is False
-        assert engine._bvs_unavailable(state) is False
+        assert state.bvs_timed_out is True
+        assert engine._bvs_unavailable(state) is True
         fetch.assert_not_awaited()
     finally:
         await cache.close()

@@ -48,10 +48,9 @@ BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 # Bunny-specific only: generic challenge phrases ("just a moment", "captcha",
 # ...) stay in UNEXPECTED_HTML_MARKERS and must retry with backoff, since a
 # mere mention of them is not proof of an impassable shield.
-BOT_SHIELD_HTML_MARKERS = (
-    "shield-templates-prod",
-    "b-cdn.net",
-    "block.html",
+BOT_SHIELD_HTML_MARKER_GROUPS = (
+    ("shield-templates-prod",),
+    ("b-cdn.net", "block.html"),
 )
 
 UNEXPECTED_HTML_MARKERS = (
@@ -64,12 +63,8 @@ UNEXPECTED_HTML_MARKERS = (
 )
 
 
-def _matches_html_markers(
-    resp: httpx.Response,
-    markers: Sequence[str],
-    max_chars: int = 1000,
-) -> bool:
-    """Return True if resp looks like HTML and matches any marker.
+def _html_sample(resp: httpx.Response, max_chars: int = 1000) -> str | None:
+    """Return a lowercased HTML body sample, or None if affirmatively non-HTML.
 
     Only a present, affirmatively non-HTML content-type rejects the match
     (e.g. ``application/json``); a missing or empty content-type falls
@@ -79,10 +74,33 @@ def _matches_html_markers(
     """
     content_type = resp.headers.get("content-type", "").lower()
     if content_type and "text/html" not in content_type:
-        return False
+        return None
     charset = resp.charset_encoding or "utf-8"
-    sample = resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
+    return resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
+
+
+def _matches_html_markers(
+    resp: httpx.Response,
+    markers: Sequence[str],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp looks like HTML and matches any marker."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
     return any(marker.lower() in sample for marker in markers)
+
+
+def _matches_html_marker_groups(
+    resp: httpx.Response,
+    groups: Sequence[Sequence[str]],
+    max_chars: int = 1000,
+) -> bool:
+    """Return True if resp matches any conjunctive marker group."""
+    sample = _html_sample(resp, max_chars)
+    if sample is None:
+        return False
+    return any(all(m in sample for m in group) for group in groups)
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
 # misconfigured host can park a request -- and, via limiter.throttle, every
@@ -446,22 +464,10 @@ class AsyncHttpClient:
     def is_unexpected_html(self, resp: httpx.Response) -> bool:
         return _matches_html_markers(resp, UNEXPECTED_HTML_MARKERS)
 
-    def _is_challenge_html(self, resp: httpx.Response, max_chars: int = 1000) -> bool:
-        """True iff resp is a Bunny shield/challenge page.
+    def is_challenge_html(self, resp: httpx.Response) -> bool:
+        return _matches_html_marker_groups(resp, BOT_SHIELD_HTML_MARKER_GROUPS)
 
-        Conjunctive rule: ``shield-templates-prod`` alone suffices, otherwise
-        both ``b-cdn.net`` AND ``block.html`` must appear. A bare CDN-host
-        mention without the block scaffold (or vice versa) is not proof of an
-        impassable shield and must retry with backoff.
-        """
-        content_type = resp.headers.get("content-type", "").lower()
-        if content_type and "text/html" not in content_type:
-            return False
-        charset = resp.charset_encoding or "utf-8"
-        sample = resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
-        if "shield-templates-prod" in sample:
-            return True
-        return "b-cdn.net" in sample and "block.html" in sample
+    _is_challenge_html = is_challenge_html  # mirrors _is_unexpected_html at :466
 
     _is_unexpected_html = is_unexpected_html
 

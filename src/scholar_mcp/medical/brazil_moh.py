@@ -517,7 +517,7 @@ class BrazilMoHEngine:
         except ValueError:
             if self.http_client.is_unexpected_html(
                 resp
-            ) or self.http_client._is_challenge_html(resp):
+            ) or self.http_client.is_challenge_html(resp):
                 logger.warning("brazil_moh search returned block-HTML payload")
                 state.bvs_shielded = True
             else:
@@ -589,11 +589,8 @@ class BrazilMoHEngine:
 
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
-        and expired), the stage is skipped and ``default`` is returned without
-        firing ``on_timeout`` -- a pre-expired skip means the caller is out of
-        time, not that the host is unhealthy. Only an actual ``wait_for``
-        timeout fires it. If both bounds are disabled (<= 0), ``coro`` runs
-        unbounded.
+        and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
+        is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
         stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
         chain_setting = (
@@ -612,6 +609,7 @@ class BrazilMoHEngine:
             )
             if asyncio.iscoroutine(coro):
                 coro.close()
+            self._fire_on_timeout(stage, on_timeout)
             return default
         try:
             return await asyncio.wait_for(coro, budget)
