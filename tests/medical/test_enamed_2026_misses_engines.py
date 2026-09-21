@@ -12,7 +12,6 @@ import sys
 import time
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import httpx
 import respx
