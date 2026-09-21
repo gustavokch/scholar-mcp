@@ -31,9 +31,12 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
 async def _engine(tmp_path: Path, stub_local: bool = True, **settings_overrides):
-    settings = dataclasses.replace(
-        Settings.load(), brazil_browser_fallback=False, **settings_overrides
-    )
+    # Browser tier stays off unless a test opts in: the default rides in
+    # the same dict as the overrides so `brazil_browser_fallback=True`
+    # wins instead of colliding with a hardcoded keyword.
+    defaults = {"brazil_browser_fallback": False}
+    defaults.update(settings_overrides)
+    settings = dataclasses.replace(Settings.load(), **defaults)
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
@@ -631,6 +634,39 @@ async def test_pcdt_collection_applies_since_year(tmp_path: Path):
         records, meta = await engine.search_guidelines("guia", collection="pcdt", since_year=2024)
         assert [r.record_id for r in records] == ["new"]
         assert meta.error_kind == "ok"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch):
+    engine, cache, http_client = await _engine(
+        tmp_path, brazil_browser_fallback=True, enable_browser_fallback=True
+    )
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
+        )
+        calls: list[int] = []
+
+        def _spy(clamped, chain_start=None):
+            calls.append(clamped)
+            return 7  # sentinel: any recompute is observable
+
+        monkeypatch.setattr(engine, "_overfetch_count", _spy)
+        seen: list[int] = []
+
+        async def _fake_browser(composed, count, ceiling):
+            seen.append(count)
+            return []
+
+        engine._camoufox_search = _fake_browser
+        await engine.search_guidelines("dengue hidratacao", limit=10)
+        assert calls == [10, 10], (
+            "the browser tier must recompute the overfetch window, not reuse the chain-start count"
+        )
+        assert seen == [7]
     finally:
         await cache.close()
         await http_client.aclose()

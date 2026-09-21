@@ -1156,7 +1156,9 @@ class BrazilMoHEngine:
             and self.settings.brazil_browser_fallback
         ):
             docs = await self._camoufox_search(
-                all_composed, count, ceiling=self._browser_ceiling(chain_start)
+                all_composed,
+                self._overfetch_count(clamped, chain_start),
+                ceiling=self._browser_ceiling(chain_start),
             )
             if docs:
                 browser_records = [
