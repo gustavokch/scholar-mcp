@@ -103,6 +103,13 @@ class Settings:
     # 45 s because camoufox startup plus Bunny CDN challenge execution on
     # pesquisa.bvsalud.org runs 15 s-25 s; 30 s cut off legitimate searches.
     brazil_browser_timeout_s: float = 45.0
+    # Whole-call ceiling for get_brazil_moh_full_text network work (record
+    # lookup plus PDF fetch). Published alongside brazil_chain_timeout_s so
+    # the caller honors two ceilings instead of one blanket timeout: the
+    # search chain (stages + browser tier) and one document fetch are
+    # different budgets, and the 45 s browser tier must never be served
+    # into a 20 s blanket and read as a backend failure.
+    brazil_fulltext_timeout_s: float = 30.0
     enable_medical_tools: bool = True
 
     @property
@@ -223,6 +230,9 @@ class Settings:
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=float(
                 os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "45.0")
+            ),
+            brazil_fulltext_timeout_s=float(
+                os.getenv("BRAZIL_FULLTEXT_TIMEOUT_S", "30.0")
             ),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")

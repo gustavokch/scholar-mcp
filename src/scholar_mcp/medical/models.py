@@ -246,6 +246,15 @@ class BrazilGuideline:
     ``score`` is populated by ``rank_brazil_guidelines`` on the search path.
     It stays ``None`` when the query tokenizes to nothing, and on rows cached
     before ranking existed.
+
+    ``record_id`` is the stable Solr document id (e.g. ``biblio-1701387`` or
+    a bundled ``ms-*`` corpus key). It is the fold key for downstream
+    machine consumers (``med:brmoh:{record_id}``): the same query must
+    return the same ``record_id`` for the same document across calls, and
+    ``get_brazil_moh_full_text`` resolves it back to the document.
+    ``doi`` carries a DOI resolved out of the record's link list when the
+    source provides one; BVS non-conventional records usually carry none,
+    so it stays empty rather than guessed.
     """
 
     title: str = ""
@@ -262,6 +271,7 @@ class BrazilGuideline:
     languages: list[str] = field(default_factory=list)
     collections: list[str] = field(default_factory=list)
     mesh_subjects: list[str] = field(default_factory=list)
+    doi: str = ""
     score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -613,12 +613,24 @@ if settings.enable_medical_tools:
         query: str,
         limit: int = 10,
         collection: str = "all",
+        since_year: int | None = None,
     ) -> dict[str, Any]:
         """Search Brazilian Ministry of Health technical publications (BVS/iAHx).
 
         Covers PCDT (Protocolos Clínicos e Diretrizes Terapêuticas), CONITEC
         health-technology assessments, cadernos de atenção básica, manuais
         técnicos, and normas de vigilância. Results are in Portuguese.
+
+        The `record_id` of every hit is stable (the BVS Solr id or a bundled
+        `ms-*` corpus key) and is the fold key for `med:brmoh:{record_id}`;
+        pass it to get_brazil_moh_full_text to open the document. Machine
+        consumers read `diagnostics.error_kind` (`ok` | `successful_empty` |
+        `cdn_challenge` | `origin_outage` | `timeout` | `backend_error`):
+        `origin_outage` is a sick origin, never cached, and must not count
+        against any caller-side breaker. Published budgets: the search chain
+        (`brazil_chain_timeout_s`, per-stage `brazil_stage_timeout_s`,
+        browser tier `brazil_browser_timeout_s`) versus one document fetch
+        (`brazil_fulltext_timeout_s`).
 
         Args:
             query: Free-text search terms. Portuguese terms match best;
@@ -629,6 +641,8 @@ if settings.enable_medical_tools:
                 'pcdt' (PCDT clinical protocols from gov.br), or
                 'az' (gov.br SVSA and guias-e-manuais publications,
                 including the Dengue and Tuberculosis surveillance manuals).
+            since_year: Drop records published before this year (e.g. 2024
+                keeps 2024-2025 guidance). Records with no year are kept.
         """
         # The engine clamps limit; no server-side clamp.
         norm_collection = (collection or "all").strip().lower()
@@ -640,9 +654,19 @@ if settings.enable_medical_tools:
             }
         try:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
-                query, limit=limit, collection=norm_collection
+                query, limit=limit, collection=norm_collection,
+                since_year=since_year,
             )
-            return _with_degraded(format_brazil_moh_guidelines(guidelines, query, meta), meta)
+            payload = format_brazil_moh_guidelines(guidelines, query, meta)
+            payload["diagnostics"] = {
+                "error_kind": meta.error_kind or ("ok" if guidelines else "successful_empty"),
+                "http_status": meta.http_status,
+                "challenge_hit": meta.challenge_hit,
+                "cache_hit": meta.cached,
+                "timeout": meta.timeout,
+            }
+            payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
+            return _with_degraded(payload, meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "brazil-moh"}
 
@@ -654,12 +678,17 @@ if settings.enable_medical_tools:
         """Retrieve full text of a Brazilian Ministry of Health document.
 
         Downloads the document PDF from the BVS repository and extracts its
-        text. Falls back to the record abstract when the document is hosted
-        off-site or the PDF cannot be retrieved.
+        text. When the PDF cannot be retrieved but the record carries an
+        abstract, the abstract is served with `abstract_fallback=True`
+        (`content_type="abstract"`) -- an explicit flag, never silent.
+        Bundled `local:` corpus documents are served from disk offline
+        (`content_type="text"`). One fetch is bounded by
+        `brazil_fulltext_timeout_s`, separately from the search chain.
 
         Args:
-            record_id: The `record_id` field returned by
-                search_brazil_moh_guidelines (e.g. 'biblio-1701387').
+            record_id: The stable `record_id` field returned by
+                search_brazil_moh_guidelines (e.g. 'biblio-1701387', or a
+                bundled 'ms-*' corpus key usable as 'med:brmoh:{record_id}').
             max_chars: Maximum character limit for the returned text
                 (defaults to 50,000, which is also the ceiling).
         """
