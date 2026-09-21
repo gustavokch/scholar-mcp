@@ -1655,8 +1655,12 @@ async def test_stage_timeout_calls_on_timeout_callback(tmp_path: Path):
         await http_client.aclose()
 
 
-async def test_stage_pre_expired_budget_calls_on_timeout_callback(tmp_path: Path):
-    """A stage entered with no chain budget left must still fire on_timeout."""
+async def test_stage_pre_expired_budget_does_not_fire_on_timeout(tmp_path: Path):
+    """A stage entered with no chain budget left must not fire on_timeout.
+
+    A pre-expired skip means the caller is out of time, not that the host
+    is unhealthy; only an actual ``wait_for`` timeout fires the callback.
+    """
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_chain_timeout_s = 0.05
     try:
@@ -1679,18 +1683,17 @@ async def test_stage_pre_expired_budget_calls_on_timeout_callback(tmp_path: Path
         )
 
         assert result == "fallback"
-        assert called["count"] == 1
+        assert called["count"] == 0
     finally:
         await cache.close()
         await http_client.aclose()
 
 
-async def test_bvs_stage_pre_expired_budget_arms_circuit_breaker(tmp_path: Path):
-    """An expired chain budget must open the breaker and dispatch no request.
+async def test_bvs_stage_pre_expired_budget_does_not_arm_breaker(tmp_path: Path):
+    """An expired chain budget skips the stage without arming the breaker.
 
-    This is the behaviour the callback exists for: once `bvs_timed_out` is
-    set, `_bvs_unavailable` gates the all-field and relaxed stages out of the
-    chain instead of letting each one re-enter `_bvs_stage`.
+    The skip means PCDT consumed the chain budget, not that the BVS host
+    is unhealthy, so ``bvs_timed_out`` stays False and no request is sent.
     """
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.brazil_chain_timeout_s = 0.05
@@ -1709,8 +1712,8 @@ async def test_bvs_stage_pre_expired_budget_arms_circuit_breaker(tmp_path: Path)
 
         assert records == []
         assert errored is True
-        assert state.bvs_timed_out is True
-        assert engine._bvs_unavailable(state) is True
+        assert state.bvs_timed_out is False
+        assert engine._bvs_unavailable(state) is False
         fetch.assert_not_awaited()
     finally:
         await cache.close()
@@ -2432,6 +2435,57 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
         await cache.close()
         await http_client.aclose()
         AsyncHttpClient.reset_limiters()
+
+
+@respx.mock
+async def test_fetch_records_non_json_block_html_marks_shielded(tmp_path):
+    """A 200 carrying block-HTML instead of JSON must trip the BVS breaker."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        challenge_html = (
+            '<html><body><iframe '
+            'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+            "</iframe></body></html>"
+        )
+        respx.get(BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, text=challenge_html, headers={"content-type": "text/html"}
+            )
+        )
+        state = _SearchState()
+        records, errored = await engine._fetch_records("tw:(dengue)", 10, state)
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_shielded is True
+        assert engine._bvs_unavailable(state) is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fetch_records_non_json_garbage_does_not_trip_breaker(tmp_path):
+    """Truncated JSON sets no flag: one extra stage, not a cascade."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, text="{truncated", headers={"content-type": "text/plain"}
+            )
+        )
+        state = _SearchState()
+        records, errored = await engine._fetch_records("tw:(dengue)", 10, state)
+
+        assert records == []
+        assert errored is True
+        assert state.bvs_shielded is False
+        assert state.bvs_origin_down is False
+        assert state.bvs_timed_out is False
+        assert engine._bvs_unavailable(state) is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock

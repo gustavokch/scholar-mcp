@@ -42,17 +42,16 @@ DEFAULT_FALLBACK_RATE = 5.0
 # and retry, like a 429. Elsewhere a 403 stays fatal.
 BOT_SHIELD_403_HOSTS = frozenset({"pesquisa.bvsalud.org"})
 
-# A 403 whose body is one of these shield/challenge pages cannot be cleared by a
+# A 403 whose body is a Bunny shield/challenge page cannot be cleared by a
 # plain HTTP retry -- it wants a real browser. Retrying only burns the stage
 # budget and throttles the shared host bucket for every concurrent coroutine.
+# Bunny-specific only: generic challenge phrases ("just a moment", "captcha",
+# ...) stay in UNEXPECTED_HTML_MARKERS and must retry with backoff, since a
+# mere mention of them is not proof of an impassable shield.
 BOT_SHIELD_HTML_MARKERS = (
     "shield-templates-prod",
     "b-cdn.net",
     "block.html",
-    "challenge-platform",
-    "just a moment",
-    "captcha",
-    "attention required",
 )
 
 UNEXPECTED_HTML_MARKERS = (
@@ -70,10 +69,19 @@ def _matches_html_markers(
     markers: Sequence[str],
     max_chars: int = 1000,
 ) -> bool:
-    """Return True if resp has text/html content-type and matches any marker."""
-    if "text/html" not in resp.headers.get("content-type", "").lower():
+    """Return True if resp looks like HTML and matches any marker.
+
+    Only a present, affirmatively non-HTML content-type rejects the match
+    (e.g. ``application/json``); a missing or empty content-type falls
+    through to body sniffing so a CDN that omits the header cannot silently
+    revert to retry-burn. Decoding is bounded: bytes are sliced before
+    decoding so a multi-megabyte body is never decoded in full.
+    """
+    content_type = resp.headers.get("content-type", "").lower()
+    if content_type and "text/html" not in content_type:
         return False
-    sample = resp.text[:max_chars].lower()
+    charset = resp.charset_encoding or "utf-8"
+    sample = resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
     return any(marker.lower() in sample for marker in markers)
 
 # Upper bound on any server-supplied Retry-After. Without it a hostile or
@@ -438,8 +446,22 @@ class AsyncHttpClient:
     def is_unexpected_html(self, resp: httpx.Response) -> bool:
         return _matches_html_markers(resp, UNEXPECTED_HTML_MARKERS)
 
-    def _is_challenge_html(self, resp: httpx.Response) -> bool:
-        return _matches_html_markers(resp, BOT_SHIELD_HTML_MARKERS)
+    def _is_challenge_html(self, resp: httpx.Response, max_chars: int = 1000) -> bool:
+        """True iff resp is a Bunny shield/challenge page.
+
+        Conjunctive rule: ``shield-templates-prod`` alone suffices, otherwise
+        both ``b-cdn.net`` AND ``block.html`` must appear. A bare CDN-host
+        mention without the block scaffold (or vice versa) is not proof of an
+        impassable shield and must retry with backoff.
+        """
+        content_type = resp.headers.get("content-type", "").lower()
+        if content_type and "text/html" not in content_type:
+            return False
+        charset = resp.charset_encoding or "utf-8"
+        sample = resp.content[: max_chars * 4].decode(charset, errors="replace").lower()
+        if "shield-templates-prod" in sample:
+            return True
+        return "b-cdn.net" in sample and "block.html" in sample
 
     _is_unexpected_html = is_unexpected_html
 

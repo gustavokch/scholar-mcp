@@ -142,7 +142,10 @@ class _SearchState:
     ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
     read it afterwards (the write happened in the child task).
     ``bvs_origin_down`` records a 5xx origin error (500, 502, 503, 504), which
-    short-circuits subsequent BVS stages in the same call.
+    short-circuits subsequent BVS stages in the same call. ``bvs_shielded``
+    is also set when a 200 carries block-HTML instead of JSON; truncated
+    JSON or other garbage sets no flag, since a single extra stage is not
+    a cascade.
     """
 
     bvs_shielded: bool = False
@@ -486,7 +489,10 @@ class BrazilMoHEngine:
 
         Returns ``(records, errored)``. Extracted so the strict and relaxed
         stages cannot drift apart in how they parse or filter. A shield 403
-        verdict is recorded on ``state`` for ``_is_bvs_shielded``.
+        verdict is recorded on ``state`` for ``_is_bvs_shielded``. A 200
+        carrying block-HTML (shield/challenge page) instead of JSON also
+        sets ``state.bvs_shielded`` so later BVS stages short-circuit;
+        truncated JSON or other garbage sets no flag.
         """
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
@@ -509,7 +515,13 @@ class BrazilMoHEngine:
         try:
             data = resp.json()
         except ValueError:
-            logger.warning("brazil_moh search returned non-JSON payload")
+            if self.http_client.is_unexpected_html(
+                resp
+            ) or self.http_client._is_challenge_html(resp):
+                logger.warning("brazil_moh search returned block-HTML payload")
+                state.bvs_shielded = True
+            else:
+                logger.warning("brazil_moh search returned non-JSON payload")
             return [], True
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
@@ -577,8 +589,11 @@ class BrazilMoHEngine:
 
         Budget is min(brazil_stage_timeout_s, chain_time_left) when chain_start
         is provided. If the chain budget is already exhausted (or stage budget <= 0
-        and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
-        is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
+        and expired), the stage is skipped and ``default`` is returned without
+        firing ``on_timeout`` -- a pre-expired skip means the caller is out of
+        time, not that the host is unhealthy. Only an actual ``wait_for``
+        timeout fires it. If both bounds are disabled (<= 0), ``coro`` runs
+        unbounded.
         """
         stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
         chain_setting = (
@@ -597,7 +612,6 @@ class BrazilMoHEngine:
             )
             if asyncio.iscoroutine(coro):
                 coro.close()
-            self._fire_on_timeout(stage, on_timeout)
             return default
         try:
             return await asyncio.wait_for(coro, budget)
