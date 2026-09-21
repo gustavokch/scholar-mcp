@@ -596,3 +596,19 @@ async def test_fulltext_lookup_challenge_kind_propagates(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_lookup_record_does_not_retry_5xx(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
+        )
+        record, kind = await engine._lookup_record("biblio-x")
+        assert record is None
+        assert kind == "origin_outage"
+        assert len(route.calls) == 1, "a 5xx lookup must fail fast like the search path"
+    finally:
+        await cache.close()
+        await http_client.aclose()

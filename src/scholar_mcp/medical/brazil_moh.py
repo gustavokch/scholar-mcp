@@ -1378,6 +1378,7 @@ class BrazilMoHEngine:
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
             params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
+            retryable_statuses=_BVS_RETRYABLE_STATUSES,
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
