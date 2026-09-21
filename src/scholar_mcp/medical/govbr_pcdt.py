@@ -202,7 +202,7 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         languages=["pt"],
         collections=item.get("collections") or ["PCDT"],
         authors=item.get("authors") or ["Ministério da Saúde", "CONITEC"],
-        doi=item.get("doi", "") or "",
+        doi=(item.get("doi") or "").strip().rstrip(".,;:)]}"),
         score=score,
     )
 

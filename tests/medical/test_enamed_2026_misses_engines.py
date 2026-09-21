@@ -791,3 +791,10 @@ def test_extract_doi_strips_query_and_braces():
     )
     assert _extract_doi({"ur": ["https://doi.org/10.1590/abc}"]}) == "10.1590/abc"
     assert _extract_doi({"ur": ["http://site/v10.1234/5678/file.pdf"]}) == ""
+
+
+def test_catalog_doi_is_normalized():
+    from scholar_mcp.medical.govbr_pcdt import _dict_to_guideline
+
+    assert _dict_to_guideline({"doi": "  10.1590/abc.  "}).doi == "10.1590/abc"
+    assert _dict_to_guideline({}).doi == ""
