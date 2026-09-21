@@ -722,3 +722,24 @@ async def test_fulltext_synthetic_abstract_not_served_as_abstract(tmp_path: Path
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_cache_stats_and_close_serialize_with_writers(tmp_path: Path):
+    settings = Settings.load()
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+
+    async def _writer(i: int):
+        await cache.set(f"k{i}", {"v": i}, source="brazil_moh")
+        await cache.get(f"k{i}")
+
+    async def _stats():
+        for _ in range(5):
+            stats = await cache.get_stats()
+            assert "total_entries" in stats
+
+    await asyncio.gather(
+        *[_writer(i) for i in range(16)],
+        *[_stats() for _ in range(4)],
+    )
+    assert (await cache.get_stats())["total_entries"] >= 16
+    await cache.close()

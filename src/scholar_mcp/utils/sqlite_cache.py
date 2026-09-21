@@ -177,38 +177,43 @@ class SQLiteCacheManager:
         db = await self._ensure_db()
         now = time.time()
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM cache_entries WHERE created_at + ttl_seconds >= ?",
-            (now,),
-        ) as cur:
-            total_active = (await cur.fetchone())[0]
+        async with self._io_lock:
+            async with db.execute(
+                "SELECT COUNT(*) FROM cache_entries WHERE created_at + ttl_seconds >= ?",
+                (now,),
+            ) as cur:
+                total_active = (await cur.fetchone())[0]
 
-        async with db.execute(
-            """
-            SELECT source, COUNT(*)
-            FROM cache_entries
-            WHERE created_at + ttl_seconds >= ?
-            GROUP BY source
-            """,
-            (now,),
-        ) as cur:
-            source_rows = await cur.fetchall()
+            async with db.execute(
+                """
+                SELECT source, COUNT(*)
+                FROM cache_entries
+                WHERE created_at + ttl_seconds >= ?
+                GROUP BY source
+                """,
+                (now,),
+            ) as cur:
+                source_rows = await cur.fetchall()
+
+            hits = self._hits
+            misses = self._misses
 
         sources = {row[0]: row[1] for row in source_rows}
-        total_requests = self._hits + self._misses
-        hit_rate = (self._hits / total_requests) if total_requests > 0 else 0.0
+        total_requests = hits + misses
+        hit_rate = (hits / total_requests) if total_requests > 0 else 0.0
         db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
 
         return {
             "total_entries": total_active,
-            "hits": self._hits,
-            "misses": self._misses,
+            "hits": hits,
+            "misses": misses,
             "hit_rate": hit_rate,
             "sources": sources,
             "db_size_bytes": db_size,
         }
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        async with self._io_lock:
+            if self._db is not None:
+                await self._db.close()
+                self._db = None
