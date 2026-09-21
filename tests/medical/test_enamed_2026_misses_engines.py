@@ -218,7 +218,14 @@ async def test_timeout_state_maps_to_timeout_kind(tmp_path: Path):
 # S1.1 — published budgets --------------------------------------------------
 
 
-def test_budget_contract_publishes_search_vs_fulltext():
+def test_budget_contract_publishes_search_vs_fulltext(monkeypatch):
+    for var in (
+        "BRAZIL_CHAIN_TIMEOUT_S",
+        "BRAZIL_STAGE_TIMEOUT_S",
+        "BRAZIL_BROWSER_TIMEOUT_S",
+        "BRAZIL_FULLTEXT_TIMEOUT_S",
+    ):
+        monkeypatch.delenv(var, raising=False)
     settings = Settings.load()
     contract = bvs_budget_contract(settings)
     assert contract["search_chain_ceiling_s"] == 90.0
@@ -226,7 +233,6 @@ def test_budget_contract_publishes_search_vs_fulltext():
     assert contract["browser_tier_ceiling_s"] == 45.0
     assert contract["browser_nav_ceiling_s"] == 30.0
     assert contract["fulltext_ceiling_s"] == 30.0
-    # The nav ceiling can never silently exceed the tier ceiling.
     assert contract["browser_nav_ceiling_s"] <= contract["browser_tier_ceiling_s"]
 
 
