@@ -502,7 +502,7 @@ def _extract_doi(doc: dict[str, Any]) -> str:
     return ""
 
 
-def _coerce_abstract(doc: dict[str, Any]) -> str:
+def _coerce_abstract(doc: dict[str, Any]) -> tuple[str, bool]:
     """Record abstract under the raised cap, never silently empty when text exists.
 
     ``ab`` is truncated to ``ABSTRACT_MAX_CHARS`` (S2.1). When the source
@@ -511,32 +511,37 @@ def _coerce_abstract(doc: dict[str, Any]) -> str:
     an English title distinct from the Portuguese one exists, it stands in.
     Genuinely textless records keep "" so the caller can still tell them
     apart from a populated snippet.
+
+    Returns ``(body, synthetic)``: ``synthetic`` is True when the body was
+    fabricated from descriptors or ``ti_en`` rather than the source abstract.
     """
     raw = _first(doc.get("ab")).strip()
     if raw:
-        return raw[:ABSTRACT_MAX_CHARS]
+        return raw[:ABSTRACT_MAX_CHARS], False
     mesh = _as_list(doc.get("mh"))
     if mesh:
         fallback = "Temas (DeCS): " + "; ".join(mesh)
-        return fallback[:ABSTRACT_MAX_CHARS]
+        return fallback[:ABSTRACT_MAX_CHARS], True
     title = _first(doc.get("ti")).strip()
     title_en = _first(doc.get("ti_en")).strip()
     if title_en and title_en != title:
-        return title_en[:ABSTRACT_MAX_CHARS]
-    return ""
+        return title_en[:ABSTRACT_MAX_CHARS], True
+    return "", False
 
 
 def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
     """Map one Solr document onto a BrazilGuideline."""
     document_url = _select_document_url(doc)
     year, issued = _parse_issued(doc.get("da"))
+    abstract, synthetic = _coerce_abstract(doc)
     return BrazilGuideline(
         title=_first(doc.get("ti")),
         title_en=_first(doc.get("ti_en")),
         record_id=_first(doc.get("id")),
         document_url=document_url,
         fulltext_id=_derive_fulltext_id(document_url),
-        abstract=_coerce_abstract(doc),
+        abstract=abstract,
+        abstract_synthetic=synthetic,
         year=year,
         issued=issued,
         country=_parse_country(doc.get("pais_publicacao")),
@@ -1680,7 +1685,7 @@ class BrazilMoHEngine:
             source_text = pdf_text
             content_type = "pdf"
             abstract_fallback = False
-        elif record.abstract:
+        elif record.abstract and not record.abstract_synthetic:
             source_text = record.abstract
             content_type = "abstract"
             abstract_fallback = True

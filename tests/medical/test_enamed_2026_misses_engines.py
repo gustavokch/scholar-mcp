@@ -694,3 +694,31 @@ async def test_camoufox_skips_when_ceiling_below_useful_floor(tmp_path, monkeypa
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_build_record_marks_synthesized_abstract():
+    from scholar_mcp.medical.brazil_moh import _build_record
+
+    assert _build_record(_bvs_doc(ab=["Resumo real."])).abstract_synthetic is False
+    assert _build_record(_bvs_doc(mh=["Tuberculose"])).abstract_synthetic is True
+
+
+@respx.mock
+async def test_fulltext_synthetic_abstract_not_served_as_abstract(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        doc = _bvs_doc(record_id="biblio-decs", mh=["Tuberculose", "Atenção Primária"])
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
+            return_value=httpx.Response(
+                200, headers={"content-type": "text/html"}, text="<html>WAF</html>"
+            )
+        )
+        payload, _ = await engine.get_full_text("biblio-decs")
+        assert payload["content_type"] == "none"
+        assert payload["abstract_fallback"] is False
+    finally:
+        await cache.close()
+        await http_client.aclose()

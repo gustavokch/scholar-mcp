@@ -255,6 +255,9 @@ class BrazilGuideline:
     ``doi`` carries a DOI resolved out of the record's link list when the
     source provides one; BVS non-conventional records usually carry none,
     so it stays empty rather than guessed.
+    ``abstract_synthetic`` marks a body fabricated from DeCS descriptors or
+    ``ti_en`` (see ``_coerce_abstract``): it is a search snippet, never a
+    full-text abstract fallback.
     """
 
     title: str = ""
@@ -264,6 +267,7 @@ class BrazilGuideline:
     fulltext_id: str = ""
     source: str = "brazil-moh"
     abstract: str = ""
+    abstract_synthetic: bool = False
     year: str = ""
     issued: str = ""
     country: str = ""
