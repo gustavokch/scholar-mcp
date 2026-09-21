@@ -1365,8 +1365,12 @@ class BrazilMoHEngine:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
             return []
 
-    async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
-        """Resolve one record by its Solr id. Returns (record, errored)."""
+    async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, str | None]:
+        """Resolve one record by its Solr id. Returns (record, error_kind).
+
+        Second element is a ``BvsErrorKind`` on failure and ``None`` on
+        success/not-found.
+        """
         # The id is caller-controlled; escape it so a quote or backslash
         # cannot terminate the id:"..." phrase and rewrite the query.
         escaped = record_id.replace("\\", "\\\\").replace('"', '\\"')
@@ -1376,11 +1380,23 @@ class BrazilMoHEngine:
             params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
         )
         if resp is None:
-            return None, True
+            failure = getattr(self.http_client, "last_failure", None)
+            status = getattr(failure, "status", None)
+            if status == 403:
+                return None, "cdn_challenge"
+            if status is not None and 500 <= status < 600:
+                return None, "origin_outage"
+            if getattr(failure, "kind", "") == "transport":
+                return None, "timeout"
+            return None, "backend_error"
         try:
             data = resp.json()
         except ValueError:
-            return None, True
+            if self.http_client.is_unexpected_html(
+                resp
+            ) or self.http_client.is_challenge_html(resp):
+                return None, "cdn_challenge"
+            return None, "backend_error"
         # ``id:"..."`` is a phrase query against a tokenized field, so a
         # near-miss record can come back ahead of the requested one. Only an
         # exact id is accepted: the wrong record would otherwise be served and
@@ -1391,8 +1407,8 @@ class BrazilMoHEngine:
             if _first(doc.get("id")) == record_id
         ]
         if not docs:
-            return None, False
-        return _build_record(docs[0]), False
+            return None, None
+        return _build_record(docs[0]), None
 
     async def _extract_pdf_text(self, document_url: str) -> tuple[str, bool]:
         """Fetch and extract the document PDF. Returns (text, errored).
@@ -1556,8 +1572,8 @@ class BrazilMoHEngine:
                 record = await self.az_engine.get_guideline(normalized)
             if record is not None:
                 return record, False, {}, None
-            record, errored = await self._lookup_record(normalized)
-            if errored:
+            record, error_kind = await self._lookup_record(normalized)
+            if error_kind:
                 return (
                     None,
                     True,
@@ -1566,7 +1582,7 @@ class BrazilMoHEngine:
                      "abstract_fallback": False},
                     CacheMetadata(
                         cached=False, cache_age=0, error=True,
-                        error_kind="origin_outage",
+                        error_kind=error_kind or "backend_error",
                     ),
                 )
             if record is None:

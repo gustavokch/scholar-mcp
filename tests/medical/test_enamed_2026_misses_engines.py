@@ -576,3 +576,23 @@ async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path:
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_lookup_challenge_kind_propagates(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                403,
+                headers={"content-type": "text/html"},
+                text='<iframe src="https://shield-templates-prod.b-cdn.net/x/block.html">',
+            )
+        )
+        payload, meta = await engine.get_full_text("biblio-x")
+        assert payload["status"] == "error"
+        assert meta.error is True
+        assert meta.error_kind == "cdn_challenge"
+    finally:
+        await cache.close()
+        await http_client.aclose()
