@@ -798,9 +798,10 @@ class BrazilMoHEngine:
         When the chain has burned over half its budget (slow origin), the
         remaining stages shrink to ``min(clamped * 3, 60)``: a huge window
         against a sick Solr endpoint only buys latency, and the client-side
-        ranker cannot lift what the server never returns in time. The
-        title-scoped first stage always takes the full window -- early-exit
-        when it hits means the relaxed stages never run at all.
+        ranker cannot lift what the server never returns in time. The window
+        is adaptive from the chain start, so the title-scoped first stage
+        already shrinks when the PCDT/A-Z phase has burned over half the
+        chain budget.
         """
         full = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
         if chain_start is None:
