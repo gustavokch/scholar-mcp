@@ -123,8 +123,11 @@ MAX_FULL_TEXT_CHARS = 50_000
 _CAMOUFOX_NAV_TIMEOUT_MS = 30000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
-# tier cannot do useful work, so skip the launch outright.
-_CAMOUFOX_MIN_USEFUL_CEILING_S = 5.0
+# tier cannot do useful work, so skip the launch outright. Not independently
+# measured for this deployment -- 20.0 is a conservative floor consistent
+# with "tens of seconds" that still leaves headroom for navigation on a
+# ceiling that clears it. Raise once a real launch-time measurement exists.
+_CAMOUFOX_MIN_USEFUL_CEILING_S = 20.0
 
 _BVS_CHALLENGE_MARKERS = (
     "shield-templates",
@@ -1288,25 +1291,32 @@ class BrazilMoHEngine:
         )
         return records, done_meta
 
-    def _browser_ceiling(self, chain_start: float) -> float:
-        """Ceiling for the browser tier: the flat per-tier cap, shrunk to the
-        chain budget still left when the browser tier starts. The whole chain
-        (PCDT + every BVS stage + browser) is what the caller's hard timeout
-        bounds, so a flat 45 s browser cap after five stalled 20 s stages
-        would outlast a 90 s chain ceiling. ``brazil_chain_timeout_s <= 0``
-        disables the chain bound and leaves the flat cap.
+    def _browser_ceiling(self, chain_start: float) -> float | None:
+        """Ceiling for the browser tier, in seconds.
+
+        Returns ``None`` when ``brazil_chain_timeout_s`` is unset (<= 0): the
+        chain bound is disabled, so the browser tier is unbounded by the
+        chain and the caller falls back to the flat per-tier cap
+        (``brazil_browser_timeout_s``) alone.
+
+        Otherwise returns the flat per-tier cap shrunk to the chain budget
+        still left when the browser tier starts, floored at ``0.0``. The
+        whole chain (PCDT + every BVS stage + browser) is what the caller's
+        hard timeout bounds, so a flat 45 s browser cap after five stalled
+        20 s stages would outlast a 90 s chain ceiling. A returned ``0.0``
+        means the chain budget is exhausted: the caller must skip the tier,
+        never launch with a zero timeout.
         """
-        ceiling = float(self.settings.brazil_browser_timeout_s)
         chain_budget = float(
             getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0
         )
-        if chain_budget > 0:
-            remaining = chain_budget - (time.monotonic() - chain_start)
-            ceiling = min(ceiling, max(remaining, 0.0))
-        return ceiling
+        if chain_budget <= 0:
+            return None
+        remaining = chain_budget - (time.monotonic() - chain_start)
+        return min(float(self.settings.brazil_browser_timeout_s), max(remaining, 0.0))
 
     async def _camoufox_search(
-        self, composed: str, count: int, ceiling: float
+        self, composed: str, count: int, ceiling: float | None
     ) -> list[dict[str, Any]]:
         """Last-resort rendered fetch of the BVS JSON search payload.
 
@@ -1317,20 +1327,30 @@ class BrazilMoHEngine:
         dicts so ``_dedupe_by_id``/``_build_record``/``_is_brazilian`` apply
         unchanged. Any failure or timeout returns ``[]``.
 
-        ``ceiling`` is mandatory: the caller passes the chain budget left
-        (see ``_browser_ceiling``), never the flat cap alone. The
-        in-browser navigation timeout is clamped to the same ceiling, so a
-        flat 30 s navigation can never silently outlive a caller that has
-        less than that left. A positive ceiling below
-        ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
-        Camoufox launch needs tens of seconds, so a doomed ceiling would
-        only burn startup time. ``ceiling <= 0`` keeps its current meaning
-        (unbounded chain: flat cap) and is not floored.
+        ``ceiling`` comes from ``_browser_ceiling``: ``None`` means the chain
+        bound is disabled, so the flat per-tier cap
+        (``brazil_browser_timeout_s``) alone applies; ``0.0`` means the chain
+        budget is exhausted and the tier is skipped outright, never launched
+        with a zero timeout; any positive value is the seconds actually left.
+        Whichever value results (``effective_ceiling``) bounds both the
+        overall ``wait_for`` and, after subtracting the time the launch
+        itself took, the in-browser navigation -- so navigation can never
+        silently outlive what launch already spent. An ``effective_ceiling``
+        below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
+        Camoufox launch needs tens of seconds, so a doomed ceiling would only
+        burn startup time.
         """
-        if 0 < ceiling < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+        if ceiling is not None and ceiling <= 0:
+            logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
+            return []
+
+        effective_ceiling = (
+            float(self.settings.brazil_browser_timeout_s) if ceiling is None else ceiling
+        )
+        if effective_ceiling < _CAMOUFOX_MIN_USEFUL_CEILING_S:
             logger.info(
                 "brazil_moh camoufox tier skipped: %.1fs ceiling below useful floor",
-                ceiling,
+                effective_ceiling,
             )
             return []
         try:
@@ -1343,12 +1363,15 @@ class BrazilMoHEngine:
             f"{BVS_SEARCH_URL}?q={urllib.parse.quote(composed)}"
             f"&output=json&count={count}"
         )
-        nav_timeout_ms = _CAMOUFOX_NAV_TIMEOUT_MS
-        if ceiling > 0:
-            nav_timeout_ms = min(nav_timeout_ms, max(int(ceiling * 1000), 1))
 
         async def _run() -> list[dict[str, Any]]:
+            launch_start = time.monotonic()
             async with AsyncCamoufox(headless=True) as browser:
+                launch_elapsed = time.monotonic() - launch_start
+                nav_budget_s = max(effective_ceiling - launch_elapsed, 0.0)
+                nav_timeout_ms = min(
+                    _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
+                )
                 page = await browser.new_page()
                 await page.goto(
                     target, wait_until="domcontentloaded", timeout=nav_timeout_ms
@@ -1373,7 +1396,7 @@ class BrazilMoHEngine:
             return _extract_docs(data)
 
         try:
-            return await asyncio.wait_for(_run(), timeout=ceiling)
+            return await asyncio.wait_for(_run(), timeout=effective_ceiling)
         except Exception:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
             return []

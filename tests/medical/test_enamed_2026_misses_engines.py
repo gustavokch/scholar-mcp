@@ -236,6 +236,9 @@ def test_budget_contract_publishes_search_vs_fulltext(monkeypatch):
 
 
 async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypatch):
+    """The nav timeout is clamped to the ceiling minus whatever the launch
+    itself already spent, so it lands at or just under the ceiling -- never
+    over it."""
     engine, cache, http_client = await _engine(tmp_path)
     captured = {}
 
@@ -265,8 +268,8 @@ async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypat
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
     try:
-        await engine._camoufox_search("dengue", 10, ceiling=5.0)
-        assert captured["timeout"] == 5000
+        await engine._camoufox_search("dengue", 10, ceiling=25.0)
+        assert 24000 <= captured["timeout"] <= 25000
     finally:
         await cache.close()
         await http_client.aclose()

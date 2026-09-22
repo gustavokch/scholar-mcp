@@ -1639,8 +1639,8 @@ async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_
         enable_browser_fallback=True,
         brazil_browser_fallback=True,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=10.0,
-        brazil_browser_timeout_s=5.0,
+        brazil_chain_timeout_s=30.0,
+        brazil_browser_timeout_s=25.0,
         request_timeout=5,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01, min_429_wait=0.0)
@@ -2185,8 +2185,9 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
     """Worst case must stay inside the documented caller ceiling: a browser
     tier on a flat 30 s ceiling after stalled stages would outlive the chain.
     The browser gets only the chain budget that is still left. The chain
-    budget here (10 s) stays above the useful-launch floor so the tier is
-    attempted — but with ~10 s, not the flat 30 s."""
+    budget here (25 s) stays above the useful-launch floor
+    (``_CAMOUFOX_MIN_USEFUL_CEILING_S``) so the tier is attempted — but with
+    ~25 s, not the flat 30 s."""
     import time as _time
 
     settings = Settings(
@@ -2195,7 +2196,7 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         brazil_browser_fallback=True,
         request_timeout=5,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=10.0,
+        brazil_chain_timeout_s=25.0,
         brazil_browser_timeout_s=30.0,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
@@ -2260,7 +2261,7 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
             start = _time.monotonic()
             records, meta = await engine.search_guidelines("dengue", limit=10)
             elapsed = _time.monotonic() - start
-        # ...but only with the chain budget left: ~10 s ceiling, not 30 s.
+        # ...but only with the chain budget left: ~25 s ceiling, not 30 s.
         assert attempts == [True]
         assert elapsed < 12.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
     finally:
@@ -2381,7 +2382,7 @@ async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monke
     )
     try:
         with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
-            docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
+            docs = await engine._camoufox_search("dengue", count=10, ceiling=25.0)
         assert docs == []
         messages = [r.getMessage() for r in caplog.records]
         assert any("origin returned an error page" in m for m in messages)
@@ -2415,13 +2416,56 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
     }
     _install_fake_camoufox(monkeypatch, json.dumps(payload))
     try:
-        docs = await engine._camoufox_search("triagem", count=10, ceiling=5.0)
+        docs = await engine._camoufox_search("triagem", count=10, ceiling=25.0)
         assert [d["id"] for d in docs] == ["1"]
     finally:
         await cache.close()
         await http_client.aclose()
 
 
+async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
+    """``ceiling=0.0`` means the chain budget is exhausted (W6): the browser
+    tier must return [] without ever importing camoufox, never launch with a
+    zero-second timeout."""
+    import sys as _sys
+
+    engine, cache, http_client = await _engine(tmp_path)
+
+    class _NeverImported:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"camoufox.async_api.{name} accessed despite exhausted ceiling"
+            )
+
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
+    try:
+        docs = await engine._camoufox_search("dengue", count=10, ceiling=0.0)
+        assert docs == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeypatch):
+    """A positive ceiling that cannot outlast a Camoufox launch must also
+    skip without importing camoufox."""
+    import sys as _sys
+
+    engine, cache, http_client = await _engine(tmp_path)
+
+    class _NeverImported:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"camoufox.async_api.{name} accessed below the useful floor"
+            )
+
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
+    try:
+        docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
+        assert docs == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
