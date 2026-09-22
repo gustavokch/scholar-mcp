@@ -562,6 +562,75 @@ async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path:
         payload2, meta2 = await engine.get_full_text("biblio-pdf-fail")
         assert meta2.cached is True
         assert payload2["content_type"] == "abstract"
+        # The degradation travels with the cached row, so the second caller
+        # reads the same kind as the first (see the cache-hit test below).
+        assert meta2.error_kind == "backend_error"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_cache_hit_keeps_degraded_error_kind(tmp_path: Path):
+    """A hit inside the degraded TTL reports the kind the first caller saw.
+
+    The degraded payload is held for 300 s. If the kind does not travel with
+    the row, only the first request in that window reports ``degraded``, and a
+    machine consumer polling behind it cannot tell "not degraded" from
+    "degraded, but you asked second".
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        doc = _bvs_doc(record_id="biblio-outage-abs", ab=["Resumo preservado."])
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
+            return_value=httpx.Response(503, text="Erro 503 - Service Unavailable")
+        )
+        payload, meta = await engine.get_full_text("biblio-outage-abs")
+        assert payload["content_type"] == "abstract"
+        assert meta.cached is False
+        assert meta.error_kind == "origin_outage"
+
+        payload2, meta2 = await engine.get_full_text("biblio-outage-abs")
+        assert meta2.cached is True
+        assert payload2["content_type"] == "abstract"
+        assert meta2.error_kind == "origin_outage"
+        # The stored kind is an internal field of the cached row, never a key
+        # the tool hands back.
+        assert "_error_kind" not in payload
+        assert "_error_kind" not in payload2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_origin_outage_without_abstract_keeps_its_kind(tmp_path: Path):
+    """No PDF and no abstract must still report the classified kind.
+
+    ``origin_outage`` must not count against a caller-side breaker (module
+    docstring, AGENTS.md Decision 10), so reporting a sick document host as
+    ``backend_error`` on the one branch that has nothing to fall back on
+    defeats the taxonomy exactly where the caller needs it.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        # No ``ab``, no ``mh``, no ``ti_en``: the record carries no abstract,
+        # synthetic or otherwise.
+        doc = _bvs_doc(record_id="biblio-outage-bare")
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([doc]))
+        )
+        respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
+            return_value=httpx.Response(503, text="Erro 503 - Service Unavailable")
+        )
+        payload, meta = await engine.get_full_text("biblio-outage-bare")
+        assert payload["status"] == "error"
+        assert payload["content_type"] == "none"
+        assert meta.error is True
+        assert meta.error_kind == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -619,6 +688,83 @@ async def test_pcdt_collection_applies_since_year(tmp_path: Path):
         records, meta = await engine.search_guidelines("guia", collection="pcdt", since_year=2024)
         assert [r.record_id for r in records] == ["new"]
         assert meta.error_kind == "ok"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pcdt_collection_since_year_fills_the_requested_limit(tmp_path: Path):
+    """The sub-engine slices to the limit it is handed, so the year filter
+    cannot run after that slice: with ten 2012 rows ranked ahead of five 2025
+    ones, a caller asking ``limit=3, since_year=2024`` must still receive
+    three rows, not zero."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        catalog = [
+            BrazilGuideline(record_id=f"old-{i}", title="Guia antigo", year="2012")
+            for i in range(10)
+        ] + [
+            BrazilGuideline(record_id=f"new-{i}", title="Guia atual", year="2025")
+            for i in range(5)
+        ]
+        asked: list[int] = []
+
+        async def _pcdt_search(query, limit=10):
+            asked.append(limit)
+            # Mirrors the real engine: score, sort, then slice to `limit`.
+            return catalog[:limit], CacheMetadata(cached=False, cache_age=0, error=False)
+
+        engine.pcdt_engine.search = _pcdt_search
+        records, _meta = await engine.search_guidelines(
+            "guia", limit=3, collection="pcdt", since_year=2024
+        )
+        assert [r.record_id for r in records] == ["new-0", "new-1", "new-2"]
+        assert asked[0] > 3, "the year filter needs a pool wider than the caller's limit"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_local_fallback_since_year_filters_before_slicing(tmp_path: Path):
+    """BVS down, local gov.br rows survive: filter by year, then slice.
+
+    The ranker puts the two exact-title 2012 rows first, so slicing to the
+    caller's limit before dropping pre-2024 rows returns nothing while two
+    matching 2025 rows sat in the pool. This is the engine's main degradation
+    mode, so the ordering has to hold here too.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
+        )
+
+        async def _pcdt_search(query, limit=10):
+            return (
+                [
+                    BrazilGuideline(
+                        record_id="old-1", title="dengue manejo clinico", year="2012"
+                    ),
+                    BrazilGuideline(
+                        record_id="old-2", title="dengue manejo clinico adulto", year="2013"
+                    ),
+                    BrazilGuideline(
+                        record_id="new-1", title="tuberculose diagnostico", year="2025"
+                    ),
+                    BrazilGuideline(
+                        record_id="new-2", title="hanseniase tratamento", year="2025"
+                    ),
+                ],
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+
+        engine.pcdt_engine.search = _pcdt_search
+        records, meta = await engine.search_guidelines(
+            "dengue manejo clinico", limit=2, since_year=2024
+        )
+        assert {r.record_id for r in records} == {"new-1", "new-2"}
+        assert meta.error is False
     finally:
         await cache.close()
         await http_client.aclose()

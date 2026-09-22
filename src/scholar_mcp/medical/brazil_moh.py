@@ -232,6 +232,15 @@ VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
 # re-run the whole BVS chain each time.
 DEGRADED_RESULT_TTL_SECONDS = 300
 
+# The classified failure that produced a cached full-text payload travels
+# inside the row under this key. Without it, only the first caller in the
+# 300 s degraded window sees ``error_kind`` (and the ``degraded`` flag
+# server.py derives from it); everyone behind the cache reads a byte-identical
+# payload as clean. Private to the stored row: ``_serve_full_text`` strips it,
+# so it never reaches a caller. Rows written before this key existed read as
+# "" -- the same value they reported before.
+_CACHED_ERROR_KIND_KEY = "_error_kind"
+
 BRAZIL_COUNTRY = "Brasil"
 
 logger = logging.getLogger(__name__)
@@ -988,8 +997,19 @@ class BrazilMoHEngine:
             sub_engine = (
                 self.pcdt_engine if norm_collection == "pcdt" else self.az_engine
             )
-            records, sub_meta = await sub_engine.search(query, limit=clamped)
-            records = self._apply_since_year(records, since_year)
+            # The sub-engine ranks its catalog and slices to the limit it is
+            # handed, so asking for `clamped` and dropping pre-``since_year``
+            # rows afterwards returns fewer rows than the caller asked for
+            # while matching ones sat further down that ranking. Widen the
+            # window instead and slice after the filter -- the catalogs are
+            # local, so a wider window costs no extra request.
+            fetch_limit = (
+                min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+                if since_year and since_year > 0
+                else clamped
+            )
+            records, sub_meta = await sub_engine.search(query, limit=fetch_limit)
+            records = self._apply_since_year(records, since_year)[:clamped]
             return records, CacheMetadata(
                 cached=sub_meta.cached,
                 cache_age=sub_meta.cache_age,
@@ -1239,9 +1259,11 @@ class BrazilMoHEngine:
 
         if not records and errored_any:
             if local_records:
-                ranked_local = self._apply_since_year(
-                    rank_brazil_guidelines(local_records, query)[:clamped],
-                    since_year,
+                # Same filter-rank-slice order as every other exit: slicing
+                # first would hand the caller fewer rows than it asked for
+                # whenever `since_year` drops a high-ranked old document.
+                ranked_local, rerank_in_local = self._finalize_records(
+                    local_records, query, since_year, clamped
                 )
                 local_meta = self._finalize_search(
                     _SearchOutcome(
@@ -1250,7 +1272,7 @@ class BrazilMoHEngine:
                         error=False,
                         state=state,
                         records=ranked_local,
-                        rerank_in=len(local_records),
+                        rerank_in=rerank_in_local,
                         rerank_out=len(ranked_local),
                     ),
                     query=query,
@@ -1642,7 +1664,15 @@ class BrazilMoHEngine:
             payload.setdefault(
                 "abstract_fallback", payload.get("content_type") == "abstract"
             )
-            return payload, meta
+            # Replay the kind stored with the row. A degraded payload lives
+            # for DEGRADED_RESULT_TTL_SECONDS, so without this every request
+            # behind the first one in that window reports a clean result.
+            return payload, CacheMetadata(
+                cached=True,
+                cache_age=meta.cache_age,
+                error=False,
+                error_kind=cached_data.get(_CACHED_ERROR_KIND_KEY, ""),
+            )
 
         ceiling = float(self.settings.brazil_fulltext_timeout_s)
 
@@ -1766,7 +1796,10 @@ class BrazilMoHEngine:
                  "abstract_fallback": False},
                 CacheMetadata(
                     cached=False, cache_age=0, error=errored,
-                    error_kind="backend_error" if errored else "successful_empty",
+                    # The classified kind, not a blanket backend_error: an
+                    # origin_outage reported here would count against a
+                    # caller-side breaker the taxonomy exempts it from.
+                    error_kind=error_kind or "successful_empty",
                 ),
             )
 
@@ -1779,7 +1812,13 @@ class BrazilMoHEngine:
             "total_chars": total_chars,
             "abstract_fallback": abstract_fallback,
         }
-        payload = {**base, "status": "success", "title": record.title, **result}
+        # The kind is written into the row itself so a later cache hit reports
+        # the same degradation this caller sees; _serve_full_text strips it
+        # from what either caller receives.
+        payload = {
+            **base, "status": "success", "title": record.title, **result,
+            _CACHED_ERROR_KIND_KEY: error_kind or "ok",
+        }
         if not errored:
             await self.cache.set(cache_key, payload, source="brazil_moh")
         else:
@@ -1815,4 +1854,8 @@ class BrazilMoHEngine:
         total = payload.get("total_chars", len(stored))
         content, truncated = truncate_content(stored, limit)
         is_truncated = truncated or (len(content) < total)
-        return {**payload, "content": content, "truncated": is_truncated, "total_chars": total}
+        served = {**payload, "content": content, "truncated": is_truncated, "total_chars": total}
+        # The stored error kind is cache bookkeeping, not part of the tool's
+        # response shape.
+        served.pop(_CACHED_ERROR_KIND_KEY, None)
+        return served
