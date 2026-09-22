@@ -62,6 +62,26 @@ class SQLiteCacheManager:
         self._io_lock = asyncio.Lock()
         self._hits = 0
         self._misses = 0
+        # asyncio.Lock binds to whichever loop first awaits on it while
+        # contended (see PR #31); unlike AsyncRateLimiter's registry, this
+        # class serializes real awaited DB I/O under _io_lock, so that fix's
+        # threading.Lock-around-arithmetic-only pattern does not transfer --
+        # holding a threading.Lock across an ``await`` would block the whole
+        # OS thread and deadlock any sibling coroutine on the same loop.
+        # Instead this class declares itself single-loop and asserts it on
+        # every public entry point, before either lock is touched.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _check_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif loop is not self._loop:
+            raise RuntimeError(
+                f"SQLiteCacheManager({self.db_path}) is single-loop: it was first "
+                "used on a different asyncio event loop and cannot be shared "
+                "across loops."
+            )
 
     def _ttl_for(self, source: str, ttl: int | None) -> int:
         if ttl is not None:
@@ -96,13 +116,15 @@ class SQLiteCacheManager:
         return self._db
 
     async def init_db(self) -> None:
+        self._check_loop()
         await self._ensure_db()
 
     async def get(self, key: str) -> tuple[Any | None, CacheMetadata]:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
 
         async with self._io_lock:
+            db = await self._ensure_db()
             async with db.execute(
                 "SELECT data, created_at, ttl_seconds FROM cache_entries WHERE key = ?",
                 (key,),
@@ -138,12 +160,13 @@ class SQLiteCacheManager:
         source: str,
         ttl: int | None = None,
     ) -> None:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
         resolved_ttl = self._ttl_for(source, ttl)
         data_json = json.dumps(data)
 
         async with self._io_lock:
+            db = await self._ensure_db()
             await db.execute(
                 """
                 INSERT OR REPLACE INTO cache_entries
@@ -174,10 +197,11 @@ class SQLiteCacheManager:
                 await db.commit()
 
     async def get_stats(self) -> dict[str, Any]:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
 
         async with self._io_lock:
+            db = await self._ensure_db()
             async with db.execute(
                 "SELECT COUNT(*) FROM cache_entries WHERE created_at + ttl_seconds >= ?",
                 (now,),
@@ -213,6 +237,7 @@ class SQLiteCacheManager:
         }
 
     async def close(self) -> None:
+        self._check_loop()
         async with self._io_lock:
             if self._db is not None:
                 await self._db.close()
