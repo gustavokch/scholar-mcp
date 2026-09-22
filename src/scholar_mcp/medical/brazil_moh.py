@@ -47,8 +47,9 @@ cached and must not count against any caller-side breaker. ``record_id``
 is the stable Solr document id and the fold key for ``med:brmoh:``.
 Published budgets: the search chain (``brazil_chain_timeout_s``,
 per-stage ``brazil_stage_timeout_s``, browser tier
-``brazil_browser_timeout_s``) versus one document fetch
-(``brazil_fulltext_timeout_s``); see ``bvs_budget_contract``.
+``brazil_browser_timeout_s``) is a separate budget from one document
+fetch (``brazil_fulltext_timeout_s``) -- a slow search never eats into
+the full-text ceiling, and vice versa.
 """
 
 import asyncio
@@ -174,41 +175,13 @@ _BVS_RETRYABLE_STATUSES = frozenset({429})
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
 
-def bvs_budget_contract(settings: Settings) -> dict[str, float]:
-    """Published BVS budgets the caller must honor instead of one blanket.
-
-    Returns the search-chain ceiling, the per-stage ceiling, the browser
-    tier ceiling, the in-browser navigation ceiling, and the single-document
-    full-text ceiling. The browser tier receives
-    ``min(browser, chain_left)`` and the navigation
-    ``min(nav, browser_effective)``, so a flat 45 s tier can never silently
-    outlive the caller's own timeout.
-    """
-    return {
-        "search_chain_ceiling_s": float(
-            getattr(settings, "brazil_chain_timeout_s", 0.0) or 0.0
-        ),
-        "search_stage_ceiling_s": float(
-            getattr(settings, "brazil_stage_timeout_s", 0.0) or 0.0
-        ),
-        "browser_tier_ceiling_s": float(
-            getattr(settings, "brazil_browser_timeout_s", 0.0) or 0.0
-        ),
-        "browser_nav_ceiling_s": _CAMOUFOX_NAV_TIMEOUT_MS / 1000.0,
-        "fulltext_ceiling_s": float(
-            getattr(settings, "brazil_fulltext_timeout_s", 0.0) or 0.0
-        ),
-    }
-
-
-
 @dataclass
 class _SearchState:
     """Mutable state for one ``search_guidelines`` call.
 
     The engine is a shared singleton (src/scholar_mcp/server.py), so state
     that must not bleed across concurrent searches lives here, never on
-    ``self``.     ``bvs_shielded`` carries the CDN-shield 403 verdict out of
+    ``self``. ``bvs_shielded`` carries the CDN-shield 403 verdict out of
     ``_fetch_records`` — the client's ``last_failure`` is a per-task
     ContextScoped var, so a stage running under ``asyncio.wait_for`` cannot
     read it afterwards (the write happened in the child task).
@@ -720,10 +693,10 @@ class BrazilMoHEngine:
         Returns min(brazil_stage_timeout_s, chain_budget_remaining).
         A setting <= 0 disables that bound.
         """
-        stage_budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        stage_budget = float(self.settings.brazil_stage_timeout_s)
         if chain_start is None:
             return stage_budget
-        chain_budget = float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return stage_budget
         remaining = max(chain_budget - (time.monotonic() - chain_start), 0.0)
@@ -770,9 +743,9 @@ class BrazilMoHEngine:
         and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
         is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
-        stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        stage_setting = float(self.settings.brazil_stage_timeout_s)
         chain_setting = (
-            float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+            float(self.settings.brazil_chain_timeout_s)
             if chain_start is not None
             else 0.0
         )
@@ -837,7 +810,7 @@ class BrazilMoHEngine:
         full = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
         if chain_start is None:
             return full
-        chain_budget = float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return full
         elapsed = time.monotonic() - chain_start
@@ -1388,9 +1361,7 @@ class BrazilMoHEngine:
         means the chain budget is exhausted: the caller must skip the tier,
         never launch with a zero timeout.
         """
-        chain_budget = float(
-            getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0
-        )
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return None
         remaining = chain_budget - (time.monotonic() - chain_start)
@@ -1642,10 +1613,10 @@ class BrazilMoHEngine:
         """Fetch one document's full text under the published full-text ceiling.
 
         Budget: ``brazil_fulltext_timeout_s`` bounds the record lookup plus
-        the PDF fetch (``bvs_budget_contract``). A timeout surfaces as
-        ``status=error`` with ``error_kind=timeout`` in the metadata and is
-        never cached. When the PDF cannot be retrieved but the record
-        carries an abstract, the abstract is served with
+        the PDF fetch, kept separate from the search-chain budget above.
+        A timeout surfaces as ``status=error`` with ``error_kind=timeout``
+        in the metadata and is never cached. When the PDF cannot be
+        retrieved but the record carries an abstract, the abstract is served with
         ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
         explicit flag, never a silent substitution (S2.4).
         """
@@ -1673,9 +1644,7 @@ class BrazilMoHEngine:
             )
             return payload, meta
 
-        ceiling = float(
-            getattr(self.settings, "brazil_fulltext_timeout_s", 0.0) or 0.0
-        )
+        ceiling = float(self.settings.brazil_fulltext_timeout_s)
 
         def _timeout_result(title_str: str) -> tuple[dict[str, Any], CacheMetadata]:
             return (
