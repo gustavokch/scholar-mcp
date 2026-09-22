@@ -884,11 +884,9 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
-        # C2: abstract fallback is a success, cached degraded (brief TTL).
-        assert meta.error is False
-        assert meta.error_kind == "ok"
+        assert meta.error is True
         _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -925,7 +923,7 @@ async def test_get_full_text_follows_redirect_within_allowed_hosts(tmp_path: Pat
 
 
 @respx.mock
-async def test_get_full_text_pdf_failure_degrades_to_cached_abstract(tmp_path: Path):
+async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
@@ -936,11 +934,9 @@ async def test_get_full_text_pdf_failure_degrades_to_cached_abstract(tmp_path: P
         respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
-        # C2: abstract fallback is a success, cached degraded (brief TTL).
-        assert meta.error is False
-        assert meta.error_kind == "ok"
+        assert meta.error is True
         _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2101,11 +2097,9 @@ async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, mon
 
 
 async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
-    """Worst case must stay inside the documented caller ceiling: a browser
-    tier on a flat 30 s ceiling after stalled stages would outlive the chain.
-    The browser gets only the chain budget that is still left. The chain
-    budget here (10 s) stays above the useful-launch floor so the tier is
-    attempted — but with ~10 s, not the flat 30 s."""
+    """Worst case must stay inside the documented 60 s caller ceiling: a
+    browser tier on a flat 30 s ceiling after five stalled 10 s stages is
+    ~90 s. The browser gets only the chain budget that is still left."""
     import time as _time
 
     settings = Settings(
@@ -2114,7 +2108,7 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         brazil_browser_fallback=True,
         request_timeout=5,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=10.0,
+        brazil_chain_timeout_s=0.5,
         brazil_browser_timeout_s=30.0,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
@@ -2179,9 +2173,9 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
             start = _time.monotonic()
             records, meta = await engine.search_guidelines("dengue", limit=10)
             elapsed = _time.monotonic() - start
-        # ...but only with the chain budget left: ~10 s ceiling, not 30 s.
+        # ...but only with the chain budget left: ~0.5 s ceiling, not 30 s.
         assert attempts == [True]
-        assert elapsed < 12.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
+        assert elapsed < 2.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
     finally:
         await cache.close()
         await http_client.aclose()

@@ -89,7 +89,6 @@ def load_extended_catalog() -> dict[str, dict[str, Any]]:
             "download_url": f"local:{file_path}",
             "authors": row.get("authors", []),
             "collections": row.get("collections", []),
-            "doi": row.get("doi", ""),
         }
     return catalog
 
@@ -202,7 +201,6 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         languages=["pt"],
         collections=item.get("collections") or ["PCDT"],
         authors=item.get("authors") or ["Ministério da Saúde", "CONITEC"],
-        doi=(item.get("doi") or "").strip().rstrip(".,;:)]}"),
         score=score,
     )
 

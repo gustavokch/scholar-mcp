@@ -1,9 +1,6 @@
-import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 
 # Sci-Hub mirrors, pruned 2026-09-19. Removed as permanently dead (probed with a
 # DOI request): sci-hub.hkvisa.net (403 "Just a moment" bot shield on every path),
@@ -106,13 +103,6 @@ class Settings:
     # 45 s because camoufox startup plus Bunny CDN challenge execution on
     # pesquisa.bvsalud.org runs 15 s-25 s; 30 s cut off legitimate searches.
     brazil_browser_timeout_s: float = 45.0
-    # Whole-call ceiling for get_brazil_moh_full_text network work (record
-    # lookup plus PDF fetch). Published alongside brazil_chain_timeout_s so
-    # the caller honors two ceilings instead of one blanket timeout: the
-    # search chain (stages + browser tier) and one document fetch are
-    # different budgets, and the 45 s browser tier must never be served
-    # into a 20 s blanket and read as a backend failure.
-    brazil_fulltext_timeout_s: float = 30.0
     enable_medical_tools: bool = True
 
     @property
@@ -137,18 +127,6 @@ class Settings:
         def _env(name: str) -> str | None:
             """Env value as a stripped string, or None when unset/blank."""
             return (os.getenv(name) or "").strip() or None
-
-        def _float_env(name: str, default: float) -> float:
-            raw = os.getenv(name)
-            if raw is None or not raw.strip():
-                return default
-            try:
-                return float(raw)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "invalid %s=%r, falling back to %s", name, raw, default
-                )
-                return default
 
         mirrors_env = os.getenv("SCIHUB_MIRRORS")
         mirrors = (
@@ -238,13 +216,14 @@ class Settings:
             cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
             cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
             cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
-            brazil_stage_timeout_s=_float_env("BRAZIL_STAGE_TIMEOUT_S", 20.0),
-            brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 90.0),
+            brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "20.0")),
+            brazil_chain_timeout_s=float(os.getenv("BRAZIL_CHAIN_TIMEOUT_S", "90.0")),
             scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
             scihub_tier_timeout_s=float(os.getenv("SCIHUB_TIER_TIMEOUT_S", "20.0")),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
-            brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 45.0),
-            brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),
+            brazil_browser_timeout_s=float(
+                os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "45.0")
+            ),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),
