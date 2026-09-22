@@ -45,5 +45,33 @@
     "collections": [
       "Guias e manuais"
     ]
+  },
+  "ms-portaria-aps-cofinanciamento-2025": {
+    "title": "Indicadores de cofinanciamento federal da APS — atualização 2025",
+    "description": "Atualização de 2025 dos indicadores de qualidade do cofinanciamento federal do Piso de Atenção Primária à Saúde (APS): componente fixo, blocos de acesso, cuidado e resolutividade, apuração quadrimestral e vínculo territorial.",
+    "file_path": "guidelines/indicadores_aps_cofinanciamento_2025.txt",
+    "keywords": "aps cofinanciamento indicadores 2025 atencao primaria piso qualidade portaria",
+    "source_url": "https://www.gov.br/saude/pt-br/composicao/saps",
+    "license": "Resumo técnico autoral — domínio público (CC0)",
+    "authors": [
+      "Ministério da Saúde"
+    ],
+    "collections": [
+      "Guias e manuais"
+    ]
+  },
+  "ms-vigilancia-enchentes-rs-2025": {
+    "title": "Vigilância em saúde nas enchentes do Rio Grande do Sul — doutrina de resposta 2024/2025",
+    "description": "Doutrina de vigilância em saúde para as enchentes no Rio Grande do Sul: sala de situação, leptospirose e doenças das águas, vigilância em abrigos, qualidade da água e recuperação da rede.",
+    "file_path": "guidelines/vigilancia_enchentes_rs_2025.txt",
+    "keywords": "enchentes vigilancia rio grande do sul leptospirose abrigos desastres vigiagua",
+    "source_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa",
+    "license": "Resumo técnico autoral — domínio público (CC0)",
+    "authors": [
+      "Ministério da Saúde"
+    ],
+    "collections": [
+      "Vigilância em saúde"
+    ]
   }
 }

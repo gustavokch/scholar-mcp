@@ -1,0 +1,53 @@
+Fonte: Ministério da Saúde, Secretaria de Atenção Primária à Saúde (SAPS) — página oficial da APS
+URL: https://www.gov.br/saude/pt-br/composicao/saps
+Extraído em: 2026-09-21
+Licença: Resumo técnico autoral — domínio público (CC0)
+
+INDICADORES DE COFINANCIAMENTO FEDERAL DA APS — ATUALIZAÇÃO 2025
+Resumo técnico da metodologia de cofinanciamento federal do Piso de Atenção
+Primária à Saúde (APS) com a atualização de 2025 dos indicadores de qualidade.
+
+1. CONTEXTO
+A Portaria GM/MS nº 3.493, de 10 de abril de 2024, instituiu a nova metodologia
+de cofinanciamento federal do Piso de Atenção Primária à Saúde no âmbito do
+Sistema Único de Saúde (SUS), com componente fixo para manutenção das equipes
+de Saúde da Família (eSF) e das equipes de Atenção Primária (eAP), além do
+componente de qualidade vinculado a indicadores. A atualização de 2025 detalha
+os indicadores de qualidade que condicionam parte do repasse: cobertura de
+acompanhamento territorial, captação ponderada, e desempenho em indicadores
+de acesso, cuidado e resolutividade na APS.
+
+2. COMPONENTE FIXO (2025)
+Manutenção das eSF, eAP, equipes de Saúde Bucal (eSB) e recursos de implantação,
+com valores per capita ajustados pela vulnerabilidade socioeconômica do
+território e pelo porte populacional do município, conforme a regra de 2024
+mantida em 2025.
+
+3. INDICADORES DE QUALIDADE — ATUALIZAÇÃO 2025
+Os indicadores de 2025 organizam-se em três blocos. Bloco acesso: proporção de
+gestantes com pelo menos seis consultas de pré-natal iniciadas até a 12ª semana,
+cobertura de acompanhamento de pessoas com hipertensão e diabetes. Bloco
+cuidado: cobertura vacinal de crianças menores de dois anos, rastreamento de
+câncer de colo do útero e de mama na população-alvo. Bloco resolutividade:
+proporção de encaminhamentos regulados concluídos, acompanhamento de saúde
+mental na APS e registro qualificado no prontuário eletrônico (e-SUS APS).
+Cada indicador possui meta municipal, peso e regra de apuração quadrimestral
+publicados nos manuais operacionais da SAPS.
+
+4. APURAÇÃO E REPASSE
+A apuração é quadrimestral a partir dos sistemas de informação da Atenção
+Primária (SISAB/e-SUS APS). O resultado por indicador compõe o índice sintético
+de qualidade do município, que multiplica a parcela variável do Piso de APS.
+Municípios sem alimentação regular dos sistemas recebem a parcela variável
+zerada no quadrimestre, mantido o componente fixo.
+
+5. VÍNCULO E ACOMPANHAMENTO TERRITORIAL
+O vínculo da população às equipes e o acompanhamento territorial contínuo
+seguem como condição estruturante: cadastro individualizado, visita domiciliar
+dos agentes comunitários de saúde e atualização cadastral permanente.
+
+6. ONDE CONSULTAR
+Manuais operacionais e notas técnicas da SAPS na página oficial da Atenção
+Primária à Saúde do Ministério da Saúde (ver URL acima). Este arquivo é um
+resumo técnico para recuperação por título; o texto oficial vigente está nos
+atos publicados no Diário Oficial da União.
