@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import re
 from bs4 import BeautifulSoup
@@ -169,7 +170,22 @@ class MedicalPubMedClient:
         cache_key = f"pubmed:search:{query}:{max_results}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            return [MedicalArticle.from_dict(d) for d in cached_data], meta
+            # Row shape carries the ladder's relaxed_query (finding 4): a
+            # bare list is a pre-change row (the variant that answered it is
+            # not recoverable), read as relaxed_query=None rather than
+            # bumping the key -- the variant is diagnostic, not load-bearing,
+            # so serving a legacy row without it is an honest degrade, not a
+            # wrong answer the way brazil_moh's has_full_text was.
+            if isinstance(cached_data, dict):
+                articles_data = cached_data.get("articles", [])
+                cached_relaxed_query = cached_data.get("relaxed_query")
+            else:
+                articles_data = cached_data
+                cached_relaxed_query = None
+            return (
+                [MedicalArticle.from_dict(d) for d in articles_data],
+                dataclasses.replace(meta, relaxed_query=cached_relaxed_query),
+            )
 
         idlist, errored = await self._esearch(query, max_results)
         if errored:
@@ -228,7 +244,10 @@ class MedicalPubMedClient:
 
         await self.cache.set(
             cache_key,
-            [a.to_dict() for a in final_articles],
+            {
+                "articles": [a.to_dict() for a in final_articles],
+                "relaxed_query": relaxed_query,
+            },
             source="pubmed",
         )
         return final_articles, CacheMetadata(
