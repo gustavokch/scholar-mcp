@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (
+    CACHE_SCHEMA,
     GOVBR_HEADERS,
     SEVEN_DAYS_SECONDS,
     is_login_redirect,
@@ -408,7 +409,7 @@ class GovBrAZEngine:
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        cache_key = f"govbr_az_search:{limit}:{query_norm}"
+        cache_key = f"govbr_az_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and isinstance(cached_data, list):
             return [BrazilGuideline.from_dict(d) for d in cached_data], meta

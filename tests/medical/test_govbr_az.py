@@ -487,3 +487,31 @@ def test_build_alias_text_compiled_matches_the_uncompiled_helper():
     assert build_alias_text_compiled(
         title, compile_alias_patterns(aliases)
     ) == build_alias_text(title, aliases)
+
+
+async def test_az_search_pre_v1_cache_row_is_not_served(tmp_path, responses):
+    """Same rule as the PCDT engine: an un-versioned row predates
+    ``has_full_text`` and must not be served as current."""
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        await engine.refresh_catalog()
+        stale_row = [
+            {
+                "title": "Manual Tuberculose",
+                "record_id": "govbr-svsa-tuberculose-manual-tuberculose",
+                "document_url": "https://www.gov.br/x/manual-tuberculose/@@download/file",
+            }
+        ]
+        await engine.cache.set(
+            f"govbr_az_search:5:{normalize_text('tuberculose')}",
+            stale_row,
+            source="govbr_az",
+        )
+
+        results, meta = await engine.search("tuberculose", limit=5)
+
+        assert meta.cached is False
+        assert results[0].record_id == "govbr-svsa-tuberculose-manual-tuberculose"
+        assert results[0].has_full_text is True
+    finally:
+        await engine.cache.close()
