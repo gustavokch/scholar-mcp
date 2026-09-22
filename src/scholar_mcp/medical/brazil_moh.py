@@ -590,6 +590,22 @@ def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+def _classify_failure(failure: Any) -> BvsErrorKind:
+    """Map an ``AsyncHttpClient`` failure onto a ``BvsErrorKind``.
+
+    403 -> cdn_challenge, 5xx -> origin_outage, transport-kind failures ->
+    timeout, anything else -> backend_error.
+    """
+    status = getattr(failure, "status", None)
+    if status == 403:
+        return "cdn_challenge"
+    if status is not None and 500 <= status < 600:
+        return "origin_outage"
+    if getattr(failure, "kind", "") == "transport":
+        return "timeout"
+    return "backend_error"
+
+
 class BrazilMoHEngine:
     """Search and full-text retrieval for Brazilian MoH publications."""
 
@@ -640,20 +656,16 @@ class BrazilMoHEngine:
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            status = getattr(failure, "status", None)
-            state.http_status = status
-            if status == 403:
+            state.http_status = getattr(failure, "status", None)
+            kind = _classify_failure(failure)
+            state.error_kind = kind
+            if kind == "cdn_challenge":
                 state.bvs_shielded = True
                 state.challenge_hit = True
-                state.error_kind = "cdn_challenge"
-            elif status is not None and 500 <= status < 600:
+            elif kind == "origin_outage":
                 state.bvs_origin_down = True
-                state.error_kind = "origin_outage"
-            elif getattr(failure, "kind", "") == "transport":
+            elif kind == "timeout":
                 state.bvs_timed_out = True
-                state.error_kind = "timeout"
-            else:
-                state.error_kind = "backend_error"
             return [], True
 
         state.http_status = resp.status_code
@@ -1451,14 +1463,7 @@ class BrazilMoHEngine:
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            status = getattr(failure, "status", None)
-            if status == 403:
-                return None, "cdn_challenge"
-            if status is not None and 500 <= status < 600:
-                return None, "origin_outage"
-            if getattr(failure, "kind", "") == "transport":
-                return None, "timeout"
-            return None, "backend_error"
+            return None, _classify_failure(failure)
         try:
             data = resp.json()
         except ValueError:
@@ -1513,14 +1518,7 @@ class BrazilMoHEngine:
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            status = getattr(failure, "status", None)
-            if status == 403:
-                return "", "cdn_challenge"
-            if status is not None and 500 <= status < 600:
-                return "", "origin_outage"
-            if getattr(failure, "kind", "") == "transport":
-                return "", "timeout"
-            return "", "backend_error"
+            return "", _classify_failure(failure)
         if not _is_allowed_host(str(resp.url)):
             logger.info(
                 "brazil_moh full text redirected off the allowed hosts (%s)",
