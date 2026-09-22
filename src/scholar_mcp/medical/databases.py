@@ -145,17 +145,22 @@ class MedicalDatabasesEngine:
             self._search_cochrane(query),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        pubmed_res, trials_res, cochrane_res = results
 
         papers: list[dict[str, Any]] = []
         errored = False
         relaxed_query: str | None = None
-        for idx, res in enumerate(results):
+        for name, res in (
+            ("pubmed", pubmed_res),
+            ("trials", trials_res),
+            ("cochrane", cochrane_res),
+        ):
             if isinstance(res, BaseException):
                 # gather returned the exception instead of a result
                 logger.warning("Medical database sub-search raised", exc_info=res)
                 errored = True
                 continue
-            if idx == 0 and res[1].relaxed_query:
+            if name == "pubmed" and res[1].relaxed_query:
                 # The PubMed leg walked the relaxation ladder past the
                 # original query; surface which variant answered.
                 relaxed_query = res[1].relaxed_query

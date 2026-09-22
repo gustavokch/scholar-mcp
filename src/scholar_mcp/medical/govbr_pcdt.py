@@ -204,7 +204,7 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         has_full_text=has_retrievable_body(
             document_url,
             fallback_text=item.get("description", ""),
-            url_trusted=bool(document_url),
+            url_trusted=True,
         ),
         source="brazil-moh",
         abstract=item.get("description", ""),
