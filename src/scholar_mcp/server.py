@@ -662,7 +662,7 @@ if settings.enable_medical_tools:
             )
             payload = format_brazil_moh_guidelines(guidelines, query, meta)
             payload["diagnostics"] = {
-                "error_kind": meta.error_kind or ("ok" if guidelines else "successful_empty"),
+                "error_kind": meta.error_kind or "unknown",
                 "http_status": meta.http_status,
                 "challenge_hit": meta.challenge_hit,
                 "cache_hit": meta.cached,
