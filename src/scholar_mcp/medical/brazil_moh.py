@@ -75,7 +75,7 @@ from scholar_mcp.medical.ranking import (
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
-from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
 from scholar_mcp.utils.text import truncate_content
 
 _BVS_HOST = "pesquisa.bvsalud.org"
@@ -150,16 +150,14 @@ _BVS_OUTAGE_MARKERS = (
     "gateway timeout",
 )
 
-# Machine-readable failure taxonomy for the §2 contract. "ok" means records
+# Machine-readable failure taxonomy for the §2 contract, defined in
+# sqlite_cache.py next to ``CacheMetadata.error_kind``. "ok" means records
 # were returned; "successful_empty" means the endpoint answered cleanly and
 # there is genuinely nothing matching (not a failure). "cdn_challenge" is a
 # Bunny/CDN shield 403 or block-HTML page (retryable once via the browser
 # path); "origin_outage" is a 5xx or origin error page (no retry, no breaker
 # count, never cached); "timeout" is a stage/chain/transport timeout;
 # "backend_error" is anything else.
-BvsErrorKind = Literal[
-    "ok", "successful_empty", "cdn_challenge", "origin_outage", "timeout", "backend_error"
-]
 
 # Raised abstract cap (S2.1): shaped hits must carry a decidable body, and
 # the old downstream previews truncated well below what the source provides.
@@ -228,7 +226,7 @@ class _SearchState:
     bvs_timed_out: bool = False
     http_status: int | None = None
     challenge_hit: bool = False
-    error_kind: str = ""
+    error_kind: BvsErrorKind | Literal[""] = ""
     stages_attempted: int = 0
     overfetch_window: int = 0
 
@@ -1434,7 +1432,9 @@ class BrazilMoHEngine:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
             return []
 
-    async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, str | None]:
+    async def _lookup_record(
+        self, record_id: str
+    ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
         """Resolve one record by its Solr id. Returns (record, error_kind).
 
         Second element is a ``BvsErrorKind`` on failure and ``None`` on
@@ -1480,7 +1480,9 @@ class BrazilMoHEngine:
             return None, None
         return _build_record(docs[0]), None
 
-    async def _extract_pdf_text(self, document_url: str) -> tuple[str, str | None]:
+    async def _extract_pdf_text(
+        self, document_url: str
+    ) -> tuple[str, BvsErrorKind | None]:
         """Fetch and extract the document PDF. Returns (text, error_kind).
 
         ``error_kind`` is a ``BvsErrorKind`` on failure and ``None`` on
@@ -1788,7 +1790,7 @@ class BrazilMoHEngine:
             self._serve_full_text(payload, max_chars),
             CacheMetadata(
                 cached=False, cache_age=0, error=False,
-                error_kind=error_kind if errored else "ok",
+                error_kind=error_kind or "ok",
             ),
         )
 

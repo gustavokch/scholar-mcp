@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 
@@ -23,19 +23,24 @@ CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries(created_at, ttl_se
 CREATE INDEX IF NOT EXISTS idx_cache_lru ON cache_entries(last_accessed);
 """
 
+# Engine diagnostics contract (ENAMED 2026 misses, track B §2), currently
+# populated by the BVS (brazil_moh) engine on its search path. Lives here,
+# next to ``CacheMetadata``, rather than in brazil_moh.py, so this generic
+# cache module does not need a reverse import from a specific medical
+# engine. ``origin_outage`` must not count against any caller-side breaker.
+BvsErrorKind = Literal[
+    "ok", "successful_empty", "cdn_challenge", "origin_outage", "timeout", "backend_error"
+]
+
 
 @dataclass
 class CacheMetadata:
     cached: bool
     cache_age: int
     error: bool = False
-    # Engine diagnostics contract (ENAMED 2026 misses, track B §2). All
-    # defaulted so every existing constructor keeps working; the BVS engine
-    # populates them on the search path. ``error_kind`` is one of "ok",
-    # "successful_empty", "cdn_challenge", "origin_outage", "timeout",
-    # "backend_error" ("" when the producer predates the contract).
-    # ``origin_outage`` must not count against any caller-side breaker.
-    error_kind: str = ""
+    # All defaulted so every existing constructor keeps working; "" means
+    # the producer predates the contract (or is a non-BVS engine).
+    error_kind: BvsErrorKind | Literal[""] = ""
     http_status: int | None = None
     challenge_hit: bool = False
     timeout: bool = False
