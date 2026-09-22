@@ -38,6 +38,45 @@ def test_pubmed_query_builder_applies_filters():
 
 
 @respx.mock
+async def test_pubmed_search_surfaces_relaxed_variant(client):
+    """finding 3: relax=True defaults on the scholar path with no metadata
+    channel, so a relaxed answer is indistinguishable from an exact one.
+    The full query returns no hits; a relaxed variant does; the caller must
+    be able to see which variant actually answered.
+    """
+    respx.get(url__startswith=ESEARCH).mock(
+        side_effect=[
+            httpx.Response(200, json={"esearchresult": {"idlist": []}}),
+            httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}}),
+        ]
+    )
+    respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["32000000"],
+                    "32000000": {
+                        "title": "A Relaxed Paper",
+                        "authors": [{"name": "Doudna J"}],
+                        "pubdate": "2020 Mar",
+                        "fulljournalname": "Nature",
+                    },
+                }
+            },
+        )
+    )
+    provider = PubMedProvider(client, Settings())
+    results = await provider.search(
+        "novel therapeutic approaches for treating diabetes mellitus type",
+        num_results=5,
+    )
+    assert len(results) == 1
+    assert provider.last_relaxed_query is not None
+    assert provider.last_relaxed_query != "novel therapeutic approaches for treating diabetes mellitus type"
+
+
+@respx.mock
 async def test_pubmed_search_returns_metadata(client):
     esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})

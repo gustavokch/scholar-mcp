@@ -26,6 +26,14 @@ class PubMedProvider:
     # invisible to a concurrent request sharing this singleton provider.
     last_error: str | None = ContextScoped(lambda: None)
 
+    # Set to the relaxed variant that produced hits when the full query
+    # returned none and relax=True walked the ladder; None when the full
+    # query answered directly or relax=False. The resolver reads this so
+    # search_papers can tell the caller it answered a different question
+    # than the one asked (finding 3: relax=True with no metadata channel
+    # made a relaxed answer indistinguishable from an exact one).
+    last_relaxed_query: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient, settings: Settings | None = None) -> None:
         self.http_client = http_client
         self.settings = settings or Settings.load()
@@ -79,6 +87,7 @@ class PubMedProvider:
     ) -> list[PaperMetadata]:
         term = self.build_query(query, author, journal, year_start, year_end)
         self.last_error = None
+        self.last_relaxed_query = None
         search_params: dict[str, Any] = {
             **self._base_params(),
             "db": "pubmed",
@@ -127,6 +136,7 @@ class PubMedProvider:
                         return []
                     id_list = step_resp.json().get("esearchresult", {}).get("idlist", [])
                     if id_list:
+                        self.last_relaxed_query = variant
                         break
             if not id_list:
                 return []

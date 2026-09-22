@@ -115,11 +115,15 @@ async def search_papers(
         # ContextScoped attribute — embedding it would let a later request
         # mutate what this call returned.
         snapshot = dict(sources)
-        return {
+        envelope: dict[str, Any] = {
             "papers": payload[:clamped_num],
             "sources": snapshot,
             "degraded": any(v in ("blocked", "failed") for v in snapshot.values()),
         }
+        relaxed_query = getattr(resolver, "last_relaxed_query", None)
+        if relaxed_query is not None:
+            envelope["relaxed_query"] = relaxed_query
+        return envelope
     except Exception as ex:
         return {
             "papers": [],

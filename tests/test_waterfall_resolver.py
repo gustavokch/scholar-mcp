@@ -367,6 +367,29 @@ async def test_disabled_s2_is_not_reported_as_empty():
     assert r.last_search_sources == {"s2": "disabled"}
 
 
+async def test_search_carries_pubmed_relaxed_variant_into_resolver(monkeypatch):
+    """finding 3: the resolver must surface which variant answered so
+    search_papers can tell the caller it answered a relaxed query."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    paper = PaperMetadata(title="A", pmid="1")
+
+    async def fake_search(*args, **kwargs):
+        r.pubmed.last_relaxed_query = "novel therapeutic approaches"
+        return [paper]
+
+    r.pubmed.search = fake_search
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_relaxed_query == "novel therapeutic approaches"
+
+
+async def test_search_relaxed_variant_none_when_full_query_answers():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[PaperMetadata(title="A", pmid="1")])
+    r.pubmed.last_relaxed_query = None
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_relaxed_query is None
+
+
 async def test_last_search_sources_is_per_request():
     """The resolver is a module-level singleton in server.py, so two concurrent
     MCP calls share the instance. Each must read back only its own map.

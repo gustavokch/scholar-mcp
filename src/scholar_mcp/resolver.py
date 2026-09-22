@@ -45,6 +45,12 @@ class WaterfallResolver:
     # otherwise overwrite each other's map between the write and the read.
     last_search_sources: dict[str, SourceStatus] = ContextScoped(dict)
 
+    # The relaxed variant that answered ``search()``'s PubMed call, or None
+    # when the full query answered directly. Same contract as
+    # PubMedProvider.last_relaxed_query, carried into the search_papers
+    # envelope (finding 3).
+    last_relaxed_query: str | None = ContextScoped(lambda: None)
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -436,6 +442,7 @@ class WaterfallResolver:
         limit = min(num_results, 50)
         source_mode = source.lower().strip()
         self.last_search_sources = {}
+        self.last_relaxed_query = None
 
         # Compute candidate pool depth if reranking is enabled
         should_rerank = rerank and self.settings.ranking_enabled
@@ -465,6 +472,7 @@ class WaterfallResolver:
                     sort="relevance",
                 ),
             )
+            self.last_relaxed_query = self.pubmed.last_relaxed_query
         elif source_mode == "crossref":
             papers = await self._run_backend(
                 "crossref",
@@ -509,6 +517,7 @@ class WaterfallResolver:
                     sort="relevance",
                 ),
             )
+            self.last_relaxed_query = self.pubmed.last_relaxed_query
             # 2. Top up from CrossRef only when PubMed left the requested
             # page short (fewer than `limit`, not `fetch_limit`): a
             # satisfied page must not pay a CrossRef round-trip whose
