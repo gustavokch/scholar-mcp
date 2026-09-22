@@ -354,3 +354,38 @@ def test_format_brazil_moh_guidelines_fulltext_retrievability_note():
     assert "hosted off-site" not in res_card["markdown"]
 
 
+
+
+def test_has_retrievable_body_one_rule_across_converters():
+    """The BVS, PCDT, and A-Z converters share one has_full_text rule
+    (medical.models.has_retrievable_body): a document URL or fallback text
+    means a body, neither means a body-less card."""
+    from scholar_mcp.medical.brazil_moh import _build_record
+    from scholar_mcp.medical.govbr_az import _dict_to_guideline as az_convert
+    from scholar_mcp.medical.govbr_pcdt import _dict_to_guideline as pcdt_convert
+
+    url = "https://www.gov.br/saude/doc.pdf"
+    # Document URL, no text.
+    assert _build_record({"id": "bvs-u", "ur": [url]}).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-u", "title": "U", "download_url": url}
+    ).has_full_text is True
+    assert az_convert(
+        {"record_id": "az-u", "title": "U", "tree": "svsa", "download_url": url}
+    ).has_full_text is True
+    # Fallback text, no URL.
+    assert _build_record({"id": "bvs-t", "ab": ["Resumo."]}).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-t", "title": "T", "description": "Resumo."}
+    ).has_full_text is True
+    assert az_convert(
+        {"record_id": "az-t", "title": "T", "tree": "svsa", "description": "Resumo."}
+    ).has_full_text is True
+    # Neither: body-less card on all three paths.
+    assert _build_record({"id": "bvs-n", "ti": ["Ficha"]}).has_full_text is False
+    assert pcdt_convert(
+        {"record_id": "pcdt-n", "title": "N"}
+    ).has_full_text is False
+    assert az_convert(
+        {"record_id": "az-n", "title": "N", "tree": "svsa"}
+    ).has_full_text is False

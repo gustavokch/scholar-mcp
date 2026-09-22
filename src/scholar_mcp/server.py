@@ -135,9 +135,14 @@ def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, An
 
     The format_* functions already surface FETCH_ERROR_NOTE in the markdown;
     this adds the key zimqa and other machine consumers read directly.
+    The relaxation variant that answered is surfaced alongside it: without
+    this reader the relaxed_query the engines compute never reaches a
+    caller-visible field.
     """
     if meta.error:
         payload["degraded"] = True
+    if meta.relaxed_query is not None:
+        payload["relaxed_query"] = meta.relaxed_query
     return payload
 
 
@@ -601,7 +606,7 @@ if settings.enable_medical_tools:
             handle: IRIS handle — bare ("10665/311551"), "hdl:"-prefixed, or the
                 full landing-page URL. Handles are returned by
                 search_who_iris_guidelines as `handle`.
-            max_chars: Maximum character limit for the returned text (defaults to 600,000).
+            max_chars: Maximum character limit for the returned text (defaults to 50,000).
             query: Optional topic terms: returns the 2k head plus the top-scoring
                 passages within max_chars, with their offsets in `passages`.
             offset: Character offset for paging through a long body
@@ -671,7 +676,7 @@ if settings.enable_medical_tools:
             record_id: The `record_id` field returned by
                 search_brazil_moh_guidelines (e.g. 'biblio-1701387').
             max_chars: Maximum character limit for the returned text
-                (defaults to 600,000, which is also the ceiling).
+                (defaults to 50,000; capped at the 600,000 storage ceiling).
             query: Optional topic terms: returns the 2k head plus the top-scoring
                 passages within max_chars, with their offsets in `passages`.
             offset: Character offset for paging through a long body

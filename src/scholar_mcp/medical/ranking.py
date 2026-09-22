@@ -203,8 +203,10 @@ def rank_brazil_guidelines(
     relevance-sorted list, which is the condition that prior is meant for.
 
     Records with no retrievable body (``has_full_text`` false) keep their
-    title signal but score halved, so body-less catalog cards sink below
-    any record with a body without disappearing from the result set.
+    title signal but score halved, and then sort into a second tier behind
+    every record with a body: halving alone cannot guarantee that gate for
+    arbitrary score spreads, so the tier holds it by construction. Cards
+    never disappear from the result set.
     """
     ranked = _rank_records(
         guidelines,
@@ -223,4 +225,12 @@ def rank_brazil_guidelines(
                 g.score *= NO_FULL_TEXT_SCORE_FACTOR
         # Stable re-sort: equal scores keep the lexical/source order above.
         ranked.sort(key=lambda g: (g.score is None, -(g.score or 0.0)))
+        # Tier by construction: a multiplicative factor cannot sink a
+        # body-less card below every body record for arbitrary score
+        # spreads, so body-less records sort into a second tier after the
+        # scored sort. Stable within tiers; scores stay damped, never
+        # dropped, so title signal survives.
+        ranked = [g for g in ranked if g.has_full_text] + [
+            g for g in ranked if not g.has_full_text
+        ]
     return ranked

@@ -303,6 +303,47 @@ async def test_search_clinical_guidelines_l1_ladder_bounded(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_clinical_guidelines_l1_step_cap(tmp_path: Path, monkeypatch):
+    """Layer 1 sends at most 1 + MAX_RELAX_EXTRA_CALLS esearch calls even
+    when the ladder is longer than the budget. The client-side slice does
+    not protect this self-walked path, so the cap lives on the loop."""
+    from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    # A wider schedule than the budget allows: without the explicit cap L1
+    # would walk all six entries.
+    monkeypatch.setattr(
+        "scholar_mcp.medical.query_relax.RELAX_WINDOW_SIZES", (7, 6, 5, 4, 3)
+    )
+    query = "alpha beta gamma delta epsilon zeta eta theta"
+    assert len(relax_ladder(query)) == 6
+    try:
+        # Always return zero hits so the ladder runs to its capped end.
+        respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(query)
+        l1_terms = [
+            c.request.url.params.get("term", "")
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+            and "[pt]" in c.request.url.params.get("term", "")
+        ]
+        assert len(l1_terms) == 1 + MAX_RELAX_EXTRA_CALLS
+        assert l1_terms[0].startswith(f"({relax_ladder(query)[0]}) AND (")
+        assert guidelines == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(tmp_path: Path):
     """L1 accumulates articles across relaxation steps. If a relaxed step
     returns a pmid that a stricter step already produced, the same article

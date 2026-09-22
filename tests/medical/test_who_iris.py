@@ -607,6 +607,36 @@ async def test_get_full_text_truncates_served_content_not_cached(tmp_path: Path,
 
 
 @respx.mock
+async def test_get_full_text_default_serves_serving_budget_not_ceiling(
+    tmp_path: Path, monkeypatch
+):
+    """A plain call (max_chars=None) serves the shared serving default, not
+    the 600k storage ceiling, for a body longer than the default."""
+    from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import scholar_mcp.medical.who_iris as who_iris_mod
+        monkeypatch.setattr(
+            who_iris_mod, "pdf_bytes_to_text", lambda b: "x" * 120_000
+        )
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([_bundle()]))
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream()]))
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-1/content").respond(content=b"%PDF-fake")
+
+        payload, _ = await engine.get_full_text("10665/311551", max_chars=None)
+        assert payload["total_chars"] == 120_000
+        assert payload["truncated"] is True
+        assert len(payload["content"]) <= DEFAULT_SERVING_CHARS + 100
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_get_full_text_requests_full_page_size(tmp_path: Path):
     """Bundles/bitstreams lists must request the full DSpace page size, not the default 20."""
     engine, cache, http_client = await _engine(tmp_path)

@@ -539,7 +539,7 @@ async def test_pubmed_client_relaxes_long_query_to_first_hit(tmp_path: Path):
     try:
         def _router(request: httpx.Request) -> httpx.Response:
             term = request.url.params.get("term", "")
-            # Full query and 6-token prefix stay empty; 5-token prefix hits.
+            # Full query stays empty; 5-token prefix hits.
             if len(term.split()) > 5:
                 return httpx.Response(200, json={"esearchresult": {"idlist": []}})
             return httpx.Response(200, json={"esearchresult": {"idlist": ["888"]}})
@@ -551,12 +551,14 @@ async def test_pubmed_client_relaxes_long_query_to_first_hit(tmp_path: Path):
         assert len(articles) == 1
         assert meta.error is False
         expected = relax_ladder(query)
-        assert meta.relaxed_query == expected[2]
+        # Full -> 5 -> 4 -> 3 fits the 3-call budget, so every rung is
+        # reachable and the first relaxed variant answers.
+        assert meta.relaxed_query == expected[1]
         assert len(meta.relaxed_query.split()) == 5
-        # Initial + 6-token + 5-token: stopped at the first hit, the 4- and
+        # Initial + 5-token: stopped at the first hit, the 4- and
         # 3-token variants were never sent.
-        assert len(respx.calls) == 4  # 3 esearch + 1 efetch
-        assert len(_esearch_terms()) == 3
+        assert len(respx.calls) == 3  # 2 esearch + 1 efetch
+        assert len(_esearch_terms()) == 2
     finally:
         await cache.close()
         await http_client.aclose()

@@ -1008,7 +1008,8 @@ async def test_pubmed_search_relaxes_long_query_preserving_filters(client):
     terms = [c.request.url.params.get("term", "") for c in esearch_route.calls]
     assert len(terms) == 2
     assert "theta" in terms[0] and '"Doudna J"[Author]' in terms[0]
-    assert terms[1].startswith("alpha beta gamma delta epsilon zeta")
+    assert terms[1].startswith("alpha beta gamma delta epsilon")
+    assert "zeta" not in terms[1]
     assert '"Doudna J"[Author]' in terms[1]
     assert "theta" not in terms[1]
 

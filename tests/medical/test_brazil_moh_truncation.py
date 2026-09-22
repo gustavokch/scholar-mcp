@@ -12,6 +12,7 @@ from scholar_mcp.medical.brazil_moh import (
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
 )
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -85,7 +86,7 @@ async def test_over_ceiling_reports_total_chars_with_max_chars(tmp_path: Path, m
 
 
 @respx.mock
-async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
+async def test_default_serves_serving_budget_not_ceiling(
     tmp_path: Path, monkeypatch
 ):
     full = "x" * 620000
@@ -106,9 +107,10 @@ async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
         )
         payload, _ = await engine.get_full_text("biblio-1", max_chars=None)
         assert payload["total_chars"] == 620000
-        # Ceiling binds: over-ceiling content is truncated even with no limit.
+        # The default serves the serving budget, not the storage ceiling:
+        # a plain get_full_text call must not return 600k chars.
         assert payload["truncated"] is True
-        assert len(payload["content"]) <= MAX_FULL_TEXT_CHARS + 100
+        assert len(payload["content"]) <= DEFAULT_SERVING_CHARS + 100
     finally:
         await cache.close()
         await http_client.aclose()

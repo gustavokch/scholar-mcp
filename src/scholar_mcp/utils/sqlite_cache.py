@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +31,10 @@ class CacheMetadata:
     error: bool = False
     # The relaxed variant that produced the results, when a PubMed-backed
     # search walked the query-relaxation ladder past the original query.
-    # None when the original query sufficed or nothing was found.
+    # None when the original query sufficed or nothing was found. Surfaced
+    # in the MCP tool envelope by server._with_degraded so the caller can
+    # see the ladder worked.
     relaxed_query: str | None = None
-    # Per-backend search status snapshot ("ok"/"empty"/"blocked"/"failed"/
-    # "disabled") for the scholar path, filled from the resolver's
-    # last_search_sources so a zimqa envelope can say which backend answered.
-    sources: dict[str, str] = field(default_factory=dict)
 
 
 class SQLiteCacheManager:

@@ -41,7 +41,7 @@ def test_relax_ladder_long_query_schedule():
         "epstein barr virus infectious mononucleosis exudative tonsillitis "
         "posterior cervical lymphadenopathy rash adolescent"
     )
-    assert [len(q.split()) for q in ladder] == [12, 6, 5, 4, 3]
+    assert [len(q.split()) for q in ladder] == [12, 5, 4, 3]
 
 
 def test_relax_ladder_short_query_dedupes():

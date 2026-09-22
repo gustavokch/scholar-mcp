@@ -350,3 +350,25 @@ def test_rank_brazil_guidelines_bodyless_card_sinks_below_body():
     assert ranked[0].score is not None and ranked[1].score is not None
     assert ranked[1].score < ranked[0].score
     assert len(ranked) == 2
+
+
+def test_rank_brazil_guidelines_tier_holds_for_strong_bodiless_card():
+    """Enforcement, not just damping: a body-less card whose damped score
+    still beats a weak body record must nevertheless rank below it."""
+    guidelines = [
+        _guideline(
+            "Dengue manejo tratamento prevencao controle epidemia vigilancia",
+            year="2026",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline("Dengue", year="2005", record_id="body", has_full_text=True),
+    ]
+    ranked = rank_brazil_guidelines(
+        guidelines, "dengue manejo tratamento", current_year=2026
+    )
+    assert [g.record_id for g in ranked] == ["body", "card"]
+    assert ranked[0].score is not None and ranked[1].score is not None
+    # The card outscores the body even damped: only the tier puts it second.
+    assert ranked[1].score > ranked[0].score
+    assert len(ranked) == 2

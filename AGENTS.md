@@ -27,6 +27,8 @@ src/scholar_mcp/
 │   ├── models.py         # Medical data models
 │   ├── pediatrics.py     # Pediatric literature and guidelines engine
 │   ├── pubmed.py         # Dedicated medical PubMed client
+│   ├── query_relax.py    # Shared PubMed query-relaxation ladder (full → 5 → 4 → 3)
+│   ├── passages.py       # Shared passage/offset full-text serving for stored bodies
 │   ├── ranking.py        # Medical article ranking
 │   ├── rxnorm.py         # RxNorm drug nomenclature
 │   ├── who.py            # WHO GHO health statistics client

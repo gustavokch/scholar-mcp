@@ -90,6 +90,25 @@ async def test_search_papers_degraded_false_on_ok_or_empty(resolver):
     assert len(result["papers"]) == 1
 
 
+async def test_search_papers_envelope_carries_mixed_backend_map(resolver):
+    """The envelope must carry the per-backend map for a mixed
+    ok/blocked/empty run, not just the degraded flag: that map is how a
+    zimqa envelope says which backend answered."""
+    resolver.search.return_value = [PaperMetadata(title="A", doi="10.1/a")]
+    resolver.last_search_sources = {
+        "pubmed": "ok",
+        "crossref": "blocked",
+        "s2": "empty",
+    }
+    result = await srv.search_papers("dengue")
+    assert result["sources"] == {
+        "pubmed": "ok",
+        "crossref": "blocked",
+        "s2": "empty",
+    }
+    assert result["degraded"] is True
+
+
 async def test_brazil_moh_tool_marks_degraded_on_partial(monkeypatch):
     from scholar_mcp.medical.models import BrazilGuideline
     from scholar_mcp.utils.sqlite_cache import CacheMetadata

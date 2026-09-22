@@ -5,7 +5,7 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import WHOGuideline
-from scholar_mcp.medical.passages import serve_body
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS, serve_body
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
@@ -432,12 +432,14 @@ class WHOIRISEngine:
         query: str | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        # Same serving contract as BrazilMoHEngine: storage ceiling caps the
-        # serving budget, targeted reads use ``query`` (passages) or
-        # ``offset`` (paging), otherwise the head cut. Old cache rows predate
-        # ``total_chars`` and degrade to the stored length.
+        # Same serving contract as BrazilMoHEngine: the storage ceiling caps
+        # the serving budget from above, while a missing max_chars serves
+        # the shared serving default, not the ceiling. Targeted reads use
+        # ``query`` (passages) or ``offset`` (paging), otherwise the head
+        # cut. Old cache rows predate ``total_chars`` and degrade to the
+        # stored length.
         limit = (
-            MAX_FULL_TEXT_CHARS
+            DEFAULT_SERVING_CHARS
             if max_chars is None
             else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )

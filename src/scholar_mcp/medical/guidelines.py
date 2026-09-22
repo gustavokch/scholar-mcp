@@ -3,7 +3,7 @@ import re
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import ClinicalGuideline, GuidelineScore, MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
-from scholar_mcp.medical.query_relax import relax_ladder
+from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 GUIDELINE_PUBLICATION_TYPES = [
@@ -57,12 +57,6 @@ MIN_SCORE_THRESHOLD = 2.5
 LAYER_THRESHOLD = 5
 
 
-def _relaxed_queries(query: str) -> list[str]:
-    """Thin alias kept for backward compatibility; the schedule lives in
-    medical.query_relax.relax_ladder (ENAMED misses plan B1)."""
-    return relax_ladder(query)
-
-
 def _is_aap_journal(journal: str) -> bool:
     """True for the AAP's own journal family, false for lookalikes.
 
@@ -72,12 +66,6 @@ def _is_aap_journal(journal: str) -> bool:
     the start of the name rather than anywhere in it.
     """
     return journal.strip().lower().startswith("pediatrics")
-
-
-def _relaxed_queries(query: str) -> list[str]:
-    """Thin alias kept for backward compatibility; the schedule lives in
-    medical.query_relax.relax_ladder (ENAMED misses plan B1)."""
-    return relax_ladder(query)
 
 
 def extract_organization(article: MedicalArticle) -> str:
@@ -184,7 +172,11 @@ class GuidelinesEngine:
         seen_pmids: set[str] = set()
         errored = False
         relaxed_query: str | None = None
-        for step_idx, q in enumerate(relax_ladder(query)):
+        # Explicit step cap: this path walks the ladder itself, so the
+        # client-side MAX_RELAX_EXTRA_CALLS slice does not protect it. The
+        # slice keeps the full schedule available to callers with their own
+        # budget instead of shrinking relax_ladder for everyone.
+        for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
             articles_step, meta_step = await self.pubmed.search_articles(
                 f"({q}) AND ({pt_query})", max_results=20, relax=False
             )
@@ -214,7 +206,9 @@ class GuidelinesEngine:
         # Layer 2: Semantic keyword fallback if Layer 1 returned few results
         if len(candidates) < LAYER_THRESHOLD:
             kw_terms = " OR ".join(f"{kw}[tiab]" for kw in GUIDELINE_KEYWORDS[:5])
-            for step_idx, q in enumerate(relax_ladder(query)):
+            # Same explicit step cap as Layer 1: this walk is also
+            # self-driven, one NCBI request per step at 3 req/s.
+            for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
                 articles_l2, meta_l2 = await self.pubmed.search_articles(
                     f"({q}) AND ({kw_terms})", max_results=20, relax=False
                 )

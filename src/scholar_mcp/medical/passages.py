@@ -19,6 +19,13 @@ query relaxation on what a term means.
 from scholar_mcp.medical.query_relax import content_overlap_count
 from scholar_mcp.utils.text import truncate_content
 
+# Default serving budget when the caller passes ``max_chars=None``. Engines
+# store up to their own MAX_FULL_TEXT_CHARS ceiling (600k) so passage and
+# offset reads can reach deep sections, but a plain call serves only this
+# head budget -- the pre-PR default. Storage and serving are deliberately
+# different numbers; see _serve_full_text in brazil_moh.py and who_iris.py.
+DEFAULT_SERVING_CHARS = 50_000
+
 # Verbatim head always returned in query mode: the title, abstract, and
 # front matter carry the document's identity even when the answer sits far
 # below. Windows are drawn from the body past this point, so head text is

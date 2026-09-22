@@ -278,3 +278,32 @@ class BrazilGuideline:
             return cls()
         fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**fields)
+
+
+def has_retrievable_body(
+    document_url: str = "",
+    fulltext_id: str = "",
+    fallback_text: str = "",
+    *,
+    url_trusted: bool = False,
+) -> bool:
+    """Single rule behind ``BrazilGuideline.has_full_text``.
+
+    A body counts as retrievable when any of these holds:
+
+    * ``fulltext_id``: a fi-admin fulltext view (BVS ``ur``-derived). Gov.br
+      catalog ids are not views, so those callers leave this empty.
+    * ``fallback_text``: inline text served when no body is fetchable (the
+      BVS abstract, or the catalog description).
+    * ``document_url`` pointing at ``local:`` corpus text or at a host the
+      caller trusts (BVS: ``is_allowed_bvs_host``; gov.br catalog: every
+      download URL is a first-party Plone file URL).
+
+    Shared by ``brazil_moh._build_record`` and the gov.br PCDT/A-Z
+    converters so the B4 rank damping sees one input definition.
+    """
+    if fulltext_id or fallback_text:
+        return True
+    return bool(document_url) and (
+        document_url.startswith("local:") or url_trusted
+    )

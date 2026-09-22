@@ -16,12 +16,23 @@ around each relaxed variant.
 import re
 
 from scholar_mcp.medical.ranking import PORTUGUESE_STOPWORDS, normalize_portuguese
-from scholar_mcp.ranking import _STOPWORDS as ENGLISH_STOPWORDS
+
+# Declared locally rather than imported: the identically-named copy in
+# scholar_mcp.ranking is private to its module (see medical/ranking.py for
+# the documented pattern). The two sets are intentionally identical --
+# normalization has already reduced the text to ASCII here.
+ENGLISH_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "is",
+    "of", "on", "or", "the", "to", "with",
+})
 
 # Leading-token windows tried after the full query, longest first. Shorter
 # than 3 tokens a PubMed query is noise, so the schedule floors there; the
 # full query itself may be shorter and is always kept (floor 2 overall).
-RELAX_WINDOW_SIZES = (6, 5, 4, 3)
+# Three rungs, not four: MAX_RELAX_EXTRA_CALLS below allows three extra
+# esearch calls, so a fourth rung (e.g. a 6-token window) would be
+# structurally unreachable -- the budget, not the schedule, binds.
+RELAX_WINDOW_SIZES = (5, 4, 3)
 
 # At most this many extra esearch calls beyond the initial one. NCBI allows
 # 3 req/s unauthenticated, so the extra requests stay bounded.
@@ -53,8 +64,8 @@ def content_tokens(query: str) -> list[str]:
 
     Folding and the Portuguese stopword set are reused from
     ``medical.ranking`` so a term scored as substantive here is substantive
-    there too; the English stopword set is ``ScoringEngine``'s, so both
-    query languages relax the same way.
+    there too; the English stopword set is a local copy of
+    ``ScoringEngine``'s, so both query languages relax the same way.
     """
     norm = normalize_portuguese(normalize_query(query))
     tokens = [
@@ -72,11 +83,12 @@ def content_tokens(query: str) -> list[str]:
 
 
 def relax_ladder(query: str) -> list[str]:
-    """Successively relaxed variants: full, then 6/5/4/3 leading tokens.
+    """Successively relaxed variants: full, then 5/4/3 leading tokens.
 
-    Entries are deduplicated (a 5-token query yields ``[5, 4, 3]``, not
-    ``[5, 6, 5, 4, 3]``) and floored at 2 tokens, except that the full
-    query itself is always kept -- a 1-token query cannot relax further.
+    Entries are deduplicated (an 8-token query yields ``[8, 5, 4, 3]``, a
+    5-token query ``[5, 4, 3]``) and floored at 2 tokens, except that the
+    full query itself is always kept -- a 1-token query cannot relax
+    further.
     A query with no content tokens falls back to the normalized raw query
     so the caller still issues one attempt.
     """

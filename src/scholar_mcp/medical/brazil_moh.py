@@ -53,8 +53,8 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
-from scholar_mcp.medical.models import BrazilGuideline
-from scholar_mcp.medical.passages import serve_body
+from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS, serve_body
 from scholar_mcp.medical.ranking import (
     PORTUGUESE_STOPWORDS,
     normalize_portuguese,
@@ -404,17 +404,13 @@ def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
         fulltext_id=fulltext_id,
         # Body-less catalog cards (no `ur`, no `ab`) are shaped here too;
         # the flag lets ranking damp them instead of citing them as
-        # evidence (ENAMED misses plan B4).
-        has_full_text=bool(
-            fulltext_id
-            or abstract
-            or (
-                document_url
-                and (
-                    document_url.startswith("local:")
-                    or is_allowed_bvs_host(document_url)
-                )
-            )
+        # evidence (ENAMED misses plan B4). One shared rule with the gov.br
+        # converters: see medical.models.has_retrievable_body.
+        has_full_text=has_retrievable_body(
+            document_url,
+            fulltext_id=fulltext_id,
+            fallback_text=abstract,
+            url_trusted=is_allowed_bvs_host(document_url),
         ),
         abstract=abstract,
         year=year,
@@ -1235,14 +1231,15 @@ class BrazilMoHEngine:
         query: str | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        # ``max_chars`` is caller-supplied and is bounded on both sides:
-        # MAX_FULL_TEXT_CHARS is the storage ceiling and the serving cap, so
-        # a large value must not return an entire multi-megabyte manual in
-        # one response. Targeted reads use ``query`` (passages) or
-        # ``offset`` (paging); without either the response is today's head
-        # cut. See medical.passages.serve_body.
+        # ``max_chars`` is caller-supplied and stays clamped to the storage
+        # ceiling on the upper side; when it is None the serving default
+        # applies, not the ceiling, so a plain get_full_text call cannot
+        # return a whole multi-megabyte manual in one response. Targeted
+        # reads use ``query`` (passages) or ``offset`` (paging); without
+        # either the response is the serving-budget head cut.
+        # See medical.passages.serve_body.
         limit = (
-            MAX_FULL_TEXT_CHARS
+            DEFAULT_SERVING_CHARS
             if max_chars is None
             else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )
