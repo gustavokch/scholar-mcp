@@ -2213,23 +2213,32 @@ async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, mon
 async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
     """Worst case must stay inside the documented caller ceiling: a browser
     tier on a flat 40 s ceiling after stalled stages would outlive the chain.
-    The browser gets only the chain budget that is still left. The chain
-    budget here (20.5 s) stays just above the useful-launch floor
-    (``_CAMOUFOX_MIN_USEFUL_CEILING_S`` = 20.0) so the tier is attempted --
-    but is cut off at ~20.5 s by the outer ``wait_for``, not the flat 40 s.
+    The browser gets only the chain budget that is still left.
+
+    The useful-launch floor is lowered to 2.0 s for this test so the chain
+    budget can be 5.0 s: the real floor (20.0 s) forces a chain budget just
+    above it, which leaves under a second of wall clock for everything ahead
+    of the browser tier and turns a slow runner into a red test. Here the
+    margin is 3 s and the whole test costs ~5 s instead of ~20 s.
+
     The fake ``goto`` actually blocks past whatever timeout it is handed, so
     only the caller's own ``wait_for`` can end the call -- this makes
     ``elapsed`` a real measurement of the ceiling the guard computed, not a
-    vacuous one."""
+    vacuous one. A tier still running on the flat 40 s cap would blow the
+    upper bound.
+    """
     import time as _time
 
+    from scholar_mcp.medical import brazil_moh as _brazil_moh
+
+    monkeypatch.setattr(_brazil_moh, "_CAMOUFOX_MIN_USEFUL_CEILING_S", 2.0)
     settings = Settings(
         cache_ttl_seconds=3600,
         enable_browser_fallback=True,
         brazil_browser_fallback=True,
         request_timeout=5,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=20.5,
+        brazil_chain_timeout_s=5.0,
         brazil_browser_timeout_s=40.0,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
@@ -2293,9 +2302,9 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
             start = _time.monotonic()
             records, meta = await engine.search_guidelines("dengue", limit=10)
             elapsed = _time.monotonic() - start
-        # ...but only with the chain budget left: ~20.5 s ceiling, not 40 s.
+        # ...but only with the chain budget left: ~5 s ceiling, not 40 s.
         assert attempts == [True]
-        assert 19.0 <= elapsed <= 24.0, (
+        assert 4.0 <= elapsed <= 8.0, (
             f"browser tier did not stop at the chain budget: {elapsed:.1f}s"
         )
     finally:
