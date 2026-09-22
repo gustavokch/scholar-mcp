@@ -400,3 +400,27 @@ def test_rank_brazil_guidelines_damping_is_idempotent():
     second_scores = {g.record_id: g.score for g in second}
     assert first_scores == second_scores
 
+
+
+def test_rank_brazil_guidelines_factor_does_not_affect_order(monkeypatch):
+    """The tier partition, not the factor, decides order: with the factor
+    neutralized, body-less records still sort after every record with a
+    body and keep their relative order within the tier."""
+    from scholar_mcp.medical import ranking
+
+    body = _guideline("asma leve", record_id="body", has_full_text=True)
+    weak = _guideline("asma", record_id="weak", has_full_text=False)
+    strong = _guideline("asma leve conduta", record_id="strong", has_full_text=False)
+
+    baseline = [
+        g.record_id
+        for g in ranking.rank_brazil_guidelines([weak, strong, body], "asma leve conduta")
+    ]
+    monkeypatch.setattr(ranking, "NO_FULL_TEXT_SCORE_FACTOR", 1.0)
+    neutral = [
+        g.record_id
+        for g in ranking.rank_brazil_guidelines([weak, strong, body], "asma leve conduta")
+    ]
+
+    assert baseline == neutral
+    assert baseline[0] == "body"

@@ -20,9 +20,13 @@ DEFAULT_AGE_YEARS = 10.0
 SOURCE_POSITION_WEIGHT = 0.35
 
 # Score factor for a Brazilian guideline with no retrievable body (no
-# allowed-host/local document URL, no fulltext id, no abstract). Body-less
-# catalog cards still carry title signal, so they are damped, never
-# dropped -- but a damped card must sink below any record with a body.
+# allowed-host/local document URL, no fulltext id, no abstract). This is a
+# score annotation, not a ranking lever: rank_brazil_guidelines partitions
+# body-less records into a second tier after every record with a body, and
+# every body-less record takes the same factor, so changing this value
+# rescales the stored ``score`` without moving any record. Kept at the
+# spec's 0.5 (ENAMED misses plan B4) so ``score`` still tells a reader the
+# record was damped.
 NO_FULL_TEXT_SCORE_FACTOR = 0.5
 
 # Mirrors the private pattern in scholar_mcp.ranking. Declared locally rather
@@ -187,9 +191,9 @@ def rank_brazil_guidelines(
 
     Records with no retrievable body (``has_full_text`` false) keep their
     title signal but score halved, and then sort into a second tier behind
-    every record with a body: halving alone cannot guarantee that gate for
-    arbitrary score spreads, so the tier holds it by construction. Cards
-    never disappear from the result set.
+    every record with a body: the tier is the rule that enforces the gate,
+    the halving is a score annotation only. Cards never disappear from the
+    result set.
     """
     ranked = _rank_records(
         guidelines,
