@@ -115,6 +115,11 @@ def serve_body(
         head = body[:head_len]
         parts = [head]
         used = len(head)
+        # Tracked separately from ``used``: ``used`` bounds the serving
+        # budget and must include marker bytes, but ``truncated`` compares
+        # against real document length -- marker bytes are not body text
+        # and must not mask a body that was actually cut short (finding 10).
+        body_chars_served = len(head)
         passages: list[dict[str, int]] = []
         if used < limit:
             for score, win_offset, text in _rank_windows(
@@ -126,11 +131,12 @@ def serve_body(
                     break
                 parts.append(piece)
                 used += len(piece)
+                body_chars_served += len(text)
                 passages.append({"offset": win_offset, "score": score})
         content = "".join(parts)
         return {
             "content": content,
-            "truncated": len(content) < total,
+            "truncated": body_chars_served < total,
             "passages": passages,
         }
 

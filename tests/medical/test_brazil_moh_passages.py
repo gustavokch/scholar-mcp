@@ -243,3 +243,31 @@ def test_serve_body_offset_past_end_serves_empty_page():
     served = serve_body("abc", 3, 100, offset=999)
     assert served["content"] == ""
     assert served["truncated"] is False
+
+
+def test_serve_body_truncated_excludes_marker_chars_from_the_check():
+    """finding 10: ``truncated`` must compare served *body* characters
+    against ``total``, not ``len(content)`` -- the passage markers inflate
+    ``content`` without adding real body text, and a non-matching window
+    genuinely skipped must not be masked by that inflation."""
+    head = "cabecalho " * 5  # 50 chars, well under head_chars below
+    matching_window = "alvo " * 2  # 10 chars, shares a token with the query
+    non_matching_window = "outro texto sem relacao " * 60  # skipped: no overlap
+    body = head + matching_window + non_matching_window
+    # Chosen so real served body chars (head 50 + matched window text 9 = 59)
+    # sit below total, while len(content) with the offset marker (~34 chars)
+    # added sits above it -- the exact gap finding 10 describes.
+    total_chars = 80
+
+    served = serve_body(
+        body,
+        total_chars,
+        limit=1000,
+        query="alvo",
+        head_chars=len(head),
+        window_chars=len(matching_window),
+    )
+    # The marker text alone pushes len(content) past total even though the
+    # real served body chars fall short; assert on the real gap instead.
+    assert served["truncated"] is True
+
