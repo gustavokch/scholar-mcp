@@ -1189,7 +1189,7 @@ async def test_extract_pdf_text_headers_by_hostname(tmp_path, monkeypatch):
         text, errored = await engine._extract_pdf_text(
             "https://docs.bvsalud.org/x?ref=gov.br"
         )
-        assert errored is False
+        assert errored is None
         assert text == "texto"
         sent = respx.calls.last.request.headers
         # User-Agent is identical in both header sets; Accept is GOVBR-only.
@@ -1217,9 +1217,35 @@ async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeyp
         _text, errored = await engine._extract_pdf_text(
             "https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia.pdf/@@download/file"
         )
-        assert errored is False
+        assert errored is None
         sent = respx.calls.last.request.headers
         assert sent["accept"] == GOVBR_HEADERS["Accept"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
+    """A 5xx from the document host must not burn the retry ladder.
+
+    ``_BVS_RETRYABLE_STATUSES`` only retries 429, so a 503 is fatal on the
+    first attempt: one request, and the caller gets ``origin_outage`` back.
+    """
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    route = respx.get("https://docs.bvsalud.org/x").mock(
+        return_value=httpx.Response(503, text="Service Unavailable")
+    )
+    try:
+        text, error_kind = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x"
+        )
+        assert route.call_count == 1
+        assert text == ""
+        assert error_kind == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2769,7 +2795,7 @@ async def test_full_text_resolves_az_record(tmp_path):
     try:
         engine.pcdt_engine.get_guideline = AsyncMock(return_value=None)
         engine.az_engine.get_guideline = AsyncMock(return_value=_az_record())
-        engine._extract_pdf_text = AsyncMock(return_value=("texto do manual", False))
+        engine._extract_pdf_text = AsyncMock(return_value=("texto do manual", None))
 
         payload, meta = await engine.get_full_text(
             "govbr-svsa-tuberculose-manual-tuberculose"

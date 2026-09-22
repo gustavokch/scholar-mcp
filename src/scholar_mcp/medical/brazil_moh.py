@@ -1424,19 +1424,25 @@ class BrazilMoHEngine:
             return None, None
         return _build_record(docs[0]), None
 
-    async def _extract_pdf_text(self, document_url: str) -> tuple[str, bool]:
-        """Fetch and extract the document PDF. Returns (text, errored).
+    async def _extract_pdf_text(self, document_url: str) -> tuple[str, str | None]:
+        """Fetch and extract the document PDF. Returns (text, error_kind).
 
-        Gates on content-type explicitly. ``get_bytes`` is not used here:
-        its HTML guard only catches Cloudflare-style challenge pages, so a
+        ``error_kind`` is a ``BvsErrorKind`` on failure and ``None`` on
+        success. Gates on content-type explicitly. ``get_bytes`` is not used
+        here: its HTML guard only catches Cloudflare-style challenge pages, so a
         plain "Estamos em manutenção" WAF page would reach the PDF parser.
 
         Redirects are followed (the BVS hosts hand off between themselves),
         but the response's final URL is re-checked against the allowlist so
         a redirect cannot carry the fetch off-host.
+
+        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
+        5xx from the document host is an origin outage, and retrying it
+        would burn the caller's remaining budget on a fetch that will not
+        succeed.
         """
         if not _is_allowed_host(document_url):
-            return "", False
+            return "", None
         # Pick headers by hostname, not by substring: "gov.br" appearing in
         # a query string or path on a non-gov host must not match.
         try:
@@ -1444,28 +1450,38 @@ class BrazilMoHEngine:
         except ValueError:
             host = ""
         headers = GOVBR_HEADERS if host.endswith("gov.br") else BVS_HEADERS
-        resp = await self.http_client.get(document_url, headers=headers)
+        resp = await self.http_client.get(
+            document_url, headers=headers, retryable_statuses=_BVS_RETRYABLE_STATUSES
+        )
         if resp is None:
-            return "", True
+            failure = getattr(self.http_client, "last_failure", None)
+            status = getattr(failure, "status", None)
+            if status == 403:
+                return "", "cdn_challenge"
+            if status is not None and 500 <= status < 600:
+                return "", "origin_outage"
+            if getattr(failure, "kind", "") == "transport":
+                return "", "timeout"
+            return "", "backend_error"
         if not _is_allowed_host(str(resp.url)):
             logger.info(
                 "brazil_moh full text redirected off the allowed hosts (%s)",
                 str(resp.url),
             )
-            return "", True
+            return "", "backend_error"
         content_type = resp.headers.get("content-type", "").lower()
         if "application/pdf" not in content_type:
             logger.info(
                 "brazil_moh full text is not a PDF (content-type=%r)", content_type
             )
-            return "", True
+            return "", "backend_error"
         try:
             # Unbounded here: the ceiling is applied at cache/serve time so
             # the pre-truncation length survives as ``total_chars``.
-            return pdf_bytes_to_text(resp.content), False
+            return pdf_bytes_to_text(resp.content), None
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
-            return "", True
+            return "", "backend_error"
 
     async def _serve_local_text(
         self,
@@ -1649,11 +1665,11 @@ class BrazilMoHEngine:
             remaining = ceiling
         try:
             if ceiling > 0:
-                pdf_text, errored = await asyncio.wait_for(
+                pdf_text, error_kind = await asyncio.wait_for(
                     self._extract_pdf_text(record.document_url), timeout=remaining
                 )
             else:
-                pdf_text, errored = await self._extract_pdf_text(record.document_url)
+                pdf_text, error_kind = await self._extract_pdf_text(record.document_url)
         except (asyncio.TimeoutError, TimeoutError):
             logger.warning(
                 "brazil_moh full text fetch for %r exceeded its %.1fs budget",
@@ -1661,6 +1677,7 @@ class BrazilMoHEngine:
                 ceiling,
             )
             return _timeout_result(record.title)
+        errored = error_kind is not None
 
         if pdf_text:
             source_text = pdf_text

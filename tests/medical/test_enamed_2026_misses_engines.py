@@ -536,7 +536,7 @@ async def test_fulltext_pdf_phase_gets_remaining_budget(tmp_path, monkeypatch):
             return _build_record(doc), False
 
         async def _fast_pdf(url):
-            return "texto do pdf", False
+            return "texto do pdf", None
 
         engine._lookup_record = _slow_lookup  # type: ignore[method-assign]
         engine._extract_pdf_text = _fast_pdf  # type: ignore[method-assign]
