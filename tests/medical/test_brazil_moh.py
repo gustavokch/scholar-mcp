@@ -2183,11 +2183,15 @@ async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, mon
 
 async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
     """Worst case must stay inside the documented caller ceiling: a browser
-    tier on a flat 30 s ceiling after stalled stages would outlive the chain.
+    tier on a flat 40 s ceiling after stalled stages would outlive the chain.
     The browser gets only the chain budget that is still left. The chain
-    budget here (25 s) stays above the useful-launch floor
-    (``_CAMOUFOX_MIN_USEFUL_CEILING_S``) so the tier is attempted — but with
-    ~25 s, not the flat 30 s."""
+    budget here (20.5 s) stays just above the useful-launch floor
+    (``_CAMOUFOX_MIN_USEFUL_CEILING_S`` = 20.0) so the tier is attempted --
+    but is cut off at ~20.5 s by the outer ``wait_for``, not the flat 40 s.
+    The fake ``goto`` actually blocks past whatever timeout it is handed, so
+    only the caller's own ``wait_for`` can end the call -- this makes
+    ``elapsed`` a real measurement of the ceiling the guard computed, not a
+    vacuous one."""
     import time as _time
 
     settings = Settings(
@@ -2196,8 +2200,8 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         brazil_browser_fallback=True,
         request_timeout=5,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=25.0,
-        brazil_browser_timeout_s=30.0,
+        brazil_chain_timeout_s=20.5,
+        brazil_browser_timeout_s=40.0,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
@@ -2218,15 +2222,14 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         url = ""
 
         async def goto(self, url, *a, **k):
-            return None
-
-        async def wait_for_selector(self, selector, timeout=None):
-            return None
-
-        async def wait_for_timeout(self, ms):
             import asyncio as _asyncio
 
-            await _asyncio.sleep(5.0)  # far past any remaining chain budget
+            # Block well past whatever nav timeout the guard computed, so
+            # only the caller's outer wait_for(effective_ceiling) can end
+            # this call. If the guard ever stopped shrinking the ceiling to
+            # the chain budget, this would run past the flat 40 s cap too.
+            nav_timeout_ms = k.get("timeout", 40000)
+            await _asyncio.sleep((nav_timeout_ms / 1000.0) + 10.0)
             return None
 
         async def content(self):
@@ -2261,9 +2264,11 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
             start = _time.monotonic()
             records, meta = await engine.search_guidelines("dengue", limit=10)
             elapsed = _time.monotonic() - start
-        # ...but only with the chain budget left: ~25 s ceiling, not 30 s.
+        # ...but only with the chain budget left: ~20.5 s ceiling, not 40 s.
         assert attempts == [True]
-        assert elapsed < 12.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
+        assert 19.0 <= elapsed <= 24.0, (
+            f"browser tier did not stop at the chain budget: {elapsed:.1f}s"
+        )
     finally:
         await cache.close()
         await http_client.aclose()
