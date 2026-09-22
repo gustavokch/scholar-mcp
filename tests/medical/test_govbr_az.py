@@ -413,6 +413,8 @@ async def test_search_reports_error_when_catalog_unavailable(tmp_path, responses
 
         assert results == []
         assert meta.error is True
+        assert meta.error_kind != "successful_empty"
+        assert meta.error_kind == "backend_error"
         _, cache_meta = await engine.cache.get("govbr_az_search:5:dengue")
         assert cache_meta.cached is False
     finally:
