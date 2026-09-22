@@ -190,11 +190,16 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
     them (extended corpus rows carry their real source); crawled and seed
     rows default to the MS/CONITEC PCDT shape.
     """
+    document_url = item.get("download_url", "")
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
-        document_url=item.get("download_url", ""),
+        document_url=document_url,
         fulltext_id=item.get("record_id", ""),
+        # ``fulltext_id`` here is the catalog id, not a fi-admin view, so
+        # the flag follows the BVS rule minus that clause: a download/local
+        # URL, or description text served as the abstract fallback.
+        has_full_text=bool(document_url or item.get("description", "")),
         source="brazil-moh",
         abstract=item.get("description", ""),
         country="Brasil",

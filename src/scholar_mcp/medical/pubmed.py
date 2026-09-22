@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
+from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.medical.ranking import SOURCE_POSITION_WEIGHT, rank_medical_articles
 from scholar_mcp.utils.deduplication import deduplicate_papers
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
@@ -127,20 +128,16 @@ class MedicalPubMedClient:
             params["tool"] = self.settings.pubmed_tool
         return params
 
-    async def search_articles(
-        self,
-        query: str,
-        max_results: int = 10,
-    ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"pubmed:search:{query}:{max_results}"
-        cached_data, meta = await self.cache.get(cache_key)
-        if meta.cached and cached_data is not None:
-            return [MedicalArticle.from_dict(d) for d in cached_data], meta
+    async def _esearch(self, term: str, max_results: int) -> tuple[list[str], bool]:
+        """One esearch call. Returns (idlist, errored).
 
+        Extracted so the relaxation walk cannot drift apart from the initial
+        search in params or failure handling.
+        """
         search_params = {
             **self._base_params(),
             "db": "pubmed",
-            "term": query,
+            "term": term,
             "retmode": "json",
             "retmax": str(max_results),
             # NCBI's default (no sort param) is most-recent-first; ask for Best Match.
@@ -155,9 +152,48 @@ class MedicalPubMedClient:
             if resp is None:
                 raise FetchError("esearch request failed")
             data = resp.json()
-            idlist = data.get("esearchresult", {}).get("idlist", [])
+            return data.get("esearchresult", {}).get("idlist", []), False
         except Exception:
-            logger.warning("PubMed esearch failed for %r", query, exc_info=True)
+            logger.warning("PubMed esearch failed for %r", term, exc_info=True)
+            return [], True
+
+    async def search_articles(
+        self,
+        query: str,
+        max_results: int = 10,
+        relax: bool = True,
+    ) -> tuple[list[MedicalArticle], CacheMetadata]:
+        # The cache key stays the original query: a relaxed hit is still the
+        # answer to what the caller asked, and the key must not fan out per
+        # ladder step.
+        cache_key = f"pubmed:search:{query}:{max_results}"
+        cached_data, meta = await self.cache.get(cache_key)
+        if meta.cached and cached_data is not None:
+            return [MedicalArticle.from_dict(d) for d in cached_data], meta
+
+        idlist, errored = await self._esearch(query, max_results)
+        if errored:
+            # A fetch failure is not a zero-hit: relaxing further would
+            # mistake a transport error for an over-constrained query.
+            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+
+        # PubMed ANDs every term, so a long natural-language query
+        # over-constrains esearch to zero hits while a leading-token prefix
+        # of the same query returns hits. Walk the ladder past the already
+        # tried full query, stopping at the first non-empty step.
+        relaxed_query: str | None = None
+        if not idlist and relax:
+            for variant in relax_ladder(query)[1 : 1 + MAX_RELAX_EXTRA_CALLS]:
+                if variant == query:
+                    continue
+                idlist, errored = await self._esearch(variant, max_results)
+                if errored:
+                    break
+                if idlist:
+                    relaxed_query = variant
+                    break
+
+        if errored:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         if not idlist:
@@ -195,4 +231,6 @@ class MedicalPubMedClient:
             [a.to_dict() for a in final_articles],
             source="pubmed",
         )
-        return final_articles, CacheMetadata(cached=False, cache_age=0)
+        return final_articles, CacheMetadata(
+            cached=False, cache_age=0, relaxed_query=relaxed_query
+        )

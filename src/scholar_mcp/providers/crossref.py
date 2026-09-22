@@ -55,6 +55,10 @@ class CrossRefProvider:
             params["query.container-title"] = journal.strip()
 
         filters: list[str] = []
+        # Unfiltered bibliographic search returns books, datasets, and
+        # dissertations ahead of papers on short or Portuguese queries
+        # (ENAMED misses E7); restrict the top-up pool to journal articles.
+        filters.append("type:journal-article")
         if year_start:
             filters.append(f"from-pub-date:{year_start}-01-01")
         if year_end:
@@ -108,6 +112,8 @@ class CrossRefProvider:
                         pmcid=None,
                         abstract=abstract,
                         oa_status="unknown",
+                        source="crossref",
+                        doc_type=str(item.get("type") or ""),
                     )
                 )
 
@@ -160,6 +166,8 @@ class CrossRefProvider:
                 doi=item.get("DOI") or clean_doi,
                 abstract=abstract,
                 oa_status="unknown",
+                source="crossref",
+                doc_type=str(item.get("type") or ""),
             )
         except Exception:
             return None

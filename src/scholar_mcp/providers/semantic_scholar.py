@@ -39,6 +39,7 @@ def _paper_to_metadata(p: dict[str, Any]) -> PaperMetadata:
         oa_status="oa" if oa_pdf else "unknown",
         citation_count=p.get("citationCount"),
         oa_url=oa_pdf,
+        source="s2",
     )
 
 

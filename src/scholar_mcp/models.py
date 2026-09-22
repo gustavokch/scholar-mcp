@@ -55,6 +55,14 @@ class PaperMetadata:
     last_author_h_index: int | None = None
     score: float | None = None
     ranking_metrics: dict[str, Any] | None = None
+    # Which backend produced the record ("pubmed" | "crossref" | "s2" |
+    # "europepmc" | ""). Set by each provider so a search envelope can say
+    # which backend answered (ENAMED misses plan B2/B5).
+    source: str = ""
+    # Provider-native document type; the CrossRef provider parses the
+    # ``type`` field ("journal-article", "book", ...). Empty when the
+    # backend reports none.
+    doc_type: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

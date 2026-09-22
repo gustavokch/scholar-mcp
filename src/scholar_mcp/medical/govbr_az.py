@@ -178,11 +178,15 @@ _COLLECTION_BY_TREE = {"svsa": "SVSA", "guias": "GUIAS-E-MANUAIS"}
 def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
     """Convert a catalog row to a BrazilGuideline."""
     collection = _COLLECTION_BY_TREE.get(item.get("tree", ""), "GOVBR")
+    document_url = item.get("download_url", "")
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
-        document_url=item.get("download_url", ""),
+        document_url=document_url,
         fulltext_id=item.get("record_id", ""),
+        # Same rule as the PCDT converter: download/local URL or
+        # description text served as the abstract fallback.
+        has_full_text=bool(document_url or item.get("description", "")),
         source="brazil-moh",
         abstract=item.get("description", ""),
         year=item.get("year", ""),

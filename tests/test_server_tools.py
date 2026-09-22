@@ -262,3 +262,18 @@ async def test_check_citations_tool_batch_cap():
     claims = [{"text": "x", "identifier": "10.1/x"} for _ in range(26)]
     results = await srv.check_citations(claims=claims)
     assert results[0]["verdict"] == "ERROR"
+
+
+async def test_search_papers_payload_carries_per_paper_source(resolver):
+    """The B2 source/doc_type fields must reach the envelope payload: that
+    is how a zimqa envelope says which backend answered each paper."""
+    resolver.search.return_value = [
+        PaperMetadata(title="A", doi="10.1/a", source="pubmed"),
+        PaperMetadata(title="B", doi="10.1/b", source="crossref", doc_type="journal-article"),
+    ]
+    resolver.last_search_sources = {"pubmed": "ok", "crossref": "ok"}
+    result = await srv.search_papers("dengue")
+    assert [p["source"] for p in result["papers"]] == ["pubmed", "crossref"]
+    assert result["papers"][1]["doc_type"] == "journal-article"
+    assert result["sources"] == {"pubmed": "ok", "crossref": "ok"}
+    assert result["degraded"] is False

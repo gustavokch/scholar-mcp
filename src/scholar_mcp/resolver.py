@@ -5,6 +5,7 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.identifiers import resolve_identifiers
+from scholar_mcp.medical.query_relax import content_overlap_count
 from scholar_mcp.models import (
     CitationItem,
     DownloadResult,
@@ -508,8 +509,15 @@ class WaterfallResolver:
                     sort="relevance",
                 ),
             )
-            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
-            if len(papers) < fetch_limit:
+            # 2. Top up from CrossRef only when PubMed left the requested
+            # page short (fewer than `limit`, not `fetch_limit`): a
+            # satisfied page must not pay a CrossRef round-trip whose
+            # records can only dilute the re-rank pool with off-topic
+            # bibliographic matches (ENAMED misses E7). Each top-up record
+            # must share at least one accent-folded content token between
+            # the query and its title+abstract, or it is junk from the
+            # top-up rather than evidence.
+            if len(papers) < limit:
                 needed = fetch_limit - len(papers)
                 crossref_papers = await self._run_backend(
                     "crossref",
@@ -527,6 +535,8 @@ class WaterfallResolver:
                 seen_dois = {p.doi.lower() for p in papers if p.doi}
                 seen_titles = {p.title.lower().strip() for p in papers if p.title}
                 for cp in crossref_papers:
+                    if content_overlap_count(query, cp.title, cp.abstract) < 1:
+                        continue
                     if cp.doi and cp.doi.lower() in seen_dois:
                         continue
                     if cp.title and cp.title.lower().strip() in seen_titles:

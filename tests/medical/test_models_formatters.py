@@ -319,26 +319,38 @@ def test_format_brazil_moh_guidelines_fulltext_retrievability_note():
     from scholar_mcp.medical.models import BrazilGuideline
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
 
-    # Allowed repository direct PDF URL without fi-admin fulltext_id
+    # Allowed repository direct PDF URL without fi-admin fulltext_id.
+    # The flag is set at search time (_build_record); the formatter reads
+    # it instead of recomputing host membership.
     allowed_doc = BrazilGuideline(
         title="Protocolo BVS Docs",
         record_id="biblio-10",
         document_url="https://docs.bvsalud.org/biblioref/2026/08/doc.pdf",
+        has_full_text=True,
     )
     res_allowed = format_brazil_moh_guidelines(
         [allowed_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
     )
     assert "hosted off-site" not in res_allowed["markdown"]
 
-    # Off-site document URL
+    # Off-site document URL with no retrievable body
     offsite_doc = BrazilGuideline(
         title="Artigo Offsite",
         record_id="biblio-11",
         document_url="https://www.sciencedirect.com/science/article/pii/123",
+        has_full_text=False,
     )
     res_offsite = format_brazil_moh_guidelines(
         [offsite_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
     )
     assert "- **Full text:** not retrievable; document is hosted off-site" in res_offsite["markdown"]
+
+    # Body-less catalog card: no URL at all, so no URL line and no note.
+    card_doc = BrazilGuideline(title="Ficha sem corpo", record_id="biblio-12")
+    res_card = format_brazil_moh_guidelines(
+        [card_doc], "dengue", CacheMetadata(cached=False, cache_age=0)
+    )
+    assert "- **URL:**" not in res_card["markdown"]
+    assert "hosted off-site" not in res_card["markdown"]
 
 

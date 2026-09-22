@@ -444,3 +444,53 @@ async def test_waterfall_resolver_search_without_rerank():
     r.ranking_pipeline.rank_papers.assert_not_awaited()
     assert r.pubmed.search.await_args.kwargs.get("sort") == "relevance"
 
+
+
+async def test_auto_top_up_drops_crossref_junk_keeps_relevant():
+    """PubMed empty + CrossRef junk: the top-up gate keeps only records
+    sharing a content token with the query (ENAMED misses E7)."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = None
+    junk = PaperMetadata(
+        title="Half hours with modern scientists",
+        doi="10.1/junk",
+        source="crossref",
+        doc_type="journal-article",
+    )
+    relevant = PaperMetadata(
+        title="How Well Does The Parkland Formula Estimate Actual Fluid Volumes?",
+        doi="10.1/relevant",
+        source="crossref",
+        doc_type="journal-article",
+    )
+    r.crossref.search = AsyncMock(return_value=[junk, relevant])
+    r.crossref.last_error = None
+
+    results = await r.search(
+        "Parkland formula burn resuscitation fluid calculation",
+        source="auto",
+        num_results=5,
+        rerank=False,
+    )
+    titles = [p.title for p in results]
+    assert relevant.title in titles
+    assert junk.title not in titles
+
+
+async def test_auto_skips_crossref_top_up_when_page_satisfied():
+    """PubMed already filled the requested page: no CrossRef round-trip,
+    even though the re-rank candidate pool is not full."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    mock_papers = [
+        PaperMetadata(title="Paper 1", pmid="1", doi="10.1001/1", year="2015"),
+        PaperMetadata(title="Paper 2", pmid="2", doi="10.1001/2", year="2026"),
+    ]
+    r.pubmed.search = AsyncMock(return_value=mock_papers)
+    r.pubmed.last_error = None
+    r.crossref.search = AsyncMock(return_value=[PaperMetadata(title="Junk")])
+    r.ranking_pipeline.rank_papers = AsyncMock(return_value=mock_papers)
+
+    results = await r.search("cancer", source="auto", num_results=2, rerank=True)
+    assert len(results) == 2
+    r.crossref.search.assert_not_awaited()

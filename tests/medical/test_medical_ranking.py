@@ -322,3 +322,31 @@ def test_rank_brazil_guidelines_none_text_does_not_raise():
     g.title_en = None  # type: ignore[assignment]
     ranked = rank_brazil_guidelines([g], "dengue", current_year=2026)
     assert ranked[0].score is not None
+
+
+def test_rank_brazil_guidelines_bodyless_card_sinks_below_body():
+    # Identical text, so pre-damping scores differ only by the source
+    # position prior, which favors the first record (the body-less card).
+    # Halving must still sink it below the record with a body -- and the
+    # card must survive in the ranking, not be dropped.
+    guidelines = [
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="body",
+            has_full_text=True,
+        ),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert [g.record_id for g in ranked] == ["body", "card"]
+    assert ranked[0].score is not None and ranked[1].score is not None
+    assert ranked[1].score < ranked[0].score
+    assert len(ranked) == 2

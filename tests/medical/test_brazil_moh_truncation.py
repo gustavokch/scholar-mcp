@@ -88,7 +88,7 @@ async def test_over_ceiling_reports_total_chars_with_max_chars(tmp_path: Path, m
 async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
     tmp_path: Path, monkeypatch
 ):
-    full = "x" * 62000
+    full = "x" * 620000
     monkeypatch.setattr(
         "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
     )
@@ -105,7 +105,7 @@ async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
             )
         )
         payload, _ = await engine.get_full_text("biblio-1", max_chars=None)
-        assert payload["total_chars"] == 62000
+        assert payload["total_chars"] == 620000
         # Ceiling binds: over-ceiling content is truncated even with no limit.
         assert payload["truncated"] is True
         assert len(payload["content"]) <= MAX_FULL_TEXT_CHARS + 100
@@ -164,7 +164,7 @@ async def test_abstract_path_total_chars_matches_abstract(tmp_path: Path):
 async def test_cache_stores_capped_content_with_full_total_chars(
     tmp_path: Path, monkeypatch
 ):
-    full = "z" * 62000
+    full = "z" * 620000
     monkeypatch.setattr(
         "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
     )
@@ -183,7 +183,7 @@ async def test_cache_stores_capped_content_with_full_total_chars(
         await engine.get_full_text("biblio-1")
         cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
         assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
-        assert cached["total_chars"] == 62000
+        assert cached["total_chars"] == 620000
     finally:
         await cache.close()
         await http_client.aclose()

@@ -1026,3 +1026,25 @@ async def test_get_full_text_not_found_includes_pdf_url(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_serve_full_text_query_returns_passages():
+    """The WHO IRIS path shares the passage helper: a topic query returns
+    the head plus scored windows with offsets, not just the head cut."""
+    filler = "word padding "
+    body = filler * 400 + "unique target finding about immunization coverage" + filler * 4000
+    payload = {"content": body, "total_chars": len(body)}
+    served = WHOIRISEngine._serve_full_text(dict(payload), None, query="immunization coverage")
+    assert "immunization coverage" in served["content"] or "immunization" in served["content"]
+    assert served["passages"], "the target window must be served"
+    assert all(p["score"] >= 1 for p in served["passages"])
+    assert served["total_chars"] == len(body)
+
+
+def test_serve_full_text_offset_pages_body():
+    body = "abcdefghij" * 1000
+    payload = {"content": body, "total_chars": len(body)}
+    served = WHOIRISEngine._serve_full_text(dict(payload), 100, offset=500)
+    assert served["content"] == body[500:600]
+    assert served["truncated"] is True
+    assert served["passages"] == []

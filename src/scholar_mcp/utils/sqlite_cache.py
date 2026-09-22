@@ -1,7 +1,7 @@
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,14 @@ class CacheMetadata:
     cached: bool
     cache_age: int
     error: bool = False
+    # The relaxed variant that produced the results, when a PubMed-backed
+    # search walked the query-relaxation ladder past the original query.
+    # None when the original query sufficed or nothing was found.
+    relaxed_query: str | None = None
+    # Per-backend search status snapshot ("ok"/"empty"/"blocked"/"failed"/
+    # "disabled") for the scholar path, filled from the resolver's
+    # last_search_sources so a zimqa envelope can say which backend answered.
+    sources: dict[str, str] = field(default_factory=dict)
 
 
 class SQLiteCacheManager:

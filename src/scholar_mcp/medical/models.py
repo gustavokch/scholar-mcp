@@ -246,6 +246,10 @@ class BrazilGuideline:
     ``score`` is populated by ``rank_brazil_guidelines`` on the search path.
     It stays ``None`` when the query tokenizes to nothing, and on rows cached
     before ranking existed.
+    ``has_full_text`` is set at search time: true when a body is
+    retrievable (allowed-host or local document URL, a fulltext id, or a
+    non-empty abstract). Body-less catalog cards rank lower but are never
+    dropped -- titles still carry signal.
     """
 
     title: str = ""
@@ -253,6 +257,7 @@ class BrazilGuideline:
     record_id: str = ""
     document_url: str = ""
     fulltext_id: str = ""
+    has_full_text: bool = False
     source: str = "brazil-moh"
     abstract: str = ""
     year: str = ""

@@ -275,3 +275,31 @@ def test_score_item_prefix_match_scores_substring_tier():
     query = "acromeg"
     score = _score_item(tokenize_portuguese(query), normalize_text(query), item)
     assert score == 0.90
+
+
+def test_dict_to_guideline_sets_has_full_text():
+    """PCDT rows with a download/local URL carry a body; rows with only a
+    description fall back to it; rows with neither have nothing."""
+    from scholar_mcp.medical.govbr_pcdt import _dict_to_guideline as pcdt_convert
+
+    assert pcdt_convert(
+        {"record_id": "pcdt-x", "title": "X", "download_url": "https://www.gov.br/x/@@download/file"}
+    ).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-y", "title": "Y", "download_url": "local:guidelines/y.txt"}
+    ).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-z", "title": "Z", "description": "Resumo."}
+    ).has_full_text is True
+    assert pcdt_convert({"record_id": "pcdt-w", "title": "W"}).has_full_text is False
+
+
+def test_az_dict_to_guideline_sets_has_full_text():
+    from scholar_mcp.medical.govbr_az import _dict_to_guideline as az_convert
+
+    assert az_convert(
+        {"record_id": "az-x", "title": "X", "download_url": "https://www.gov.br/x.pdf", "tree": "svsa"}
+    ).has_full_text is True
+    assert az_convert(
+        {"record_id": "az-w", "title": "W", "tree": "svsa"}
+    ).has_full_text is False

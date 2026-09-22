@@ -1,6 +1,5 @@
 from typing import Any
 
-from scholar_mcp.medical.brazil_moh import is_allowed_bvs_host
 from scholar_mcp.medical.models import (
     BrazilGuideline,
     ClinicalGuideline,
@@ -321,7 +320,7 @@ def format_brazil_moh_guidelines(
                 lines.append(f"- **DeCS/MeSH:** {', '.join(g.mesh_subjects)}")
             if g.document_url:
                 lines.append(f"- **URL:** {g.document_url}")
-            if g.document_url and not is_allowed_bvs_host(g.document_url):
+            if g.document_url and not g.has_full_text:
                 lines.append("- **Full text:** not retrievable; document is hosted off-site")
             if g.abstract:
                 lines.append("")

@@ -333,6 +333,47 @@ def test_build_record_tolerates_missing_fields():
     assert record.authors == []
 
 
+def test_build_record_sets_has_full_text():
+    from scholar_mcp.medical.brazil_moh import _build_record
+
+    # fi-admin view with an abstract: retrievable.
+    assert _build_record(
+        {
+            "id": "a",
+            "ur": ["https://fi-admin.bvsalud.org/document/view/cfpaj"],
+            "ab": ["Resumo."],
+        }
+    ).has_full_text is True
+    # Allowed host without abstract: the PDF is fetchable.
+    assert _build_record(
+        {
+            "id": "b",
+            "ur": ["https://docs.bvsalud.org/biblioref/2026/08/doc.pdf"],
+        }
+    ).has_full_text is True
+    # local: corpus entry: served offline.
+    assert _build_record(
+        {"id": "c", "ur": ["local:guidelines/manual_tuberculose_2019.txt"]}
+    ).has_full_text is True
+    # Off-site URL but an abstract to fall back on: retrievable.
+    assert _build_record(
+        {
+            "id": "d",
+            "ur": ["https://www.sciencedirect.com/science/article/pii/S123"],
+            "ab": ["Resumo."],
+        }
+    ).has_full_text is True
+    # Body-less catalog card: no `ur`, no `ab`.
+    assert _build_record({"id": "biblio-1086633", "ti": ["Ficha"]}).has_full_text is False
+    # Off-site URL and no abstract: nothing retrievable.
+    assert _build_record(
+        {
+            "id": "f",
+            "ur": ["https://www.sciencedirect.com/science/article/pii/S123"],
+        }
+    ).has_full_text is False
+
+
 def test_is_brazilian_keeps_brasil_and_drops_others():
     from scholar_mcp.medical.brazil_moh import _build_record, _is_brazilian
 
@@ -2524,6 +2565,8 @@ def _az_record() -> BrazilGuideline:
         record_id="govbr-svsa-tuberculose-manual-tuberculose",
         document_url="https://www.gov.br/x/manual-tuberculose/@@download/file",
         fulltext_id="govbr-svsa-tuberculose-manual-tuberculose",
+        # Mirrors the AZ converter: a download URL means a retrievable body.
+        has_full_text=True,
         source="brazil-moh",
         collections=["SVSA"],
         country="Brasil",

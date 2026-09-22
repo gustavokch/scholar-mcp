@@ -19,6 +19,12 @@ DEFAULT_AGE_YEARS = 10.0
 # override a clear lexical mismatch.
 SOURCE_POSITION_WEIGHT = 0.35
 
+# Score factor for a Brazilian guideline with no retrievable body (no
+# allowed-host/local document URL, no fulltext id, no abstract). Body-less
+# catalog cards still carry title signal, so they are damped, never
+# dropped -- but a damped card must sink below any record with a body.
+NO_FULL_TEXT_SCORE_FACTOR = 0.5
+
 # Mirrors the private pattern in scholar_mcp.ranking. Declared locally rather
 # than imported: that copy is private to its module, and normalization has
 # already reduced the text to ASCII, so the two are intentionally identical.
@@ -195,8 +201,12 @@ def rank_brazil_guidelines(
 
     ``position_weight`` is non-zero because BVS returns a single
     relevance-sorted list, which is the condition that prior is meant for.
+
+    Records with no retrievable body (``has_full_text`` false) keep their
+    title signal but score halved, so body-less catalog cards sink below
+    any record with a body without disappearing from the result set.
     """
-    return _rank_records(
+    ranked = _rank_records(
         guidelines,
         query,
         tokenizer=tokenize_portuguese,
@@ -207,3 +217,10 @@ def rank_brazil_guidelines(
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,
     )
+    if any(g.score is not None and not g.has_full_text for g in ranked):
+        for g in ranked:
+            if g.score is not None and not g.has_full_text:
+                g.score *= NO_FULL_TEXT_SCORE_FACTOR
+        # Stable re-sort: equal scores keep the lexical/source order above.
+        ranked.sort(key=lambda g: (g.score is None, -(g.score or 0.0)))
+    return ranked
