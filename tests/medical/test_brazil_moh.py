@@ -350,6 +350,7 @@ import httpx
 import pytest
 import respx
 
+import scholar_mcp.server as server
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_HEADERS,
@@ -884,9 +885,11 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
-        # C2: abstract fallback is a success, cached degraded (brief TTL).
+        # C2: abstract fallback is a success (error=False), cached degraded
+        # (brief TTL) -- but error_kind still carries the real PDF-fetch
+        # failure so machine consumers see the degradation.
         assert meta.error is False
-        assert meta.error_kind == "ok"
+        assert meta.error_kind == "backend_error"
         _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
         assert cache_meta.cached is True
     finally:
@@ -936,11 +939,63 @@ async def test_get_full_text_pdf_failure_degrades_to_cached_abstract(tmp_path: P
         respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
-        # C2: abstract fallback is a success, cached degraded (brief TTL).
+        # C2: abstract fallback is a success (error=False), cached degraded
+        # (brief TTL) -- but error_kind still carries the real PDF-fetch
+        # failure so machine consumers see the degradation.
         assert meta.error is False
-        assert meta.error_kind == "ok"
+        assert meta.error_kind == "timeout"
         _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
         assert cache_meta.cached is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_pdf_origin_outage_reports_degraded(tmp_path: Path):
+    """A 503 from the PDF host still serves the abstract, but the metadata
+    must say the result is degraded via ``error_kind`` even though ``error``
+    itself stays False (spec-required)."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(503, text="Service Unavailable")
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["abstract_fallback"] is True
+        assert meta.error is False
+        assert meta.error_kind == "origin_outage"
+        assert server._with_degraded(dict(payload), meta)["degraded"] is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_brazil_moh_full_text_tool_reports_degraded_on_pdf_failure(
+    tmp_path: Path, monkeypatch
+):
+    """The MCP tool itself (not just the engine) must surface ``degraded``
+    when the PDF fetch failed and the abstract was substituted."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(503, text="Service Unavailable")
+        )
+        monkeypatch.setattr(server, "brazil_moh_engine", engine)
+        result = await server.get_brazil_moh_full_text("biblio-1")
+        assert result["abstract_fallback"] is True
+        assert result["degraded"] is True
     finally:
         await cache.close()
         await http_client.aclose()

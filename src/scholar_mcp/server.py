@@ -134,9 +134,12 @@ def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, An
     """Add the machine-readable degraded flag when the engine flagged an error.
 
     The format_* functions already surface FETCH_ERROR_NOTE in the markdown;
-    this adds the key zimqa and other machine consumers read directly.
+    this adds the key zimqa and other machine consumers read directly. Some
+    engines keep ``error=False`` on a substituted result (e.g. an abstract
+    fallback after a failed PDF fetch) but still classify the failure in
+    ``error_kind`` -- that must surface as degraded too.
     """
-    if meta.error:
+    if meta.error or meta.error_kind not in ("", "ok", "successful_empty"):
         payload["degraded"] = True
     return payload
 
@@ -697,7 +700,7 @@ if settings.enable_medical_tools:
                 record_id, max_chars=max_chars
             )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
-            return payload
+            return _with_degraded(payload, meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "brazil-moh", "content": ""}
 

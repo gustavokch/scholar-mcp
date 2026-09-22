@@ -1717,17 +1717,23 @@ class BrazilMoHEngine:
             "abstract_fallback": abstract_fallback,
         }
         payload = {**base, "status": "success", "title": record.title, **result}
-        result_ok = True
-        if result_ok and not errored:
+        if not errored:
             await self.cache.set(cache_key, payload, source="brazil_moh")
-        elif result_ok and errored:
+        else:
+            # A PDF fetch that failed and fell back to the abstract is
+            # still cached -- at the shorter degraded TTL, so the next
+            # request retries the PDF instead of serving a stale fallback
+            # indefinitely.
             await self.cache.set(
                 cache_key, payload, source="brazil_moh",
                 ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
         return (
             self._serve_full_text(payload, max_chars),
-            CacheMetadata(cached=False, cache_age=0, error=False, error_kind="ok"),
+            CacheMetadata(
+                cached=False, cache_age=0, error=False,
+                error_kind=error_kind if errored else "ok",
+            ),
         )
 
     @staticmethod

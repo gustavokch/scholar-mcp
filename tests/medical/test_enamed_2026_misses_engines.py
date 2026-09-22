@@ -577,7 +577,9 @@ async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path:
         assert payload["content_type"] == "abstract"
         assert payload["abstract_fallback"] is True
         assert meta.error is False
-        assert meta.error_kind == "ok"
+        # error_kind still carries the real PDF-fetch failure so machine
+        # consumers see the degradation, even though error itself is False.
+        assert meta.error_kind == "backend_error"
         # Degraded but reachable: cached briefly, never for the 30-day TTL.
         payload2, meta2 = await engine.get_full_text("biblio-pdf-fail")
         assert meta2.cached is True
