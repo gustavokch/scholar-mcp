@@ -69,6 +69,7 @@ def _rank_records(
     text_fields: Callable[[R], tuple[str, str]],
     position_weight: float,
     current_year: int | None = None,
+    score_factor: Callable[[R], float] | None = None,
 ) -> list[R]:
     """Score and order records by lexical coverage, source position, and recency.
 
@@ -82,6 +83,12 @@ def _rank_records(
     the ``1/sqrt(rank + 1)`` prior. Pass non-zero only when the input is
     already relevance-ordered by a single source. Leave it at 0.0 for merged
     multi-source pools, where list position reflects task order.
+
+    ``score_factor``, when given, multiplies each record's score as it is
+    assigned -- a call re-scores every record from its raw fields each time,
+    so folding a factor in here (rather than mutating ``.score`` after this
+    function returns) is idempotent by construction: a second call recomputes
+    the same score, it never compounds a prior call's damping.
 
     Makes no network calls. Assigns ``score`` on the given objects in place and
     returns a new list ordered by it, source order breaking ties. A query that
@@ -122,6 +129,8 @@ def _rank_records(
         )
 
         final_score = RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recency
+        if score_factor is not None:
+            final_score *= score_factor(record)
         record.score = final_score
         scored.append((final_score, idx, record))
 
@@ -192,13 +201,9 @@ def rank_brazil_guidelines(
         ),
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,
+        score_factor=lambda g: 1.0 if g.has_full_text else NO_FULL_TEXT_SCORE_FACTOR,
     )
     if any(g.score is not None and not g.has_full_text for g in ranked):
-        for g in ranked:
-            if g.score is not None and not g.has_full_text:
-                g.score *= NO_FULL_TEXT_SCORE_FACTOR
-        # Stable re-sort: equal scores keep the lexical/source order above.
-        ranked.sort(key=lambda g: (g.score is None, -(g.score or 0.0)))
         # Tier by construction: a multiplicative factor cannot sink a
         # body-less card below every body record for arbitrary score
         # spreads, so body-less records sort into a second tier after the

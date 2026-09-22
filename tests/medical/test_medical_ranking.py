@@ -372,3 +372,31 @@ def test_rank_brazil_guidelines_tier_holds_for_strong_bodiless_card():
     # The card outscores the body even damped: only the tier puts it second.
     assert ranked[1].score > ranked[0].score
     assert len(ranked) == 2
+
+
+def test_rank_brazil_guidelines_damping_is_idempotent():
+    """finding 7: the no-full-text damping factor must be folded in as the
+    score is assigned, not mutated onto the same objects after the fact --
+    calling the ranker twice on the same list must not compound the factor."""
+    guidelines = [
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="body",
+            has_full_text=True,
+        ),
+    ]
+    first = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    first_scores = {g.record_id: g.score for g in first}
+    second = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    second_scores = {g.record_id: g.score for g in second}
+    assert first_scores == second_scores
+
