@@ -195,46 +195,40 @@ class Settings:
                 os.getenv("PREFER_SCIHUB_OVER_UNPAYWALL"), False
             ),
             scihub_mirrors=mirrors,
-            request_timeout=int(os.getenv("SCHOLAR_REQUEST_TIMEOUT", "30")),
-            total_budget_seconds=int(os.getenv("SCHOLAR_TOTAL_BUDGET", "45")),
-            max_concurrency=int(os.getenv("SCHOLAR_MAX_CONCURRENCY", "5")),
-            cache_size=int(os.getenv("SCHOLAR_CACHE_SIZE", "500")),
+            request_timeout=_int_env("SCHOLAR_REQUEST_TIMEOUT", 30),
+            total_budget_seconds=_int_env("SCHOLAR_TOTAL_BUDGET", 45),
+            max_concurrency=_int_env("SCHOLAR_MAX_CONCURRENCY", 5),
+            cache_size=_int_env("SCHOLAR_CACHE_SIZE", 500),
             cache_ttl_seconds=_int_env("SCHOLAR_CACHE_TTL", 3600),
             cache_ttl_idmap_failure=_int_env("CACHE_TTL_IDMAP_FAILURE", 60),
-            max_chars=int(os.getenv("SCHOLAR_MAX_CHARS", "50000")),
-            title_match_threshold=float(os.getenv("SCHOLAR_TITLE_MATCH_THRESHOLD", "80")),
+            max_chars=_int_env("SCHOLAR_MAX_CHARS", 50000),
+            title_match_threshold=_float_env("SCHOLAR_TITLE_MATCH_THRESHOLD", 80.0),
             download_dir=Path(os.getenv("SCHOLAR_DOWNLOAD_DIR", "./downloads")),
             ranking_enabled=_bool(os.getenv("RANKING_ENABLED"), True),
-            ranking_weight_relevance=float(os.getenv("RANKING_WEIGHT_RELEVANCE", "0.30")),
-            ranking_weight_citations=float(os.getenv("RANKING_WEIGHT_CITATIONS", "0.20")),
-            ranking_weight_recency=float(os.getenv("RANKING_WEIGHT_RECENCY", "0.15")),
-            ranking_weight_evidence_grade=float(
-                os.getenv("RANKING_WEIGHT_EVIDENCE_GRADE", "0.20")
+            ranking_weight_relevance=_float_env("RANKING_WEIGHT_RELEVANCE", 0.30),
+            ranking_weight_citations=_float_env("RANKING_WEIGHT_CITATIONS", 0.20),
+            ranking_weight_recency=_float_env("RANKING_WEIGHT_RECENCY", 0.15),
+            ranking_weight_evidence_grade=_float_env("RANKING_WEIGHT_EVIDENCE_GRADE", 0.20),
+            ranking_weight_journal_impact=_float_env("RANKING_WEIGHT_JOURNAL_IMPACT", 0.10),
+            ranking_weight_author_authority=_float_env(
+                "RANKING_WEIGHT_AUTHOR_AUTHORITY", 0.05
             ),
-            ranking_weight_journal_impact=float(
-                os.getenv("RANKING_WEIGHT_JOURNAL_IMPACT", "0.10")
+            ranking_position_weight=_float_env("RANKING_POSITION_WEIGHT", 0.25),
+            ranking_recency_half_life_years=_float_env(
+                "RANKING_RECENCY_HALF_LIFE_YEARS", 7.0
             ),
-            ranking_weight_author_authority=float(
-                os.getenv("RANKING_WEIGHT_AUTHOR_AUTHORITY", "0.05")
+            ranking_candidate_multiplier=_int_env("RANKING_CANDIDATE_MULTIPLIER", 3),
+            ranking_min_candidates=_int_env("RANKING_MIN_CANDIDATES", 20),
+            ranking_max_candidates=_int_env("RANKING_MAX_CANDIDATES", 50),
+            ranking_enrichment_timeout=_float_env("RANKING_ENRICHMENT_TIMEOUT", 1.5),
+            citation_check_supported_threshold=_float_env(
+                "CITATION_CHECK_SUPPORTED_THRESHOLD", 0.5
             ),
-            ranking_position_weight=float(os.getenv("RANKING_POSITION_WEIGHT", "0.25")),
-            ranking_recency_half_life_years=float(
-                os.getenv("RANKING_RECENCY_HALF_LIFE_YEARS", "7.0")
-            ),
-            ranking_candidate_multiplier=int(os.getenv("RANKING_CANDIDATE_MULTIPLIER", "3")),
-            ranking_min_candidates=int(os.getenv("RANKING_MIN_CANDIDATES", "20")),
-            ranking_max_candidates=int(os.getenv("RANKING_MAX_CANDIDATES", "50")),
-            ranking_enrichment_timeout=float(os.getenv("RANKING_ENRICHMENT_TIMEOUT", "1.5")),
-            citation_check_supported_threshold=float(
-                os.getenv("CITATION_CHECK_SUPPORTED_THRESHOLD", "0.5")
-            ),
-            citation_check_weak_threshold=float(
-                os.getenv("CITATION_CHECK_WEAK_THRESHOLD", "0.15")
-            ),
+            citation_check_weak_threshold=_float_env("CITATION_CHECK_WEAK_THRESHOLD", 0.15),
             cache_db_path=Path(
                 os.getenv("SCHOLAR_CACHE_DB", "~/.cache/scholar_mcp/cache.db")
             ).expanduser(),
-            cache_max_entries=int(os.getenv("CACHE_MAX_SIZE", "1000")),
+            cache_max_entries=_int_env("CACHE_MAX_SIZE", 1000),
             cache_ttl_fda=_int_env("CACHE_TTL_FDA", 86400),
             cache_ttl_pubmed=_int_env("CACHE_TTL_PUBMED", 3600),
             cache_ttl_who=_int_env("CACHE_TTL_WHO", 604800),

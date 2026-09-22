@@ -243,6 +243,14 @@ def test_settings_who_iris_ttl_env_override(monkeypatch):
         ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", 60),
         ("CACHE_TTL_FDA", "cache_ttl_fda", 86400),
         ("CACHE_TTL_WHO_IRIS", "cache_ttl_who_iris", 2592000),
+        # The same defence outside the timeout/TTL family: server.py calls
+        # Settings.load() at module import, so any of these raising takes the
+        # MCP server down at startup.
+        ("CACHE_MAX_SIZE", "cache_max_entries", 1000),
+        ("SCHOLAR_REQUEST_TIMEOUT", "request_timeout", 30),
+        ("SCHOLAR_TITLE_MATCH_THRESHOLD", "title_match_threshold", 80.0),
+        ("RANKING_WEIGHT_RELEVANCE", "ranking_weight_relevance", 0.30),
+        ("CITATION_CHECK_WEAK_THRESHOLD", "citation_check_weak_threshold", 0.15),
     ],
 )
 @pytest.mark.parametrize("malformed", ["abc", ""])
