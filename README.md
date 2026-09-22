@@ -282,7 +282,7 @@ All options are configured via environment variables:
 | `CACHE_TTL_BRAZIL_MOH` | `2592000` | Brazilian MoH document cache TTL in seconds (30d). |
 | `BRAZIL_STAGE_TIMEOUT_S` | `20.0` | Per-stage ceiling (seconds) for one PCDT/BVS search stage in the Brazilian MoH engine. |
 | `BRAZIL_CHAIN_TIMEOUT_S` | `90.0` | Whole-chain ceiling (seconds) for `search_brazil_moh_guidelines`: bounds the PCDT stage, all BVS stages, and the camoufox browser tier together. `<= 0` disables the bound. |
-| `BRAZIL_BROWSER_TIMEOUT_S` | `45.0` | Hard ceiling (seconds) on the BVS camoufox browser fallback tier, further capped by the chain budget remaining when the tier starts. |
+| `BRAZIL_BROWSER_TIMEOUT_S` | `45.0` | Hard ceiling (seconds) on the BVS camoufox browser fallback tier, further capped by the chain budget remaining when the tier starts. A Camoufox launch needs tens of seconds, so an effective ceiling below 20 s skips the tier outright: any value in `(0, 20)` disables the browser fallback entirely (logged at INFO on every call). |
 | `BRAZIL_FULLTEXT_TIMEOUT_S` | `30.0` | Whole-call ceiling (seconds) for `get_brazil_moh_full_text` network work (record lookup plus PDF fetch), separate from `BRAZIL_CHAIN_TIMEOUT_S`. |
 | `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |
