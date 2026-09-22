@@ -150,6 +150,18 @@ class Settings:
                 )
                 return default
 
+        def _int_env(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "invalid %s=%r, falling back to %s", name, raw, default
+                )
+                return default
+
         mirrors_env = os.getenv("SCIHUB_MIRRORS")
         mirrors = (
             [m.strip() for m in mirrors_env.split(",") if m.strip()]
@@ -187,8 +199,8 @@ class Settings:
             total_budget_seconds=int(os.getenv("SCHOLAR_TOTAL_BUDGET", "45")),
             max_concurrency=int(os.getenv("SCHOLAR_MAX_CONCURRENCY", "5")),
             cache_size=int(os.getenv("SCHOLAR_CACHE_SIZE", "500")),
-            cache_ttl_seconds=int(os.getenv("SCHOLAR_CACHE_TTL", "3600")),
-            cache_ttl_idmap_failure=int(os.getenv("CACHE_TTL_IDMAP_FAILURE", "60")),
+            cache_ttl_seconds=_int_env("SCHOLAR_CACHE_TTL", 3600),
+            cache_ttl_idmap_failure=_int_env("CACHE_TTL_IDMAP_FAILURE", 60),
             max_chars=int(os.getenv("SCHOLAR_MAX_CHARS", "50000")),
             title_match_threshold=float(os.getenv("SCHOLAR_TITLE_MATCH_THRESHOLD", "80")),
             download_dir=Path(os.getenv("SCHOLAR_DOWNLOAD_DIR", "./downloads")),
@@ -223,25 +235,23 @@ class Settings:
                 os.getenv("SCHOLAR_CACHE_DB", "~/.cache/scholar_mcp/cache.db")
             ).expanduser(),
             cache_max_entries=int(os.getenv("CACHE_MAX_SIZE", "1000")),
-            cache_ttl_fda=int(os.getenv("CACHE_TTL_FDA", "86400")),
-            cache_ttl_pubmed=int(os.getenv("CACHE_TTL_PUBMED", "3600")),
-            cache_ttl_who=int(os.getenv("CACHE_TTL_WHO", "604800")),
-            cache_ttl_rxnorm=int(os.getenv("CACHE_TTL_RXNORM", "2592000")),
-            cache_ttl_guidelines=int(os.getenv("CACHE_TTL_GUIDELINES", "604800")),
-            cache_ttl_bright_futures=int(os.getenv("CACHE_TTL_BRIGHT_FUTURES", "2592000")),
-            cache_ttl_aap_policy=int(os.getenv("CACHE_TTL_AAP_POLICY", "604800")),
-            cache_ttl_pediatric_journals=int(
-                os.getenv("CACHE_TTL_PEDIATRIC_JOURNALS", "3600")
-            ),
-            cache_ttl_child_health=int(os.getenv("CACHE_TTL_CHILD_HEALTH", "604800")),
-            cache_ttl_pediatric_drugs=int(os.getenv("CACHE_TTL_PEDIATRIC_DRUGS", "86400")),
-            cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
-            cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
-            cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
+            cache_ttl_fda=_int_env("CACHE_TTL_FDA", 86400),
+            cache_ttl_pubmed=_int_env("CACHE_TTL_PUBMED", 3600),
+            cache_ttl_who=_int_env("CACHE_TTL_WHO", 604800),
+            cache_ttl_rxnorm=_int_env("CACHE_TTL_RXNORM", 2592000),
+            cache_ttl_guidelines=_int_env("CACHE_TTL_GUIDELINES", 604800),
+            cache_ttl_bright_futures=_int_env("CACHE_TTL_BRIGHT_FUTURES", 2592000),
+            cache_ttl_aap_policy=_int_env("CACHE_TTL_AAP_POLICY", 604800),
+            cache_ttl_pediatric_journals=_int_env("CACHE_TTL_PEDIATRIC_JOURNALS", 3600),
+            cache_ttl_child_health=_int_env("CACHE_TTL_CHILD_HEALTH", 604800),
+            cache_ttl_pediatric_drugs=_int_env("CACHE_TTL_PEDIATRIC_DRUGS", 86400),
+            cache_ttl_clinical_trials=_int_env("CACHE_TTL_CLINICAL_TRIALS", 86400),
+            cache_ttl_who_iris=_int_env("CACHE_TTL_WHO_IRIS", 2592000),
+            cache_ttl_brazil_moh=_int_env("CACHE_TTL_BRAZIL_MOH", 2592000),
             brazil_stage_timeout_s=_float_env("BRAZIL_STAGE_TIMEOUT_S", 20.0),
             brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 90.0),
-            scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
-            scihub_tier_timeout_s=float(os.getenv("SCIHUB_TIER_TIMEOUT_S", "20.0")),
+            scihub_mirror_timeout_s=_float_env("SCIHUB_MIRROR_TIMEOUT_S", 12.0),
+            scihub_tier_timeout_s=_float_env("SCIHUB_TIER_TIMEOUT_S", 20.0),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 45.0),
             brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),

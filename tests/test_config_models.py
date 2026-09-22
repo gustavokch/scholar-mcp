@@ -232,3 +232,64 @@ def test_settings_who_iris_ttl_env_override(monkeypatch):
     monkeypatch.setenv("CACHE_TTL_WHO_IRIS", "86400")
     settings = Settings.load()
     assert settings.cache_ttl_who_iris == 86400
+
+
+@pytest.mark.parametrize(
+    "env_var,attr,default",
+    [
+        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", 12.0),
+        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", 20.0),
+        ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", 3600),
+        ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", 60),
+        ("CACHE_TTL_FDA", "cache_ttl_fda", 86400),
+        ("CACHE_TTL_WHO_IRIS", "cache_ttl_who_iris", 2592000),
+    ],
+)
+@pytest.mark.parametrize("malformed", ["abc", ""])
+def test_settings_malformed_timeout_and_ttl_env_falls_back_to_default(
+    monkeypatch, env_var, attr, default, malformed
+):
+    """A malformed timeout or TTL env var must fall back to the declared
+    default instead of raising and taking the process down at startup."""
+    monkeypatch.setenv(env_var, malformed)
+    settings = Settings.load()
+    assert getattr(settings, attr) == default
+    assert type(getattr(settings, attr)) is type(default)
+
+
+@pytest.mark.parametrize(
+    "env_var,attr,value,expected",
+    [
+        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", "5.5", 5.5),
+        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", "9.0", 9.0),
+        ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", "120", 120),
+        ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", "30", 30),
+        ("CACHE_TTL_FDA", "cache_ttl_fda", "1800", 1800),
+        ("CACHE_TTL_WHO_IRIS", "cache_ttl_who_iris", "3600", 3600),
+    ],
+)
+def test_settings_valid_timeout_and_ttl_env_is_parsed(
+    monkeypatch, env_var, attr, value, expected
+):
+    monkeypatch.setenv(env_var, value)
+    settings = Settings.load()
+    assert getattr(settings, attr) == expected
+    assert type(getattr(settings, attr)) is type(expected)
+
+
+@pytest.mark.parametrize(
+    "env_var,attr,default",
+    [
+        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", 12.0),
+        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", 20.0),
+        ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", 3600),
+        ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", 60),
+        ("CACHE_TTL_FDA", "cache_ttl_fda", 86400),
+        ("CACHE_TTL_WHO_IRIS", "cache_ttl_who_iris", 2592000),
+    ],
+)
+def test_settings_unset_timeout_and_ttl_env_uses_default(monkeypatch, env_var, attr, default):
+    monkeypatch.delenv(env_var, raising=False)
+    settings = Settings.load()
+    assert getattr(settings, attr) == default
+    assert type(getattr(settings, attr)) is type(default)
