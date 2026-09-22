@@ -9,6 +9,7 @@ import respx
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
+    CACHE_SCHEMA,
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
 )
@@ -183,9 +184,53 @@ async def test_cache_stores_capped_content_with_full_total_chars(
             )
         )
         await engine.get_full_text("biblio-1")
-        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        cached, _ = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
         assert cached["total_chars"] == 620000
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_pre_v1_cache_row_is_not_served(tmp_path: Path, monkeypatch):
+    """A row written under the un-versioned key holds a body already cut to
+    the old 50k ceiling with no ``total_chars``. Serving it under the v2 key
+    would score/page only that stub and report ``truncated: false`` on a
+    body that is actually truncated -- it must be a miss instead.
+    """
+    full = "z" * 620000
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        stale_row = {
+            "source": "brazil-moh",
+            "record_id": "biblio-1",
+            "document_url": FI_ADMIN_URL,
+            "truncated": False,
+            "status": "success",
+            "title": "Protocolo",
+            "content_type": "full_text",
+            "content": "z" * 50000,
+        }
+        await cache.set("brazil_moh_fulltext:biblio-1", stale_row, source="brazil_moh")
+
+        payload, meta = await engine.get_full_text("biblio-1")
+
+        assert meta.cached is False
+        assert payload["total_chars"] == 620000
     finally:
         await cache.close()
         await http_client.aclose()

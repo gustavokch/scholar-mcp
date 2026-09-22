@@ -14,6 +14,7 @@ import respx
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
+    CACHE_SCHEMA,
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
 )
@@ -160,7 +161,7 @@ async def test_cache_holds_full_body(tmp_path: Path, monkeypatch):
             )
         )
         await engine.get_full_text("biblio-1")
-        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        cached, _ = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert cached["content"] == body
         assert cached["total_chars"] == len(body)
         # A cached full body serves passages without refetching.

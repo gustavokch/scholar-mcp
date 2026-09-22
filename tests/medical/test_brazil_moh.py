@@ -12,6 +12,7 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BASE_FILTER,
     BVS_SEARCH_URL,
+    CACHE_SCHEMA,
     BrazilMoHEngine,
     _SearchState,
     _as_list,
@@ -635,7 +636,7 @@ async def test_search_network_failure_is_error_and_not_cached(tmp_path: Path):
         assert records == []
         assert meta.error is True
         composed = 'la:"pt" AND (type:"non-conventional" OR type:"monography") AND (dengue)'
-        _payload, cache_meta = await cache.get(f"brazil_moh_search:all:5:{composed}")
+        _payload, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:5:{composed}")
         assert cache_meta.cached is False
     finally:
         await cache.close()
@@ -655,6 +656,33 @@ async def test_search_caches_success_and_serves_from_cache(tmp_path: Path):
         assert first_meta.cached is False
         assert second_meta.cached is True
         assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_pre_v1_cache_row_is_not_served(tmp_path: Path):
+    """A row written under the un-versioned (pre-CACHE_SCHEMA) key must be a
+    miss: it predates ``has_full_text`` and ``from_dict`` would silently
+    default it to False, printing the off-site notice for a retrievable doc.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        composed = 'la:"pt" AND (type:"non-conventional" OR type:"monography") AND (dengue)'
+        stale_row = [
+            {"title": "Protocolo", "record_id": "biblio-1", "document_url": ""}
+        ]
+        await cache.set(f"brazil_moh_search:all:5:{composed}", stale_row, source="brazil_moh")
+
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+
+        assert route.call_count == 1
+        assert meta.cached is False
+        assert [r.record_id for r in records] == ["biblio-1"]
     finally:
         await cache.close()
         await http_client.aclose()
@@ -855,7 +883,7 @@ async def test_get_full_text_errored_without_abstract_is_error(tmp_path: Path):
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["status"] == "error"
         assert meta.error is True
-        _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
+        _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert cache_meta.cached is False
     finally:
         await cache.close()
@@ -926,7 +954,7 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
         assert meta.error is True
-        _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
+        _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert cache_meta.cached is False
     finally:
         await cache.close()
@@ -976,7 +1004,7 @@ async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert meta.error is True
-        _, cache_meta = await cache.get("brazil_moh_fulltext:biblio-1")
+        _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert cache_meta.cached is False
     finally:
         await cache.close()
@@ -1041,7 +1069,7 @@ async def test_get_full_text_truncates_served_not_cached(tmp_path: Path, monkeyp
         assert payload["content"].startswith("x" * 100)
         assert payload["truncated"] is True
         assert len(payload["content"]) < 500
-        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        cached, _ = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert len(cached["content"]) == 500
     finally:
         await cache.close()
@@ -1099,7 +1127,7 @@ async def test_get_full_text_caps_cached_content_at_ceiling(tmp_path: Path, monk
             )
         )
         await engine.get_full_text("biblio-1")
-        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        cached, _ = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
         assert cached["total_chars"] == MAX_FULL_TEXT_CHARS + 1000
     finally:
@@ -1426,7 +1454,7 @@ async def test_search_relaxed_request_failure_is_error_and_not_cached(tmp_path: 
         assert records == []
         assert meta.error is True
         composed = 'type:"non-conventional" AND la:"pt" AND (ti:dengue AND ti:hemorragica)'
-        _payload, cache_meta = await cache.get(f"brazil_moh_search:all:5:{composed}")
+        _payload, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:5:{composed}")
         assert cache_meta.cached is False
     finally:
         await cache.close()
@@ -2271,7 +2299,7 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         assert meta.error is True
         # Nothing cached: a second call must not be served a cached empty list.
         composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
-        _cached, cached_meta = await cache.get(f"brazil_moh_search:all:10:{composed}")
+        _cached, cached_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:10:{composed}")
         assert not cached_meta.cached
     finally:
         await cache.close()

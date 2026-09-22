@@ -24,6 +24,12 @@ MAX_RESULTS = 200
 MAX_FULL_TEXT_CHARS = 600_000
 MAX_CONCURRENT_PDF_RESOLUTIONS = 10
 
+# Bumped whenever a cached row's shape changes. See brazil_moh.CACHE_SCHEMA
+# for the rationale: an un-bumped key serves a pre-change row (body cut to
+# the old 50k ceiling, no total_chars) as if current, for the full TTL.
+# v2: 600k bodies with total_chars.
+CACHE_SCHEMA = "v2"
+
 logger = logging.getLogger(__name__)
 
 
@@ -335,7 +341,7 @@ class WHOIRISEngine:
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
 
-        cache_key = f"who_iris_fulltext:{normalized}"
+        cache_key = f"who_iris_fulltext:{CACHE_SCHEMA}:{normalized}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return (

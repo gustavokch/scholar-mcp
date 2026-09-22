@@ -99,6 +99,14 @@ OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
 MAX_FULL_TEXT_CHARS = 600_000
 
+# Bumped whenever a cached row's shape changes. from_dict() fills missing
+# fields with defaults rather than failing, so an un-bumped key serves a
+# pre-change row as if it were current: has_full_text silently False, a
+# body already cut to the old 50k ceiling with no total_chars. TTL here is
+# 30 days (config.cache_ttl_brazil_moh), so an un-bumped key is a month of
+# wrong answers. v2: has_full_text (B4) + 600k bodies with total_chars (B3).
+CACHE_SCHEMA = "v2"
+
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
@@ -688,7 +696,7 @@ class BrazilMoHEngine:
         # cache row. The fallback and relaxed queries never enter the key --
         # they derive from the same user query, so one user query keeps one row.
         title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{title_composed}"
+        cache_key = f"brazil_moh_search:{CACHE_SCHEMA}:{norm_collection}:{clamped}:{title_composed}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [BrazilGuideline.from_dict(item) for item in cached_data], meta
@@ -1146,7 +1154,7 @@ class BrazilMoHEngine:
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
 
-        cache_key = f"brazil_moh_fulltext:{normalized}"
+        cache_key = f"brazil_moh_fulltext:{CACHE_SCHEMA}:{normalized}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return (

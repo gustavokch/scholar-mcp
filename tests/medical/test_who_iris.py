@@ -499,6 +499,37 @@ async def test_get_full_text_caches_success(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_get_full_text_pre_v1_cache_row_is_not_served(tmp_path: Path):
+    """A row written under the un-versioned key holds a body already cut to
+    the old 50k ceiling with no ``total_chars``. It must be a miss under the
+    v2 key rather than served with a wrong ``truncated: false``.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        stale_row = {
+            "source": "who-iris",
+            "handle": "10665/311551",
+            "url": "https://iris.who.int/handle/10665/311551",
+            "truncated": False,
+            "status": "success",
+            "title": "Guideline",
+            "content_type": "full_text",
+            "content": "z" * 50000,
+        }
+        await cache.set("who_iris_fulltext:10665/311551", stale_row, source="who_iris")
+
+        find_route = respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([]))
+        payload, meta = await engine.get_full_text("10665/311551")
+
+        assert meta.cached is False
+        assert len(find_route.calls) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def make_blank_pdf(pages: int = 1) -> bytes:
     """Copy of tests.test_pdf_parser.make_blank_pdf: no cross-test import pattern exists."""
     writer = PdfWriter()
