@@ -856,7 +856,9 @@ class BrazilMoHEngine:
             kind = "ok"
         elif not error:
             kind = state.error_kind or "successful_empty"
-            if kind not in ("successful_empty", "ok"):
+            if kind not in ("successful_empty", "ok") and not (
+                state.challenge_hit or state.bvs_origin_down
+            ):
                 kind = "successful_empty"
         else:
             kind = state.error_kind or "backend_error"

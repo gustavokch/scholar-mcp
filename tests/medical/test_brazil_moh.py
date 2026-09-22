@@ -2621,6 +2621,59 @@ async def test_fetch_records_non_json_garbage_does_not_trip_breaker(tmp_path):
         await http_client.aclose()
 
 
+async def test_search_meta_keeps_cdn_challenge_kind_when_chain_recovers(tmp_path):
+    """A shield 403 the chain recovered from must not be reported as a clean empty.
+
+    Scenario: the BVS title-scoped stage hits the Bunny CDN shield (403) and
+    ``state.error_kind`` is set to ``"cdn_challenge"``; the PCDT sub-engine
+    then legitimately finds nothing for the query, so the call as a whole
+    does not error. ``"successful_empty"`` must mean the endpoint answered
+    cleanly with no matches, not "a shield was hit but we recovered".
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        state = _SearchState(challenge_hit=True, error_kind="cdn_challenge")
+        meta = engine._search_meta(
+            error=False,
+            state=state,
+            records=[],
+            elapsed_s=0.01,
+            rerank_in=0,
+            rerank_out=0,
+        )
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.challenge_hit is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_search_meta_still_collapses_unflagged_kinds_to_successful_empty(
+    tmp_path,
+):
+    """Without a challenge or origin-down flag, a stray kind still collapses.
+
+    Guards the coercion itself: a leftover ``error_kind`` from an earlier
+    stage that neither shielded nor took the origin down must still report
+    as a clean empty search.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        state = _SearchState(error_kind="timeout")
+        meta = engine._search_meta(
+            error=False,
+            state=state,
+            records=[],
+            elapsed_s=0.01,
+            rerank_in=0,
+            rerank_out=0,
+        )
+        assert meta.error_kind == "successful_empty"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @respx.mock
 async def test_monography_noise_does_not_displace_the_matching_guideline(
     tmp_path: Path,
