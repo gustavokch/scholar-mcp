@@ -841,6 +841,24 @@ class BrazilMoHEngine:
                 kept.append(record)
         return kept
 
+    @staticmethod
+    def _finalize_records(
+        records: list[BrazilGuideline],
+        query: str,
+        since_year: int | None,
+        clamped: int,
+    ) -> tuple[list[BrazilGuideline], int]:
+        """Filter by ``since_year``, rank, then slice to ``clamped``.
+
+        Shared by the cache-hit and cache-miss paths of ``search_guidelines``
+        so the cache can hold one unfiltered row per (collection, limit,
+        query) and still reproduce the exact per-``since_year`` result --
+        filtering before ranking, as ``_apply_since_year`` requires.
+        """
+        filtered = BrazilMoHEngine._apply_since_year(records, since_year)
+        ranked = rank_brazil_guidelines(filtered, query)[:clamped]
+        return ranked, len(filtered)
+
     def _search_meta(
         self,
         *,
@@ -960,16 +978,21 @@ class BrazilMoHEngine:
         # "dengue" and "  dengue  " compose identically and must share one
         # cache row. The fallback and relaxed queries never enter the key --
         # they derive from the same user query, so one user query keeps one row.
+        # ``since_year`` is deliberately absent from the key: the cached row
+        # holds the unfiltered merge, and ``_finalize_records`` applies the
+        # year filter uniformly on every read (hit or miss), so one row
+        # serves every ``since_year`` instead of fragmenting the 30-day
+        # cache per distinct year requested.
         title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
         cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{title_composed}"
-        if since_year and since_year > 0:
-            cache_key += f":since{int(since_year)}"
         call_start = time.monotonic()
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            cached_records = self._apply_since_year(
+            cached_records, _ = self._finalize_records(
                 [BrazilGuideline.from_dict(item) for item in cached_data],
+                query,
                 since_year,
+                clamped,
             )
             elapsed_s = time.monotonic() - call_start
             hit_meta = CacheMetadata(
@@ -1238,25 +1261,33 @@ class BrazilMoHEngine:
                 seen_ids.add(r.record_id)
             merged_records.append(r)
 
-        # Recency filter before ranking so a large relaxed-OR pool cannot
-        # drown 2024-2025 documents under pre-2015 ones (S2.2).
-        merged_records = self._apply_since_year(merged_records, since_year)
-
-        # Rank, then slice. Slicing first would hand the ranker only `clamped`
-        # of the `count` over-fetched candidates and discard the rest in BVS
+        # Filter, rank, then slice -- via the same helper the cache-hit path
+        # uses, so caching the unfiltered merge below reproduces this exact
+        # per-``since_year`` result on every future read. Filtering before
+        # ranking matters: a large relaxed-OR pool must not drown 2024-2025
+        # documents under pre-2015 ones (S2.2). Ranking before slicing
+        # matters too: slicing first would hand the ranker only `clamped` of
+        # the `count` over-fetched candidates and discard the rest in BVS
         # order, defeating the over-fetch.
-        rerank_in = len(merged_records)
-        records = rank_brazil_guidelines(merged_records, query)[:clamped]
+        records, rerank_in = self._finalize_records(
+            merged_records, query, since_year, clamped
+        )
 
         # A chain with a stalled stage returns partial results; caching them
         # under the 30-day TTL would make a transient stall permanent. An
         # origin outage is never cached at all: it is not evidence about
         # the corpus, and pinning it would both poison the TTL and count a
         # sick origin against the caller's breaker on replay.
+        #
+        # The row cached is the unfiltered merge, not the sliced `records`
+        # returned to this caller: `since_year` is not part of `cache_key`,
+        # so the same row must reproduce the correct result for any
+        # `since_year` a later call asks for (via `_finalize_records` on
+        # read).
         if not errored_any:
             await self.cache.set(
                 cache_key,
-                [record.to_dict() for record in records],
+                [record.to_dict() for record in merged_records],
                 source="brazil_moh",
             )
         elif not bvs_errored:
@@ -1267,7 +1298,7 @@ class BrazilMoHEngine:
             # its own cost. Hold the degraded merge briefly instead.
             await self.cache.set(
                 cache_key,
-                [record.to_dict() for record in records],
+                [record.to_dict() for record in merged_records],
                 source="brazil_moh",
                 ttl=DEGRADED_RESULT_TTL_SECONDS,
             )

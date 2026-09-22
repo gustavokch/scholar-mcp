@@ -683,6 +683,35 @@ async def test_search_fallback_cached_under_title_scoped_key(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_search_since_year_shares_one_cache_row_across_years(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc(da="202609")]))
+        )
+        first, first_meta = await engine.search_guidelines("dengue", limit=5, since_year=2020)
+        second, second_meta = await engine.search_guidelines("dengue", limit=5, since_year=2025)
+
+        # Both since_year values are satisfied by the 2026 record, so the
+        # second call must be served from the first call's cache row rather
+        # than issuing its own upstream search.
+        assert route.call_count == 1
+        assert first_meta.cached is False
+        assert second_meta.cached is True
+        assert [r.record_id for r in first] == [r.record_id for r in second]
+
+        # A since_year the record does not satisfy still filters correctly
+        # against the same cached row, with no further upstream calls.
+        third, third_meta = await engine.search_guidelines("dengue", limit=5, since_year=2027)
+        assert route.call_count == 1
+        assert third_meta.cached is True
+        assert third == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 from scholar_mcp.medical.brazil_moh import (
     _is_allowed_host,
     is_allowed_bvs_host,
