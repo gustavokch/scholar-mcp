@@ -43,6 +43,7 @@ class CrossRefProvider:
         journal: str | None = None,
         year_start: int | None = None,
         year_end: int | None = None,
+        journal_articles_only: bool = False,
     ) -> list[PaperMetadata]:
         params: dict[str, Any] = {
             "query.bibliographic": query.strip(),
@@ -57,8 +58,12 @@ class CrossRefProvider:
         filters: list[str] = []
         # Unfiltered bibliographic search returns books, datasets, and
         # dissertations ahead of papers on short or Portuguese queries
-        # (ENAMED misses E7); restrict the top-up pool to journal articles.
-        filters.append("type:journal-article")
+        # (ENAMED misses E7); the resolver's top-up call restricts to
+        # journal articles for that reason. A direct CrossRef search is not
+        # that top-up -- constraining it unconditionally made preprints,
+        # proceedings, and book chapters unreachable through this backend.
+        if journal_articles_only:
+            filters.append("type:journal-article")
         if year_start:
             filters.append(f"from-pub-date:{year_start}-01-01")
         if year_end:

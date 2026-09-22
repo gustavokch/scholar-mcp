@@ -193,12 +193,24 @@ async def test_crossref_search_returns_metadata(client):
     results = await CrossRefProvider(client).search("crispr", num_results=5)
     assert results[0].doi == "10.1038/xref1"
     assert "Ada Lovelace" in results[0].authors
-    # Hygiene (ENAMED misses B2): journal-article filter, parsed doc_type,
-    # and the source field the search envelope reports.
-    assert "type:journal-article" in route.calls.last.request.url.params.get("filter", "")
+    # finding 5: a direct CrossRef search is not the resolver's top-up, and
+    # must not carry the top-up's journal-article-only constraint -- a
+    # preprint or proceedings paper is a legitimate result here.
+    assert "type:journal-article" not in route.calls.last.request.url.params.get("filter", "")
     assert results[0].doc_type == "journal-article"
     assert results[0].source == "crossref"
     assert results[0].to_dict()["source"] == "crossref"
+
+
+@respx.mock
+async def test_crossref_search_journal_articles_only_sends_type_filter(client):
+    route = respx.get(url__startswith=CROSSREF).mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+    await CrossRefProvider(client).search(
+        "crispr", num_results=5, journal_articles_only=True
+    )
+    assert "type:journal-article" in route.calls.last.request.url.params.get("filter", "")
 
 
 @respx.mock

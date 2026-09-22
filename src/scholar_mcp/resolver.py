@@ -538,6 +538,7 @@ class WaterfallResolver:
                         journal=journal,
                         year_start=year_start,
                         year_end=year_end,
+                        journal_articles_only=True,
                     ),
                 )
                 # Deduplicate: PubMed records win on conflict

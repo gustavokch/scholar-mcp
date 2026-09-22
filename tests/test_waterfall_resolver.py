@@ -501,6 +501,22 @@ async def test_auto_top_up_drops_crossref_junk_keeps_relevant():
     assert junk.title not in titles
 
 
+async def test_auto_top_up_requests_journal_articles_only():
+    """finding 5: the resolver's CrossRef top-up dilutes a re-rank pool with
+    non-journal records, so it alone opts into the type filter -- a direct
+    CrossRef search must not."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = None
+    r.crossref.search = AsyncMock(return_value=[])
+    r.crossref.last_error = None
+
+    await r.search("burn resuscitation", source="auto", num_results=5, rerank=False)
+
+    r.crossref.search.assert_awaited_once()
+    assert r.crossref.search.await_args.kwargs["journal_articles_only"] is True
+
+
 async def test_auto_skips_crossref_top_up_when_page_satisfied():
     """PubMed already filled the requested page: no CrossRef round-trip,
     even though the re-rank candidate pool is not full."""
