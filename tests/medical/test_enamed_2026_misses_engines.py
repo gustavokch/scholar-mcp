@@ -203,10 +203,7 @@ async def test_timeout_state_maps_to_timeout_kind(tmp_path: Path):
     try:
         state = _SearchState()
         engine._mark_bvs_timed_out(state)
-        meta = engine._search_meta(
-            error=True, state=state, records=[],
-            elapsed_s=1.0, rerank_in=0, rerank_out=0,
-        )
+        meta = engine._search_meta(error=True, state=state, records=[])
         assert meta.error_kind == "timeout"
         assert meta.timeout is True
     finally:

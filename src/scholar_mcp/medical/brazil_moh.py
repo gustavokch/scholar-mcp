@@ -231,6 +231,24 @@ class _SearchState:
     overfetch_window: int = 0
 
 
+@dataclass
+class _SearchOutcome:
+    """The fields that vary across ``search_guidelines``' meta+log call sites.
+
+    ``query``, ``norm_collection``, ``clamped``, and ``call_start`` are the
+    same for every exit of one ``search_guidelines`` call, so they stay as
+    plain arguments to ``_finalize_search`` rather than living here.
+    """
+
+    cached: bool
+    cache_age: int
+    error: bool
+    state: _SearchState
+    records: list[BrazilGuideline]
+    rerank_in: int
+    rerank_out: int
+
+
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
@@ -875,9 +893,6 @@ class BrazilMoHEngine:
         error: bool,
         state: _SearchState,
         records: list[BrazilGuideline],
-        elapsed_s: float,
-        rerank_in: int,
-        rerank_out: int,
     ) -> CacheMetadata:
         """Build the §2 diagnostics-bearing CacheMetadata for a search call."""
         if not error and records:
@@ -938,6 +953,47 @@ class BrazilMoHEngine:
             meta.error,
             meta.error_kind,
         )
+
+    def _finalize_search(
+        self,
+        outcome: _SearchOutcome,
+        *,
+        query: str,
+        norm_collection: str,
+        clamped: int,
+        call_start: float,
+    ) -> CacheMetadata:
+        """Build the CacheMetadata for one search_guidelines exit and log it.
+
+        Collapses the cache-hit and cache-miss meta-building paths behind one
+        call: a cache hit carries its own ``cached``/``cache_age`` and a
+        simpler success/empty classification, while every other exit goes
+        through ``_search_meta``'s state-based classification.
+        """
+        elapsed_s = time.monotonic() - call_start
+        if outcome.cached:
+            meta = CacheMetadata(
+                cached=True,
+                cache_age=outcome.cache_age,
+                error=False,
+                error_kind="ok" if outcome.records else "successful_empty",
+            )
+        else:
+            meta = self._search_meta(
+                error=outcome.error, state=outcome.state, records=outcome.records
+            )
+        self._log_diagnostics(
+            query=query,
+            norm_collection=norm_collection,
+            clamped=clamped,
+            state=outcome.state,
+            meta=meta,
+            elapsed_s=elapsed_s,
+            cache_hit=outcome.cached,
+            rerank_in=outcome.rerank_in,
+            rerank_out=outcome.rerank_out,
+        )
+        return meta
 
     async def search_guidelines(
         self,
@@ -1004,23 +1060,20 @@ class BrazilMoHEngine:
                 since_year,
                 clamped,
             )
-            elapsed_s = time.monotonic() - call_start
-            hit_meta = CacheMetadata(
-                cached=True,
-                cache_age=meta.cache_age,
-                error=False,
-                error_kind="ok" if cached_records else "successful_empty",
-            )
-            self._log_diagnostics(
+            hit_meta = self._finalize_search(
+                _SearchOutcome(
+                    cached=True,
+                    cache_age=meta.cache_age,
+                    error=False,
+                    state=_SearchState(),
+                    records=cached_records,
+                    rerank_in=0,
+                    rerank_out=len(cached_records),
+                ),
                 query=query,
                 norm_collection=norm_collection,
                 clamped=clamped,
-                state=_SearchState(),
-                meta=hit_meta,
-                elapsed_s=elapsed_s,
-                cache_hit=True,
-                rerank_in=0,
-                rerank_out=len(cached_records),
+                call_start=call_start,
             )
             return cached_records, hit_meta
 
@@ -1217,46 +1270,36 @@ class BrazilMoHEngine:
                     rank_brazil_guidelines(local_records, query)[:clamped],
                     since_year,
                 )
-                elapsed_s = time.monotonic() - call_start
-                local_meta = self._search_meta(
-                    error=False,
-                    state=state,
-                    records=ranked_local,
-                    elapsed_s=elapsed_s,
-                    rerank_in=len(local_records),
-                    rerank_out=len(ranked_local),
-                )
-                self._log_diagnostics(
+                local_meta = self._finalize_search(
+                    _SearchOutcome(
+                        cached=False,
+                        cache_age=0,
+                        error=False,
+                        state=state,
+                        records=ranked_local,
+                        rerank_in=len(local_records),
+                        rerank_out=len(ranked_local),
+                    ),
                     query=query,
                     norm_collection=norm_collection,
                     clamped=clamped,
-                    state=state,
-                    meta=local_meta,
-                    elapsed_s=elapsed_s,
-                    cache_hit=False,
-                    rerank_in=len(local_records),
-                    rerank_out=len(ranked_local),
+                    call_start=call_start,
                 )
                 return ranked_local, local_meta
-            elapsed_s = time.monotonic() - call_start
-            fail_meta = self._search_meta(
-                error=True,
-                state=state,
-                records=[],
-                elapsed_s=elapsed_s,
-                rerank_in=0,
-                rerank_out=0,
-            )
-            self._log_diagnostics(
+            fail_meta = self._finalize_search(
+                _SearchOutcome(
+                    cached=False,
+                    cache_age=0,
+                    error=True,
+                    state=state,
+                    records=[],
+                    rerank_in=0,
+                    rerank_out=0,
+                ),
                 query=query,
                 norm_collection=norm_collection,
                 clamped=clamped,
-                state=state,
-                meta=fail_meta,
-                elapsed_s=elapsed_s,
-                cache_hit=False,
-                rerank_in=0,
-                rerank_out=0,
+                call_start=call_start,
             )
             return [], fail_meta
 
@@ -1312,25 +1355,20 @@ class BrazilMoHEngine:
                 source="brazil_moh",
                 ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
-        elapsed_s = time.monotonic() - call_start
-        done_meta = self._search_meta(
-            error=False,
-            state=state,
-            records=records,
-            elapsed_s=elapsed_s,
-            rerank_in=rerank_in,
-            rerank_out=len(records),
-        )
-        self._log_diagnostics(
+        done_meta = self._finalize_search(
+            _SearchOutcome(
+                cached=False,
+                cache_age=0,
+                error=False,
+                state=state,
+                records=records,
+                rerank_in=rerank_in,
+                rerank_out=len(records),
+            ),
             query=query,
             norm_collection=norm_collection,
             clamped=clamped,
-            state=state,
-            meta=done_meta,
-            elapsed_s=elapsed_s,
-            cache_hit=False,
-            rerank_in=rerank_in,
-            rerank_out=len(records),
+            call_start=call_start,
         )
         return records, done_meta
 

@@ -2666,9 +2666,6 @@ async def test_search_meta_keeps_cdn_challenge_kind_when_chain_recovers(tmp_path
             error=False,
             state=state,
             records=[],
-            elapsed_s=0.01,
-            rerank_in=0,
-            rerank_out=0,
         )
         assert meta.error_kind == "cdn_challenge"
         assert meta.challenge_hit is True
@@ -2693,9 +2690,6 @@ async def test_search_meta_still_collapses_unflagged_kinds_to_successful_empty(
             error=False,
             state=state,
             records=[],
-            elapsed_s=0.01,
-            rerank_in=0,
-            rerank_out=0,
         )
         assert meta.error_kind == "successful_empty"
     finally:
