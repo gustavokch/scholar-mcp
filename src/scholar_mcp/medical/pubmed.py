@@ -5,8 +5,8 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
-from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.medical.ranking import SOURCE_POSITION_WEIGHT, rank_medical_articles
+from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.utils.deduplication import deduplicate_papers
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager

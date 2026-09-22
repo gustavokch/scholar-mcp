@@ -14,6 +14,7 @@ src/scholar_mcp/
 ├── server.py             # FastMCP server tool and prompt definitions
 ├── citation_check.py     # Claim-to-source grounding checker (check_citations MCP tool)
 ├── ranking.py            # ScoringEngine + RankingPipeline: query-aware re-ranking, Z-scoring, evidence/impact/authority signals
+├── query_relax.py        # Shared PubMed query-relaxation ladder (full → 5 → 4 → 3) + content-overlap scoring; no medical content, used by resolver.py and providers/pubmed.py as well as medical/
 ├── data/
 │   ├── scimago_sjr.json  # Journal-impact lookup table for the ranking signal (ships empty)
 │   └── SOURCES.md        # Procedure for populating scimago_sjr.json
@@ -27,7 +28,6 @@ src/scholar_mcp/
 │   ├── models.py         # Medical data models
 │   ├── pediatrics.py     # Pediatric literature and guidelines engine
 │   ├── pubmed.py         # Dedicated medical PubMed client
-│   ├── query_relax.py    # Shared PubMed query-relaxation ladder (full → 5 → 4 → 3)
 │   ├── passages.py       # Shared passage/offset full-text serving for stored bodies
 │   ├── ranking.py        # Medical article ranking
 │   ├── rxnorm.py         # RxNorm drug nomenclature

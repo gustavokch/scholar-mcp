@@ -3,9 +3,9 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
-from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
 from scholar_mcp.providers.base import failure_reason
+from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.ranking import classify_evidence_grade
 from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient

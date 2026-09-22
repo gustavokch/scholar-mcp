@@ -5,7 +5,6 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.identifiers import resolve_identifiers
-from scholar_mcp.medical.query_relax import content_overlap_count
 from scholar_mcp.models import (
     CitationItem,
     DownloadResult,
@@ -18,7 +17,7 @@ from scholar_mcp.models import (
     RelatedPaper,
     SourceStatus,
 )
-
+from scholar_mcp.query_relax import content_overlap_count
 from scholar_mcp.parsers.jats import list_sections, select_sections
 from scholar_mcp.providers.arxiv import ARXIV_PDF, ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider

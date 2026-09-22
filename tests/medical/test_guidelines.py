@@ -268,7 +268,7 @@ async def test_search_clinical_guidelines_l1_ladder_bounded(tmp_path: Path):
     order, even when every step returns zero hits. A refactor that drops
     an entry or reorders the schedule must fail here rather than silently
     burn more of the NCBI budget."""
-    from scholar_mcp.medical.query_relax import relax_ladder
+    from scholar_mcp.query_relax import relax_ladder
 
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
@@ -307,7 +307,7 @@ async def test_search_clinical_guidelines_l1_step_cap(tmp_path: Path, monkeypatc
     """Layer 1 sends at most 1 + MAX_RELAX_EXTRA_CALLS esearch calls even
     when the ladder is longer than the budget. The client-side slice does
     not protect this self-walked path, so the cap lives on the loop."""
-    from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
+    from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
@@ -317,7 +317,7 @@ async def test_search_clinical_guidelines_l1_step_cap(tmp_path: Path, monkeypatc
     # A wider schedule than the budget allows: without the explicit cap L1
     # would walk all six entries.
     monkeypatch.setattr(
-        "scholar_mcp.medical.query_relax.RELAX_WINDOW_SIZES", (7, 6, 5, 4, 3)
+        "scholar_mcp.query_relax.RELAX_WINDOW_SIZES", (7, 6, 5, 4, 3)
     )
     query = "alpha beta gamma delta epsilon zeta eta theta"
     assert len(relax_ladder(query)) == 6

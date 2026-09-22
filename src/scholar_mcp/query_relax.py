@@ -11,11 +11,42 @@ internally when ``relax=True``; ``GuidelinesEngine`` walks it itself (with
 ``relax=False`` on the client) so its ``[pt]``/``[tiab]`` filters survive
 on every step; ``PubMedProvider`` rebuilds its author/journal/date filters
 around each relaxed variant.
+
+Lives in core, not ``medical/``: the ladder and ``content_overlap_count``
+carry no medical content, and ``resolver.py`` and ``providers/pubmed.py``
+need them on the scholar path -- a core module importing from ``medical/``
+inverts the package dependency.
 """
 
 import re
+import unicodedata
 
-from scholar_mcp.medical.ranking import PORTUGUESE_STOPWORDS, normalize_portuguese
+# Stored already accent-folded, because tokenization folds before it consults
+# this set -- an accented member would never be matched. Shared by
+# ``medical.ranking`` (client-side re-ranking) and outbound query composition
+# in ``medical/brazil_moh.py``. One source of truth keeps a term from being
+# scored as substantive while being dropped from the query, or the reverse.
+PORTUGUESE_STOPWORDS = frozenset({
+    "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos",
+    "e", "em", "entre", "na", "nao", "nas", "no", "nos", "o", "os", "ou",
+    "para", "pela", "pelo", "por", "que", "se", "sem", "sob", "sobre",
+    "um", "uma", "umas", "uns",
+})
+
+
+def normalize_portuguese(text: str | None) -> str:
+    """Fold Portuguese diacritics to ASCII and lowercase.
+
+    NFKD splits an accented character into its base plus a combining mark;
+    encoding to ASCII with ``ignore`` then drops the marks. This also discards
+    any non-Latin script, which is acceptable: a record whose text is entirely
+    non-Latin cannot match a Portuguese query.
+    """
+    if not text:
+        return ""
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    return folded.lower()
+
 
 # Declared locally rather than imported: the identically-named copy in
 # scholar_mcp.ranking is private to its module (see medical/ranking.py for
@@ -62,10 +93,10 @@ def normalize_query(query: str) -> str:
 def content_tokens(query: str) -> list[str]:
     """Accent-folded, stopword-stripped content tokens in order, deduplicated.
 
-    Folding and the Portuguese stopword set are reused from
-    ``medical.ranking`` so a term scored as substantive here is substantive
-    there too; the English stopword set is a local copy of
-    ``ScoringEngine``'s, so both query languages relax the same way.
+    The Portuguese stopword set and folding are shared with ``medical.ranking``
+    so a term scored as substantive here is substantive there too; the
+    English stopword set is a local copy of ``ScoringEngine``'s, so both
+    query languages relax the same way.
     """
     norm = normalize_portuguese(normalize_query(query))
     tokens = [

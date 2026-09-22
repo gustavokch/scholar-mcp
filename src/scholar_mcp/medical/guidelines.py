@@ -3,7 +3,7 @@ import re
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import ClinicalGuideline, GuidelineScore, MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
-from scholar_mcp.medical.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
+from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 GUIDELINE_PUBLICATION_TYPES = [

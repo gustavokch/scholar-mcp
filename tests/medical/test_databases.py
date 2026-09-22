@@ -526,7 +526,7 @@ def _esearch_terms():
 async def test_pubmed_client_relaxes_long_query_to_first_hit(tmp_path: Path):
     """An 11-token query ANDs to zero hits; the ladder must stop at the
     first non-empty prefix and report it as relaxed_query."""
-    from scholar_mcp.medical.query_relax import relax_ladder
+    from scholar_mcp.query_relax import relax_ladder
 
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)

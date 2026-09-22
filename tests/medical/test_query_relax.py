@@ -1,6 +1,6 @@
 """Unit tests for the shared PubMed query-relaxation ladder (plan B1)."""
 
-from scholar_mcp.medical.query_relax import (
+from scholar_mcp.query_relax import (
     MAX_RELAX_EXTRA_CALLS,
     content_overlap_count,
     content_tokens,

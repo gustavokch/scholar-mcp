@@ -16,7 +16,7 @@ stopword-stripped overlap), so passage matching agrees with ranking and
 query relaxation on what a term means.
 """
 
-from scholar_mcp.medical.query_relax import content_overlap_count
+from scholar_mcp.query_relax import content_overlap_count
 from scholar_mcp.utils.text import truncate_content
 
 # Default serving budget when the caller passes ``max_chars=None``. Engines
