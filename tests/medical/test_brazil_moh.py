@@ -3528,3 +3528,44 @@ async def test_on_topic_fallback_still_serves_a_bvs_outage(tmp_path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_topic_gate_ignores_solr_boolean_operators():
+    """A query operator is not a topic term.
+
+    "and"/"or"/"not"/"to" appear in no Portuguese record, so leaving them in
+    the term list hands them frequency zero, which makes them the sole
+    discriminating term and empties the pool. Every other query path in this
+    module strips them through ``_usable_tokens``.
+    """
+    pool = [
+        _g("Dengue: diagnóstico e manejo clínico", record_id="d1"),
+        _g("Guia de manejo clínico: Bronquiolite", record_id="b1"),
+    ]
+
+    assert [r.record_id for r in _topic_filtered(pool, "dengue AND manejo")] == ["d1"]
+    # "OR" only; a second disease name would be a real absent topic term and
+    # would empty the pool on the zero-frequency rule, not on the operator.
+    assert [r.record_id for r in _topic_filtered(pool, "dengue OR manejo")] == ["d1"]
+
+
+def test_topic_gate_empties_a_covered_pool_when_one_query_term_is_absent():
+    """The documented cost of the zero-frequency rule, pinned.
+
+    The pool holds two genuine Dengue guides, but "gestantes" appears in none
+    of them, so it takes frequency zero, becomes the sole discriminating term,
+    and empties the pool. This is the conservative direction the gate chooses
+    deliberately -- recorded here so a future change to the discriminating
+    tier cannot move it silently.
+    """
+    pool = [
+        _g("Dengue: diagnóstico e manejo clínico", record_id="d1"),
+        _g("Dengue - diagnóstico e manejo clínico adulto", record_id="d2"),
+        _g("Guia de manejo clínico: Bronquiolite", record_id="b1"),
+    ]
+
+    assert [r.record_id for r in _topic_filtered(pool, "dengue manejo clinico")] == [
+        "d1",
+        "d2",
+    ]
+    assert _topic_filtered(pool, "dengue manejo clinico em gestantes") == []
