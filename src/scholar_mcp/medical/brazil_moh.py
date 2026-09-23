@@ -72,7 +72,8 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
-from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS, serve_body
 from scholar_mcp.medical.ranking import (
     PORTUGUESE_STOPWORDS,
     normalize_portuguese,
@@ -81,7 +82,6 @@ from scholar_mcp.medical.ranking import (
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
-from scholar_mcp.utils.text import truncate_content
 
 _BVS_HOST = "pesquisa.bvsalud.org"
 BVS_SEARCH_URL = f"https://{_BVS_HOST}/portal/"
@@ -116,7 +116,15 @@ MAX_RESULTS = 50
 # MAX_PAGE_SIZE = 200 governs (e.g. at limit=50 the effective factor is 4).
 OVERFETCH_FACTOR = 10
 MAX_PAGE_SIZE = 200
-MAX_FULL_TEXT_CHARS = 50_000
+MAX_FULL_TEXT_CHARS = 600_000
+
+# Bumped whenever a cached row's shape changes. from_dict() fills missing
+# fields with defaults rather than failing, so an un-bumped key serves a
+# pre-change row as if it were current: has_full_text silently False, a
+# body already cut to the old 50k ceiling with no total_chars. TTL here is
+# 30 days (config.cache_ttl_brazil_moh), so an un-bumped key is a month of
+# wrong answers. v2: has_full_text (B4) + 600k bodies with total_chars (B3).
+CACHE_SCHEMA = "v2"
 
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
@@ -522,12 +530,25 @@ def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
     document_url = _select_document_url(doc)
     year, issued = _parse_issued(doc.get("da"))
     abstract, synthetic = _coerce_abstract(doc)
+    fulltext_id = _derive_fulltext_id(document_url)
     return BrazilGuideline(
         title=_first(doc.get("ti")),
         title_en=_first(doc.get("ti_en")),
         record_id=_first(doc.get("id")),
         document_url=document_url,
-        fulltext_id=_derive_fulltext_id(document_url),
+        fulltext_id=fulltext_id,
+        # Body-less catalog cards (no `ur`, no `ab`) are shaped here too;
+        # the flag lets ranking damp them instead of citing them as
+        # evidence (ENAMED misses plan B4). One shared rule with the gov.br
+        # converters: see medical.models.has_retrievable_body.
+        # A synthetic body (DeCS descriptors or ti_en) is a search snippet,
+        # not a retrievable body, so it is not offered as fallback_text.
+        has_full_text=has_retrievable_body(
+            document_url,
+            fulltext_id=fulltext_id,
+            fallback_text="" if synthetic else abstract,
+            url_trusted=is_allowed_bvs_host(document_url),
+        ),
         abstract=abstract,
         abstract_synthetic=synthetic,
         year=year,
@@ -1047,7 +1068,9 @@ class BrazilMoHEngine:
         # serves every ``since_year`` instead of fragmenting the 30-day
         # cache per distinct year requested.
         title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
-        cache_key = f"brazil_moh_search:{norm_collection}:{clamped}:{title_composed}"
+        cache_key = (
+            f"brazil_moh_search:{CACHE_SCHEMA}:{norm_collection}:{clamped}:{title_composed}"
+        )
         call_start = time.monotonic()
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
@@ -1580,6 +1603,8 @@ class BrazilMoHEngine:
         base: dict[str, Any],
         record: BrazilGuideline,
         max_chars: int | None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> tuple[dict[str, Any], CacheMetadata]:
         """Serve a bundled ``local:`` corpus file from disk, offline.
 
@@ -1627,7 +1652,7 @@ class BrazilMoHEngine:
         }
         await self.cache.set(cache_key, payload, source="brazil_moh")
         return (
-            self._serve_full_text(payload, max_chars),
+            self._serve_full_text(payload, max_chars, query=query, offset=offset),
             CacheMetadata(cached=False, cache_age=0, error=False),
         )
 
@@ -1635,6 +1660,8 @@ class BrazilMoHEngine:
         self,
         record_id: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> tuple[dict[str, Any], CacheMetadata]:
         """Fetch one document's full text under the published full-text ceiling.
 
@@ -1661,10 +1688,12 @@ class BrazilMoHEngine:
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
 
-        cache_key = f"brazil_moh_fulltext:{normalized}"
+        cache_key = f"brazil_moh_fulltext:{CACHE_SCHEMA}:{normalized}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            payload = self._serve_full_text(cached_data, max_chars)
+            payload = self._serve_full_text(
+                cached_data, max_chars, query=query, offset=offset
+            )
             payload.setdefault(
                 "abstract_fallback", payload.get("content_type") == "abstract"
             )
@@ -1747,7 +1776,7 @@ class BrazilMoHEngine:
         base["document_url"] = record.document_url
         if record.document_url.startswith("local:"):
             return await self._serve_local_text(
-                cache_key, base, record, max_chars
+                cache_key, base, record, max_chars, query=query, offset=offset
             )
         if ceiling > 0:
             remaining = ceiling - (time.monotonic() - budget_start)
@@ -1835,7 +1864,7 @@ class BrazilMoHEngine:
                 ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
         return (
-            self._serve_full_text(payload, max_chars),
+            self._serve_full_text(payload, max_chars, query=query, offset=offset),
             CacheMetadata(
                 cached=False, cache_age=0, error=False,
                 error_kind=error_kind or "ok",
@@ -1843,12 +1872,21 @@ class BrazilMoHEngine:
         )
 
     @staticmethod
-    def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
-        # ``max_chars`` is caller-supplied and is bounded on both sides:
-        # MAX_FULL_TEXT_CHARS is the ceiling the tool documents, so a large
-        # value must not return an entire manual in one response.
+    def _serve_full_text(
+        payload: dict[str, Any],
+        max_chars: int | None,
+        query: str | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        # ``max_chars`` is caller-supplied and stays clamped to the storage
+        # ceiling on the upper side; when it is None the serving default
+        # applies, not the ceiling, so a plain get_full_text call cannot
+        # return a whole multi-megabyte manual in one response. Targeted
+        # reads use ``query`` (passages) or ``offset`` (paging); without
+        # either the response is the serving-budget head cut.
+        # See medical.passages.serve_body.
         limit = (
-            MAX_FULL_TEXT_CHARS
+            DEFAULT_SERVING_CHARS
             if max_chars is None
             else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )
@@ -1856,9 +1894,8 @@ class BrazilMoHEngine:
         # Old cache rows predate ``total_chars`` and degrade to the stored
         # length (truncation at the ceiling reads as False) — accepted.
         total = payload.get("total_chars", len(stored))
-        content, truncated = truncate_content(stored, limit)
-        is_truncated = truncated or (len(content) < total)
-        served = {**payload, "content": content, "truncated": is_truncated, "total_chars": total}
+        served = {**payload, **serve_body(stored, total, limit, query=query, offset=offset),
+                  "total_chars": total}
         # The stored error kind is cache bookkeeping, not part of the tool's
         # response shape.
         served.pop(_CACHED_ERROR_KIND_KEY, None)

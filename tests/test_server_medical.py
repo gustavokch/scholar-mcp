@@ -160,3 +160,26 @@ async def test_get_brazil_moh_full_text_returns_error_envelope(monkeypatch):
     assert result["status"] == "error"
     assert result["content"] == ""
 
+
+
+async def test_search_clinical_guidelines_envelope_surfaces_relaxed_query(monkeypatch):
+    """The relaxed variant that answered must reach the caller-visible
+    envelope: without this reader the engines compute relaxed_query and
+    throw it away at the tool boundary."""
+    from scholar_mcp.medical.models import ClinicalGuideline
+
+    mock = AsyncMock()
+    mock.search_clinical_guidelines.return_value = (
+        [ClinicalGuideline(title="G", organization="WHO", year="2024", url="https://x")],
+        CacheMetadata(cached=False, cache_age=0, relaxed_query="dengue manejo"),
+    )
+    monkeypatch.setattr(srv, "guidelines_engine", mock)
+    result = await srv.search_clinical_guidelines("dengue manejo tratamento hospitalar")
+    assert result["relaxed_query"] == "dengue manejo"
+
+    mock.search_clinical_guidelines.return_value = (
+        [ClinicalGuideline(title="G", organization="WHO", year="2024", url="https://x")],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    result = await srv.search_clinical_guidelines("dengue")
+    assert "relaxed_query" not in result

@@ -44,6 +44,12 @@ class CacheMetadata:
     http_status: int | None = None
     challenge_hit: bool = False
     timeout: bool = False
+    # The relaxed variant that produced the results, when a PubMed-backed
+    # search walked the query-relaxation ladder past the original query.
+    # None when the original query sufficed or nothing was found. Surfaced
+    # in the MCP tool envelope by server._with_degraded so the caller can
+    # see the ladder worked.
+    relaxed_query: str | None = None
 
 
 class SQLiteCacheManager:

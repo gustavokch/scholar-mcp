@@ -335,3 +335,66 @@ def test_score_item_prefix_match_scores_substring_tier():
     query = "acromeg"
     score = _score_item(tokenize_portuguese(query), normalize_text(query), item)
     assert score == 0.90
+
+
+def test_dict_to_guideline_sets_has_full_text():
+    """PCDT rows with a download/local URL carry a body; rows with only a
+    description fall back to it; rows with neither have nothing."""
+    from scholar_mcp.medical.govbr_pcdt import _dict_to_guideline as pcdt_convert
+
+    assert pcdt_convert(
+        {"record_id": "pcdt-x", "title": "X", "download_url": "https://www.gov.br/x/@@download/file"}
+    ).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-y", "title": "Y", "download_url": "local:guidelines/y.txt"}
+    ).has_full_text is True
+    assert pcdt_convert(
+        {"record_id": "pcdt-z", "title": "Z", "description": "Resumo."}
+    ).has_full_text is True
+    assert pcdt_convert({"record_id": "pcdt-w", "title": "W"}).has_full_text is False
+
+
+def test_az_dict_to_guideline_sets_has_full_text():
+    from scholar_mcp.medical.govbr_az import _dict_to_guideline as az_convert
+
+    assert az_convert(
+        {"record_id": "az-x", "title": "X", "download_url": "https://www.gov.br/x.pdf", "tree": "svsa"}
+    ).has_full_text is True
+    assert az_convert(
+        {"record_id": "az-w", "title": "W", "tree": "svsa"}
+    ).has_full_text is False
+
+
+@pytest.mark.asyncio
+async def test_pcdt_search_pre_v1_cache_row_is_not_served(tmp_path):
+    """A row written under the un-versioned (pre-CACHE_SCHEMA) key must be a
+    miss: it predates ``has_full_text`` and ``from_dict`` would default it to
+    False, printing the off-site notice for a retrievable PCDT and sinking
+    the record into the body-less tier in the merged brazil_moh ranking.
+    """
+    from scholar_mcp.medical.govbr_pcdt import normalize_text
+
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings)
+    try:
+        stale_row = [
+            {
+                "title": "Acromegalia",
+                "record_id": "pcdt-acromegalia",
+                "document_url": "https://www.gov.br/x/@@download/file",
+            }
+        ]
+        await cache.set(
+            f"govbr_pcdt_search:5:{normalize_text('acromegalia')}",
+            stale_row,
+            source="govbr_pcdt",
+        )
+
+        results, meta = await engine.search("acromegalia", limit=5)
+
+        assert meta.cached is False
+        assert results[0].record_id == "pcdt-acromegalia"
+        assert results[0].has_full_text is True
+    finally:
+        await cache.close()

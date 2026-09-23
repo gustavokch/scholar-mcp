@@ -162,7 +162,7 @@ async def test_search_clinical_guidelines_relaxes_over_constrained_query(tmp_pat
             if c.request.url.params.get("term") is not None
         ]
         assert any(
-            "NSAIDs third trimester pregnancy" in t and "contraindications" not in t
+            "nsaids third trimester pregnancy" in t.lower() and "contraindications" not in t.lower()
             for t in esearch_terms
         ), "a relaxed ladder variant must have been sent to esearch"
     finally:
@@ -264,42 +264,78 @@ async def test_search_clinical_guidelines_does_not_relax_on_fetch_error(tmp_path
 
 @respx.mock
 async def test_search_clinical_guidelines_l1_ladder_bounded(tmp_path: Path):
-    """Layer 1 must issue at most MAX_RELAXATION_STEPS esearch calls even
-    when every step returns zero hits. A refactor that drops the floor or
-    raises the cap would silently burn more of the 3-req/s NCBI budget."""
-    from scholar_mcp.medical.guidelines import MAX_RELAXATION_STEPS
+    """Layer 1 walks the shared relax_ladder exactly once per entry, in
+    order, even when every step returns zero hits. A refactor that drops
+    an entry or reorders the schedule must fail here rather than silently
+    burn more of the NCBI budget."""
+    from scholar_mcp.query_relax import relax_ladder
 
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
     engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    query = "alpha beta gamma delta epsilon"
+    expected_ladder = relax_ladder(query)
+    assert 1 < len(expected_ladder) <= 5
     try:
         # Always return zero hits so the ladder runs to its natural end.
         respx.get(ESEARCH_URL).respond(
             json={"esearchresult": {"idlist": []}}
         )
 
-        guidelines, meta = await engine.search_clinical_guidelines(
-            "alpha beta gamma delta epsilon"
-        )
-        # L1 may issue up to (1 + MAX_RELAXATION_STEPS) calls: the full
-        # query plus each relaxation. With a 5-token query and floor=2,
-        # that's [5-token, 4-token, 3-token, 2-token] = 1 + 3 = 4 = bound.
-        l1_calls = sum(
-            1
+        guidelines, meta = await engine.search_clinical_guidelines(query)
+        l1_terms = [
+            c.request.url.params.get("term", "")
             for c in respx.calls
             if c.request.url.params.get("term") is not None
             and "[pt]" in c.request.url.params.get("term", "")
+        ]
+        # Exactly one esearch per ladder entry, in ladder order.
+        assert len(l1_terms) == len(expected_ladder)
+        for sent, expected_q in zip(l1_terms, expected_ladder):
+            assert sent.startswith(f"({expected_q}) AND (")
+        assert guidelines == []
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_l1_step_cap(tmp_path: Path, monkeypatch):
+    """Layer 1 sends at most 1 + MAX_RELAX_EXTRA_CALLS esearch calls even
+    when the ladder is longer than the budget. The client-side slice does
+    not protect this self-walked path, so the cap lives on the loop."""
+    from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    # A wider schedule than the budget allows: without the explicit cap L1
+    # would walk all six entries.
+    monkeypatch.setattr(
+        "scholar_mcp.query_relax.RELAX_WINDOW_SIZES", (7, 6, 5, 4, 3)
+    )
+    query = "alpha beta gamma delta epsilon zeta eta theta"
+    assert len(relax_ladder(query)) == 6
+    try:
+        # Always return zero hits so the ladder runs to its capped end.
+        respx.get(ESEARCH_URL).respond(
+            json={"esearchresult": {"idlist": []}}
         )
-        # Allow L2 calls (keyword fallback) too — but verify L1 ≤ bound.
-        assert l1_calls <= 1 + MAX_RELAXATION_STEPS, (
-            f"L1 issued {l1_calls} esearch calls; max allowed = {1 + MAX_RELAXATION_STEPS}"
-        )
-        # And confirm L1 actually walked the whole ladder (no premature stop
-        # except via the LAYER_THRESHOLD short-circuit, which we never reach
-        # because every step returns zero hits).
-        assert l1_calls == 1 + MAX_RELAXATION_STEPS
+
+        guidelines, meta = await engine.search_clinical_guidelines(query)
+        l1_terms = [
+            c.request.url.params.get("term", "")
+            for c in respx.calls
+            if c.request.url.params.get("term") is not None
+            and "[pt]" in c.request.url.params.get("term", "")
+        ]
+        assert len(l1_terms) == 1 + MAX_RELAX_EXTRA_CALLS
+        assert l1_terms[0].startswith(f"({relax_ladder(query)[0]}) AND (")
         assert guidelines == []
         assert meta.error is False
     finally:
@@ -314,10 +350,9 @@ async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(t
     must not appear twice in the final guidelines (each relaxation widens
     the search, so step-N ⊇ step-(N+1) is common).
 
-    The query has 4 tokens, so the ladder is: [4-token, 3-token, 2-token]
-    (ladder floors at 2 tokens). The router returns pmid 555 for both the
-    4-token and 3-term variants — the article that satisfied the stricter
-    4-token query also satisfies the looser 3-token query."""
+    The query has 4 tokens, so the ladder is: [4-token, 3-token]. The
+    router returns pmid 555 for both variants — the article that satisfied
+    the stricter 4-token query also satisfies the looser 3-token query."""
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)

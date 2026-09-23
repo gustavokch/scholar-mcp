@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (
+    CACHE_SCHEMA,
     GOVBR_HEADERS,
     SEVEN_DAYS_SECONDS,
     is_login_redirect,
@@ -29,7 +30,7 @@ from scholar_mcp.medical.govbr_common import (
     score_item,
     tokenize_portuguese,
 )
-from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -178,11 +179,20 @@ _COLLECTION_BY_TREE = {"svsa": "SVSA", "guias": "GUIAS-E-MANUAIS"}
 def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> BrazilGuideline:
     """Convert a catalog row to a BrazilGuideline."""
     collection = _COLLECTION_BY_TREE.get(item.get("tree", ""), "GOVBR")
+    document_url = item.get("download_url", "")
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
-        document_url=item.get("download_url", ""),
+        document_url=document_url,
         fulltext_id=item.get("record_id", ""),
+        # Same rule as the PCDT converter, via the shared helper
+        # (medical.models.has_retrievable_body): a catalog download URL or
+        # description text served as the abstract fallback.
+        has_full_text=has_retrievable_body(
+            document_url,
+            fallback_text=item.get("description", ""),
+            url_trusted=True,
+        ),
         source="brazil-moh",
         abstract=item.get("description", ""),
         year=item.get("year", ""),
@@ -399,7 +409,7 @@ class GovBrAZEngine:
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        cache_key = f"govbr_az_search:{limit}:{query_norm}"
+        cache_key = f"govbr_az_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and isinstance(cached_data, list):
             return [BrazilGuideline.from_dict(d) for d in cached_data], meta

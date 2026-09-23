@@ -3,6 +3,7 @@ import re
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import ClinicalGuideline, GuidelineScore, MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
+from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 GUIDELINE_PUBLICATION_TYPES = [
@@ -54,7 +55,6 @@ ORG_ABBREVIATIONS = {
 
 MIN_SCORE_THRESHOLD = 2.5
 LAYER_THRESHOLD = 5
-MAX_RELAXATION_STEPS = 3
 
 
 def _is_aap_journal(journal: str) -> bool:
@@ -66,27 +66,6 @@ def _is_aap_journal(journal: str) -> bool:
     the start of the name rather than anywhere in it.
     """
     return journal.strip().lower().startswith("pediatrics")
-
-
-def _relaxed_queries(query: str) -> list[str]:
-    """Ladder of successively relaxed variants of a natural-language query:
-    the full query, then the trailing token dropped each step, floored at
-    2 tokens and at most MAX_RELAXATION_STEPS relaxation steps (NCBI allows
-    3 req/s unauthenticated, so the extra requests must stay bounded).
-
-    PubMed ANDs every term, so a long query is over-constrained — measured
-    on live esearch, 'NSAIDs third trimester pregnancy contraindications'
-    plus the publication-type filter returns 0 hits while its 4-token prefix
-    returns 1 and its 2-token prefix returns 15.
-    """
-    words = query.split()
-    ladder = [query] if words else []
-    for _ in range(MAX_RELAXATION_STEPS):
-        if len(words) <= 2:
-            break
-        words = words[:-1]
-        ladder.append(" ".join(words))
-    return ladder
 
 
 def extract_organization(article: MedicalArticle) -> str:
@@ -183,20 +162,30 @@ class GuidelinesEngine:
 
         # Layer 1: Search with formal publication type filters, relaxed down
         # the ladder while the query keeps over-constraining PubMed to too
-        # few results. Results accumulate across ladder steps.
+        # few results. Results accumulate across ladder steps. relax=False:
+        # the ladder lives here so the publication-type filter survives on
+        # every step; the client's own ladder would mangle it.
+        # relaxed_query reports the first relaxed variant that contributed
+        # hits, so the caller can see the ladder worked.
         pt_query = " OR ".join(GUIDELINE_PUBLICATION_TYPES)
         articles_l1: list[MedicalArticle] = []
         seen_pmids: set[str] = set()
         errored = False
-        for q in _relaxed_queries(query):
+        relaxed_query: str | None = None
+        # Explicit step cap: this path walks the ladder itself, so the
+        # client-side MAX_RELAX_EXTRA_CALLS slice does not protect it. The
+        # slice keeps the full schedule available to callers with their own
+        # budget instead of shrinking relax_ladder for everyone.
+        for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
             articles_step, meta_step = await self.pubmed.search_articles(
-                f"({q}) AND ({pt_query})", max_results=20
+                f"({q}) AND ({pt_query})", max_results=20, relax=False
             )
             errored = errored or meta_step.error
             if meta_step.error:
                 # A fetch failure is not a zero-hit: relaxing further would
                 # mistake a transport error for an over-constrained query.
                 break
+            added = 0
             for a in articles_step:
                 pmid = a.pmid or ""
                 if pmid and pmid in seen_pmids:
@@ -204,6 +193,9 @@ class GuidelinesEngine:
                 if pmid:
                     seen_pmids.add(pmid)
                 articles_l1.append(a)
+                added += 1
+            if step_idx > 0 and added and relaxed_query is None:
+                relaxed_query = q
             if len(articles_l1) >= LAYER_THRESHOLD:
                 break
 
@@ -214,9 +206,11 @@ class GuidelinesEngine:
         # Layer 2: Semantic keyword fallback if Layer 1 returned few results
         if len(candidates) < LAYER_THRESHOLD:
             kw_terms = " OR ".join(f"{kw}[tiab]" for kw in GUIDELINE_KEYWORDS[:5])
-            for q in _relaxed_queries(query):
+            # Same explicit step cap as Layer 1: this walk is also
+            # self-driven, one NCBI request per step at 3 req/s.
+            for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
                 articles_l2, meta_l2 = await self.pubmed.search_articles(
-                    f"({q}) AND ({kw_terms})", max_results=20
+                    f"({q}) AND ({kw_terms})", max_results=20, relax=False
                 )
                 errored = errored or meta_l2.error
                 if meta_l2.error:
@@ -227,6 +221,8 @@ class GuidelinesEngine:
                         seen_pmids.add(a.pmid)
                         candidates.append((a, False, True))
                         added += 1
+                if step_idx > 0 and added and relaxed_query is None:
+                    relaxed_query = q
                 # Layer 2 is the salvage fallback: unlike Layer 1 it stops at
                 # the first step that contributes anything — each extra step
                 # is another NCBI request at 3 req/s, and the scoring gate
@@ -284,4 +280,7 @@ class GuidelinesEngine:
             [g.to_dict() for g in guidelines],
             source="guidelines",
         )
-        return guidelines, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return (
+            guidelines,
+            CacheMetadata(cached=False, cache_age=0, error=errored, relaxed_query=relaxed_query),
+        )

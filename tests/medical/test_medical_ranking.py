@@ -322,3 +322,105 @@ def test_rank_brazil_guidelines_none_text_does_not_raise():
     g.title_en = None  # type: ignore[assignment]
     ranked = rank_brazil_guidelines([g], "dengue", current_year=2026)
     assert ranked[0].score is not None
+
+
+def test_rank_brazil_guidelines_bodyless_card_sinks_below_body():
+    # Identical text, so pre-damping scores differ only by the source
+    # position prior, which favors the first record (the body-less card).
+    # Halving must still sink it below the record with a body -- and the
+    # card must survive in the ranking, not be dropped.
+    guidelines = [
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="body",
+            has_full_text=True,
+        ),
+    ]
+    ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    assert [g.record_id for g in ranked] == ["body", "card"]
+    assert ranked[0].score is not None and ranked[1].score is not None
+    assert ranked[1].score < ranked[0].score
+    assert len(ranked) == 2
+
+
+def test_rank_brazil_guidelines_tier_holds_for_strong_bodiless_card():
+    """Enforcement, not just damping: a body-less card whose damped score
+    still beats a weak body record must nevertheless rank below it."""
+    guidelines = [
+        _guideline(
+            "Dengue manejo tratamento prevencao controle epidemia vigilancia",
+            year="2026",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline("Dengue", year="2005", record_id="body", has_full_text=True),
+    ]
+    ranked = rank_brazil_guidelines(
+        guidelines, "dengue manejo tratamento", current_year=2026
+    )
+    assert [g.record_id for g in ranked] == ["body", "card"]
+    assert ranked[0].score is not None and ranked[1].score is not None
+    # The card outscores the body even damped: only the tier puts it second.
+    assert ranked[1].score > ranked[0].score
+    assert len(ranked) == 2
+
+
+def test_rank_brazil_guidelines_damping_is_idempotent():
+    """finding 7: the no-full-text damping factor must be folded in as the
+    score is assigned, not mutated onto the same objects after the fact --
+    calling the ranker twice on the same list must not compound the factor."""
+    guidelines = [
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="card",
+            has_full_text=False,
+        ),
+        _guideline(
+            "Manejo da dengue",
+            abstract="Trata da dengue no Brasil.",
+            year="2020",
+            record_id="body",
+            has_full_text=True,
+        ),
+    ]
+    first = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    first_scores = {g.record_id: g.score for g in first}
+    second = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
+    second_scores = {g.record_id: g.score for g in second}
+    assert first_scores == second_scores
+
+
+
+def test_rank_brazil_guidelines_factor_does_not_affect_order(monkeypatch):
+    """The tier partition, not the factor, decides order: with the factor
+    neutralized, body-less records still sort after every record with a
+    body and keep their relative order within the tier."""
+    from scholar_mcp.medical import ranking
+
+    body = _guideline("asma leve", record_id="body", has_full_text=True)
+    weak = _guideline("asma", record_id="weak", has_full_text=False)
+    strong = _guideline("asma leve conduta", record_id="strong", has_full_text=False)
+
+    baseline = [
+        g.record_id
+        for g in ranking.rank_brazil_guidelines([weak, strong, body], "asma leve conduta")
+    ]
+    monkeypatch.setattr(ranking, "NO_FULL_TEXT_SCORE_FACTOR", 1.0)
+    neutral = [
+        g.record_id
+        for g in ranking.rank_brazil_guidelines([weak, strong, body], "asma leve conduta")
+    ]
+
+    assert baseline == neutral
+    assert baseline[0] == "body"

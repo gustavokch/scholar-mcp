@@ -115,11 +115,15 @@ async def search_papers(
         # ContextScoped attribute — embedding it would let a later request
         # mutate what this call returned.
         snapshot = dict(sources)
-        return {
+        envelope: dict[str, Any] = {
             "papers": payload[:clamped_num],
             "sources": snapshot,
             "degraded": any(v in ("blocked", "failed") for v in snapshot.values()),
         }
+        relaxed_query = getattr(resolver, "last_relaxed_query", None)
+        if relaxed_query is not None:
+            envelope["relaxed_query"] = relaxed_query
+        return envelope
     except Exception as ex:
         return {
             "papers": [],
@@ -138,9 +142,14 @@ def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, An
     engines keep ``error=False`` on a substituted result (e.g. an abstract
     fallback after a failed PDF fetch) but still classify the failure in
     ``error_kind`` -- that must surface as degraded too.
+    The relaxation variant that answered is surfaced alongside it: without
+    this reader the relaxed_query the engines compute never reaches a
+    caller-visible field.
     """
     if meta.error or meta.error_kind not in ("", "ok", "successful_empty"):
         payload["degraded"] = True
+    if meta.relaxed_query is not None:
+        payload["relaxed_query"] = meta.relaxed_query
     return payload
 
 
@@ -592,6 +601,8 @@ if settings.enable_medical_tools:
     async def get_who_iris_full_text(
         handle: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """Retrieve full text of a WHO IRIS guideline by handle.
 
@@ -603,9 +614,15 @@ if settings.enable_medical_tools:
                 full landing-page URL. Handles are returned by
                 search_who_iris_guidelines as `handle`.
             max_chars: Maximum character limit for the returned text (defaults to 50,000).
+            query: Optional topic terms: returns the 2k head plus the top-scoring
+                passages within max_chars, with their offsets in `passages`.
+            offset: Character offset for paging through a long body
+                (body[offset:offset+max_chars]); ignored when query is given.
         """
         try:
-            payload, meta = await who_iris_engine.get_full_text(handle, max_chars=max_chars)
+            payload, meta = await who_iris_engine.get_full_text(
+                handle, max_chars=max_chars, query=query, offset=offset
+            )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
             return payload
         except Exception as ex:
@@ -616,24 +633,12 @@ if settings.enable_medical_tools:
         query: str,
         limit: int = 10,
         collection: str = "all",
-        since_year: int | None = None,
     ) -> dict[str, Any]:
         """Search Brazilian Ministry of Health technical publications (BVS/iAHx).
 
         Covers PCDT (Protocolos Clínicos e Diretrizes Terapêuticas), CONITEC
         health-technology assessments, cadernos de atenção básica, manuais
         técnicos, and normas de vigilância. Results are in Portuguese.
-
-        The `record_id` of every hit is stable (the BVS Solr id or a bundled
-        `ms-*` corpus key) and is the fold key for `med:brmoh:{record_id}`;
-        pass it to get_brazil_moh_full_text to open the document. Machine
-        consumers read `diagnostics.error_kind` (`ok` | `successful_empty` |
-        `cdn_challenge` | `origin_outage` | `timeout` | `backend_error`):
-        `origin_outage` is a sick origin, never cached, and must not count
-        against any caller-side breaker. Published budgets: the search chain
-        (`brazil_chain_timeout_s`, per-stage `brazil_stage_timeout_s`,
-        browser tier `brazil_browser_timeout_s`) versus one document fetch
-        (`brazil_fulltext_timeout_s`).
 
         Args:
             query: Free-text search terms. Portuguese terms match best;
@@ -644,8 +649,6 @@ if settings.enable_medical_tools:
                 'pcdt' (PCDT clinical protocols from gov.br), or
                 'az' (gov.br SVSA and guias-e-manuais publications,
                 including the Dengue and Tuberculosis surveillance manuals).
-            since_year: Drop records published before this year (e.g. 2024
-                keeps 2024-2025 guidance). Records with no year are kept.
         """
         # The engine clamps limit; no server-side clamp.
         norm_collection = (collection or "all").strip().lower()
@@ -657,8 +660,7 @@ if settings.enable_medical_tools:
             }
         try:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
-                query, limit=limit, collection=norm_collection,
-                since_year=since_year,
+                query, limit=limit, collection=norm_collection
             )
             payload = format_brazil_moh_guidelines(guidelines, query, meta)
             payload["diagnostics"] = {
@@ -677,27 +679,28 @@ if settings.enable_medical_tools:
     async def get_brazil_moh_full_text(
         record_id: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """Retrieve full text of a Brazilian Ministry of Health document.
 
         Downloads the document PDF from the BVS repository and extracts its
-        text. When the PDF cannot be retrieved but the record carries an
-        abstract, the abstract is served with `abstract_fallback=True`
-        (`content_type="abstract"`) -- an explicit flag, never silent.
-        Bundled `local:` corpus documents are served from disk offline
-        (`content_type="text"`). One fetch is bounded by
-        `brazil_fulltext_timeout_s`, separately from the search chain.
+        text. Falls back to the record abstract when the document is hosted
+        off-site or the PDF cannot be retrieved.
 
         Args:
-            record_id: The stable `record_id` field returned by
-                search_brazil_moh_guidelines (e.g. 'biblio-1701387', or a
-                bundled 'ms-*' corpus key usable as 'med:brmoh:{record_id}').
+            record_id: The `record_id` field returned by
+                search_brazil_moh_guidelines (e.g. 'biblio-1701387').
             max_chars: Maximum character limit for the returned text
-                (defaults to 50,000, which is also the ceiling).
+                (defaults to 50,000; capped at the 600,000 storage ceiling).
+            query: Optional topic terms: returns the 2k head plus the top-scoring
+                passages within max_chars, with their offsets in `passages`.
+            offset: Character offset for paging through a long body
+                (body[offset:offset+max_chars]); ignored when query is given.
         """
         try:
             payload, meta = await brazil_moh_engine.get_full_text(
-                record_id, max_chars=max_chars
+                record_id, max_chars=max_chars, query=query, offset=offset
             )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
             return _with_degraded(payload, meta)
