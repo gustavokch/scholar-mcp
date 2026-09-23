@@ -15,6 +15,7 @@ These tests use ``httpx.MockTransport``: the handler sees the real
 from ``request.extensions["timeout"]``.
 """
 
+import asyncio
 import time
 
 import httpx
@@ -134,6 +135,49 @@ async def test_spent_deadline_issues_no_request_at_all():
         assert failure is not None
         assert failure.kind == "transport"
         assert failure.status is None
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()
+
+
+async def test_gate_costs_the_limiter_spacing_before_retrying():
+    """The next attempt's price includes the bucket it has to wait for.
+
+    Backoff plus the measured attempt cost fits the budget; the 1 req/s spacing
+    on top of them does not. A gate blind to the limiter approves the retry and
+    parks in ``acquire`` past the deadline -- and because a real caller holds
+    the same deadline as an ``asyncio.wait_for``, the cancellation lands inside
+    that park. ``get`` never reaches its own bailout, so the 503 it was already
+    holding is replaced by a bare ``TimeoutError``: the exact failure mode this
+    ladder exists to remove. Production is this shape -- the BVS bucket is
+    1 req/s, and the 429 branch installs a throttle of its own two lines above
+    the gate.
+    """
+    client, calls = _client(_always_503, backoff_base=0.01)
+    # A fresh 1 req/s bucket: the first acquire spends the burst token for
+    # free, the second pays a full second.
+    limiter = AsyncRateLimiter(rate_per_sec=1.0)
+    client._limiter_for_url = lambda url: limiter
+    budget = 0.3
+    try:
+
+        async def _call() -> tuple[httpx.Response | None, object]:
+            # ``last_failure`` is ContextScoped, and ``wait_for`` runs the
+            # coroutine in a child task with its own context. Read it here, in
+            # the same task -- which is also where every real caller reads it
+            # (``_fetch_records`` is itself the coroutine the stage wraps).
+            resp = await client.get(
+                "https://example.org/degraded",
+                deadline=time.monotonic() + budget,
+            )
+            return resp, client.last_failure
+
+        resp, failure = await asyncio.wait_for(_call(), timeout=budget)
+        assert resp is None
+        assert calls["count"] == 1
+        assert failure is not None
+        assert failure.kind == "http"
+        assert failure.status == 503
     finally:
         await client.aclose()
         AsyncHttpClient.reset_dead_hosts()

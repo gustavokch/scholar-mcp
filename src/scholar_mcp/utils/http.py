@@ -155,6 +155,21 @@ _PERMANENT_TRANSPORT_EXCEPTIONS = (
 )
 
 
+def _limiter_spacing(limiter: AsyncRateLimiter) -> float:
+    """Lower bound on what this limiter's next ``acquire`` will cost.
+
+    A retry does not begin at the end of its backoff: it begins when the bucket
+    lets it through. ``_reserve`` consumes a token, so the exact figure cannot
+    be peeked -- but one token interval, or whatever is left of an installed
+    throttle, is knowable from plain reads and is the part a deadline gate
+    would otherwise be blind to. Under-costing it puts the park inside the
+    caller's ceiling, where the cancellation lands mid-``acquire`` and the
+    status the ladder was holding is lost.
+    """
+    interval = 1.0 / limiter.rate_per_sec if limiter.rate_per_sec > 0 else 0.0
+    return max(interval, limiter.throttled_until - time.monotonic())
+
+
 def _is_permanent_transport_error(exc: BaseException) -> bool:
     """True when exc or any chained cause/context is a permanent network failure.
 
@@ -571,8 +586,11 @@ class AsyncHttpClient:
                 request_kwargs["timeout"] = min(
                     float(self.settings.request_timeout), remaining
                 )
+            # Outside the ``try``: the ``except`` below reads it to cost the
+            # attempt, and a statement inserted above it inside the block would
+            # turn a transport error into an UnboundLocalError.
+            attempt_started = time.monotonic()
             try:
-                attempt_started = time.monotonic()
                 resp = await self.client.get(
                     target_url, headers=headers, **request_kwargs
                 )
@@ -624,7 +642,10 @@ class AsyncHttpClient:
 
                     if (
                         deadline is not None
-                        and time.monotonic() + wait_time + last_attempt_cost
+                        and time.monotonic()
+                        + wait_time
+                        + _limiter_spacing(limiter)
+                        + last_attempt_cost
                         >= deadline
                     ):
                         # Falling through, not sleeping: the terminal path below
@@ -691,7 +712,11 @@ class AsyncHttpClient:
                     )
                     if (
                         deadline is None
-                        or time.monotonic() + wait_time + last_attempt_cost < deadline
+                        or time.monotonic()
+                        + wait_time
+                        + _limiter_spacing(limiter)
+                        + last_attempt_cost
+                        < deadline
                     ):
                         logger.info(
                             "HTTP GET %s raised %s (attempt %d/%d), retrying in %.2fs: %s",
