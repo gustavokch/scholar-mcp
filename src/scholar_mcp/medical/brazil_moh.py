@@ -178,11 +178,14 @@ _BVS_OUTAGE_MARKERS = (
 # technical manual while bounding the merged payload.
 ABSTRACT_MAX_CHARS = 2000
 
-# BVS search retries only 429: a 5xx from this host is an origin outage, and
-# retrying it four times with backoff burns the stage budget that the
-# remaining stages (or the browser tier) need. The non-challenge shield-403
-# burst retry still applies inside the HTTP layer even under this override.
-_BVS_RETRYABLE_STATUSES = frozenset({429})
+# BVS returns a transient 5xx per request, not per outage: the same URL
+# alternates 502 and 200 across consecutive requests, and the 502 arrives in
+# well under a second, so the retry ladder recovers it for a fraction of the
+# stage budget. Treating it as a settled outage discarded the stage's whole
+# yield. Members match ``RETRYABLE_STATUS_CODES``; the constant stays named so
+# a future per-host narrowing is one line. The non-challenge shield-403 burst
+# retry still applies inside the HTTP layer even under this override.
+_BVS_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
@@ -661,11 +664,13 @@ class BrazilMoHEngine:
         sets ``state.bvs_shielded`` so later BVS stages short-circuit;
         truncated JSON or other garbage sets no flag.
 
-        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
-        5xx here is an origin outage, and burning backoff retries on it
-        spends the stage budget the remaining stages need. The failure is
-        classified onto ``state`` (``cdn_challenge`` vs ``origin_outage``
-        vs ``timeout`` vs ``backend_error``) for the §2 contract.
+        Transient 5xx retries inside this call
+        (``_BVS_RETRYABLE_STATUSES``): the host alternates 5xx and 200 across
+        consecutive requests, so the next attempt usually carries the records
+        this one missed, and it arrives fast enough to fit the stage budget.
+        A failure surviving the bounded ladder is classified onto ``state``
+        (``cdn_challenge`` vs ``origin_outage`` vs ``timeout`` vs
+        ``backend_error``) for the §2 contract.
         """
         state.stages_attempted += 1
         state.overfetch_window = max(state.overfetch_window, count)
@@ -1557,10 +1562,11 @@ class BrazilMoHEngine:
         but the response's final URL is re-checked against the allowlist so
         a redirect cannot carry the fetch off-host.
 
-        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
-        5xx from the document host is an origin outage, and retrying it
-        would burn the caller's remaining budget on a fetch that will not
-        succeed.
+        Transient 5xx retries inside this call
+        (``_BVS_RETRYABLE_STATUSES``): the document host answers per request
+        rather than per outage, so the attempt after a 5xx often returns the
+        document. The ladder is bounded by ``AsyncHttpClient.max_retries``,
+        which keeps a host that is genuinely down inside the caller's budget.
         """
         if not _is_allowed_host(document_url):
             return "", None

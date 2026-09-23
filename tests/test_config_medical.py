@@ -58,11 +58,19 @@ def test_brazil_moh_ttl_env_override(monkeypatch):
 
 def test_brazil_timeout_defaults_leave_room_for_browser_tier():
     """Chain budget must cover PCDT + BVS stages AND leave time for the
-    camoufox fallback, which needs ~25 s for startup plus Bunny CDN challenge."""
+    camoufox fallback, which needs ~25 s for startup plus Bunny CDN challenge.
+
+    The stage ceiling must also clear one real BVS response: the host's TTFB
+    runs to ~25 s even when Solr answers in under half a second, so a ceiling
+    below that floor cancels every success the stage would have produced.
+    """
     settings = Settings.load()
-    assert settings.brazil_stage_timeout_s == 20.0
-    assert settings.brazil_chain_timeout_s == 90.0
+    assert settings.brazil_stage_timeout_s == 30.0
+    assert settings.brazil_chain_timeout_s == 120.0
     assert settings.brazil_browser_timeout_s == 45.0
+    # One BVS stage must outlast the host's slowest observed TTFB plus the
+    # retry ladder spent on the transient 5xx that precedes it.
+    assert settings.brazil_stage_timeout_s > 25.0
     # Worst case: 3 stages at full ceiling still leaves browser time.
     assert (
         settings.brazil_chain_timeout_s - 3 * settings.brazil_stage_timeout_s

@@ -188,10 +188,13 @@ async def test_500_origin_outage_classified_and_not_cached(tmp_path: Path):
         assert meta.http_status == 500
         assert meta.challenge_hit is False
         first_calls = len(route.calls)
-        assert first_calls == 1  # fail fast: no 5xx retry ladder
+        # A 5xx is retried now: the host answers per-request, not per-outage.
+        assert first_calls == http_client.max_retries
         records2, meta2 = await engine.search_guidelines("dengue", limit=10)
         assert records2 == [] and meta2.error_kind == "origin_outage"
-        assert len(route.calls) == first_calls + 1
+        # The outage itself is still never cached: the second search pays the
+        # ladder again rather than replaying a stored failure.
+        assert len(route.calls) == first_calls * 2
     finally:
         await cache.close()
         await http_client.aclose()
@@ -657,7 +660,7 @@ async def test_fulltext_lookup_challenge_kind_propagates(tmp_path: Path):
 
 
 @respx.mock
-async def test_lookup_record_does_not_retry_5xx(tmp_path: Path):
+async def test_lookup_record_retries_5xx_then_reports_outage(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
@@ -666,7 +669,9 @@ async def test_lookup_record_does_not_retry_5xx(tmp_path: Path):
         record, kind = await engine._lookup_record("biblio-x")
         assert record is None
         assert kind == "origin_outage"
-        assert len(route.calls) == 1, "a 5xx lookup must fail fast like the search path"
+        assert len(route.calls) == http_client.max_retries, (
+            "a 5xx lookup retries like the search path, then reports the outage"
+        )
     finally:
         await cache.close()
         await http_client.aclose()

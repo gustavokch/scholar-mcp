@@ -1379,11 +1379,49 @@ async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeyp
 
 
 @respx.mock
-async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
-    """A 5xx from the document host must not burn the retry ladder.
+async def test_extract_pdf_text_retries_transient_5xx(tmp_path, monkeypatch):
+    """A 5xx from the document host is transient, not a settled outage.
 
-    ``_BVS_RETRYABLE_STATUSES`` only retries 429, so a 503 is fatal on the
-    first attempt: one request, and the caller gets ``origin_outage`` back.
+    The host returns 5xx per-request rather than per-outage, so the second
+    attempt sees the document the first one missed. Failing fast on the first
+    5xx discards a full text that one cheap retry recovers.
+    """
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    route = respx.get("https://docs.bvsalud.org/x").mock(
+        side_effect=[
+            httpx.Response(503, text="Service Unavailable"),
+            httpx.Response(
+                200,
+                content=b"%PDF-1.4",
+                headers={"Content-Type": "application/pdf"},
+            ),
+        ]
+    )
+    try:
+        text, error_kind = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x"
+        )
+        assert route.call_count == 2
+        assert error_kind is None
+        assert text == "texto"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_gives_up_after_the_retry_ladder(tmp_path):
+    """Retrying a 5xx is bounded: a host that is genuinely down still ends.
+
+    ``AsyncHttpClient.max_retries`` caps the attempts, so an unbroken run of
+    5xx costs the ladder and no more, and the caller still gets
+    ``origin_outage`` rather than a hang.
     """
     settings = Settings()
     http_client = AsyncHttpClient(settings)
@@ -1396,9 +1434,35 @@ async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
         text, error_kind = await engine._extract_pdf_text(
             "https://docs.bvsalud.org/x"
         )
-        assert route.call_count == 1
+        assert route.call_count == http_client.max_retries
         assert text == ""
         assert error_kind == "origin_outage"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_retries_502_then_succeeds(tmp_path: Path):
+    """A 502 from the BVS search host is transient, not an origin outage.
+
+    Measured against the live host: the same URL alternates 502 and 200 across
+    consecutive requests, and the 502 arrives in well under a second. Treating
+    it as fatal throws away every record the next attempt would have returned,
+    which is the whole yield of the stage.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(502, text="Bad Gateway"),
+                httpx.Response(200, json=_bvs_response([_bvs_doc("biblio-1")])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert route.call_count == 2
+        assert [r.record_id for r in records] == ["biblio-1"]
+        assert meta.error is False
     finally:
         await cache.close()
         await http_client.aclose()
