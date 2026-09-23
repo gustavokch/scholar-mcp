@@ -449,7 +449,12 @@ def _topic_filtered(
     ponytail: DF over the candidate pool only; real IDF over the PCDT
     catalogue if a ~15-document pool proves too coarse.
     """
-    terms = tokenize_portuguese(query)
+    # Solr operators are stripped for the same reason ``_usable_tokens``
+    # strips them before a token reaches the index: they are query syntax, not
+    # topic. Left in, they carry frequency zero against any Portuguese record,
+    # become the sole discriminating term, and empty every pool -- "dengue AND
+    # manejo" would drop the dengue guides it names.
+    terms = [t for t in tokenize_portuguese(query) if t not in _SOLR_BOOLEAN_WORDS]
     if not records or not terms:
         return records
 
