@@ -42,8 +42,12 @@ Downstream contract (ENAMED 2026 misses, track B §2): every
 ``origin_outage`` | ``timeout`` | ``backend_error`` -- plus ``http_status``,
 ``challenge_hit``, ``timeout`` and ``cache_hit`` (``CacheMetadata.cached``)
 fields, so the caller distinguishes a CDN shield from a sick origin
-instead of reading one ``backend_error``. ``origin_outage`` rows are never
-cached and must not count against any caller-side breaker. ``record_id``
+instead of reading one ``backend_error``. ``origin_outage`` must never
+count against any caller-side breaker, and a search that ends in one is
+never cached. One document fetch is the exception: an abstract served
+after a failed PDF fetch is held for ``DEGRADED_RESULT_TTL_SECONDS`` and
+carries its ``error_kind`` inside the cached row, so every hit in that
+window reports the same degradation the first caller saw. ``record_id``
 is the stable Solr document id and the fold key for ``med:brmoh:``.
 Published budgets: the search chain (``brazil_chain_timeout_s``,
 per-stage ``brazil_stage_timeout_s``, browser tier
