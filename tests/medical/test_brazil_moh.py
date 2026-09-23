@@ -420,6 +420,21 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
+def _pin_fast_limiter(http_client, rate_per_sec: float = 50.0) -> None:
+    """Give ``http_client`` a private, full, fast token bucket.
+
+    The real ``pesquisa.bvsalud.org`` bucket is 1 req/s and the limiter
+    registry is process-global, so a test that walks the retry ladder
+    otherwise pays ~1 s of wall clock per attempt AND inherits whatever debt
+    an earlier test left on the shared bucket. Tests that assert attempt
+    counts or failure classification care about neither: the limiter spacing
+    is incidental to what they prove, and in production it only makes the
+    elapsed cost larger than what they simulate.
+    """
+    limiter = AsyncRateLimiter(rate_per_sec=rate_per_sec)
+    http_client._limiter_for_url = lambda url: limiter
+
+
 async def _engine(tmp_path: Path, backoff_base: float = 0.5):
     # The browser tier is pinned off here: it is not what these tests exercise,
     # and left on it launches a REAL camoufox against the live BVS host as soon
@@ -428,8 +443,9 @@ async def _engine(tmp_path: Path, backoff_base: float = 0.5):
     # camoufox tests enable it explicitly and install a fake.
     #
     # ``backoff_base`` defaults to the production value so existing tests keep
-    # their behaviour; any test that actually walks the retry ladder must pass
-    # 0.01, or it pays the real 3.5 s of sleep in wall-clock time.
+    # their behaviour; a test that walks the retry ladder wants 0.01 here AND
+    # ``_pin_fast_limiter`` above -- the limiter, at 1 req/s, is the larger of
+    # the two costs.
     settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
     http_client = AsyncHttpClient(settings, backoff_base=backoff_base)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
@@ -1405,7 +1421,8 @@ async def test_extract_pdf_text_retries_transient_5xx(tmp_path, monkeypatch):
     5xx discards a full text that one cheap retry recovers.
     """
     settings = Settings()
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     monkeypatch.setattr(
@@ -1439,10 +1456,13 @@ async def test_extract_pdf_text_gives_up_after_the_retry_ladder(tmp_path):
 
     ``AsyncHttpClient.max_retries`` caps the attempts, so an unbroken run of
     5xx costs the ladder and no more, and the caller still gets
-    ``origin_outage`` rather than a hang.
+    ``origin_outage`` rather than a hang. The cap is on attempts only -- for
+    what the elapsed cost does to a caller's budget, see
+    ``test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout``.
     """
     settings = Settings()
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     route = respx.get("https://docs.bvsalud.org/x").mock(
@@ -1469,7 +1489,8 @@ async def test_search_retries_502_then_succeeds(tmp_path: Path):
     it as fatal throws away every record the next attempt would have returned,
     which is the whole yield of the stage.
     """
-    engine, cache, http_client = await _engine(tmp_path)
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
@@ -1510,8 +1531,7 @@ async def test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout(
     engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
     # A private full bucket: deterministic 0.05 s spacing, no debt inherited
     # from whichever test touched the shared BVS limiter before this one.
-    limiter = AsyncRateLimiter(rate_per_sec=20.0)
-    http_client._limiter_for_url = lambda url: limiter
+    _pin_fast_limiter(http_client, rate_per_sec=20.0)
     # ~0.4 s of stage budget against a 0.1 s TTFB plus 0.05 s spacing: two
     # attempts fit, the full four-attempt ladder does not.
     engine.settings.brazil_stage_timeout_s = 0.45

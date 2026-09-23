@@ -25,17 +25,43 @@ from scholar_mcp.medical.brazil_moh import (
 )
 from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
-async def _engine(tmp_path: Path, stub_local: bool = True, **settings_overrides):
+def _pin_fast_limiter(http_client, rate_per_sec: float = 50.0) -> None:
+    """Give ``http_client`` a private, full, fast token bucket.
+
+    The real ``pesquisa.bvsalud.org`` bucket is 1 req/s and the limiter
+    registry is process-global, so a test that walks the retry ladder
+    otherwise pays ~1 s of wall clock per attempt AND inherits whatever debt
+    an earlier test left on the shared bucket. Tests that assert attempt
+    counts or failure classification care about neither.
+    """
+    limiter = AsyncRateLimiter(rate_per_sec=rate_per_sec)
+    http_client._limiter_for_url = lambda url: limiter
+
+
+async def _engine(
+    tmp_path: Path,
+    stub_local: bool = True,
+    backoff_base: float = 0.5,
+    **settings_overrides,
+):
     # Browser tier stays off unless a test opts in: the default rides in
     # the same dict as the overrides so `brazil_browser_fallback=True`
     # wins instead of colliding with a hardcoded keyword.
+    #
+    # ``backoff_base`` is a named parameter rather than part of
+    # ``settings_overrides``: it belongs to AsyncHttpClient, not to Settings,
+    # and dataclasses.replace would raise on it. It defaults to the production
+    # value so existing tests keep their behaviour; a test that walks the retry
+    # ladder wants 0.01 here AND ``_pin_fast_limiter`` above -- the limiter, at
+    # 1 req/s, is the larger of the two costs.
     defaults = {"brazil_browser_fallback": False}
     defaults.update(settings_overrides)
     settings = dataclasses.replace(Settings.load(), **defaults)
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=backoff_base)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
 
@@ -176,7 +202,8 @@ async def test_plain_403_retried_then_still_challenge(tmp_path: Path):
 
 @respx.mock
 async def test_500_origin_outage_classified_and_not_cached(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
@@ -192,9 +219,11 @@ async def test_500_origin_outage_classified_and_not_cached(tmp_path: Path):
         assert first_calls == http_client.max_retries
         records2, meta2 = await engine.search_guidelines("dengue", limit=10)
         assert records2 == [] and meta2.error_kind == "origin_outage"
-        # The outage itself is still never cached: the second search pays the
-        # ladder again rather than replaying a stored failure.
-        assert len(route.calls) == first_calls * 2
+        # The outage itself is still never cached: the second search pays a
+        # full second ladder rather than replaying a stored failure. Stated as
+        # a sum, not as `first_calls * 2` -- a ratio moves on both sides when
+        # the ladder length changes, so it can never fail for that reason.
+        assert len(route.calls) == first_calls + http_client.max_retries
     finally:
         await cache.close()
         await http_client.aclose()
@@ -661,7 +690,8 @@ async def test_fulltext_lookup_challenge_kind_propagates(tmp_path: Path):
 
 @respx.mock
 async def test_lookup_record_retries_5xx_then_reports_outage(tmp_path: Path):
-    engine, cache, http_client = await _engine(tmp_path)
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
