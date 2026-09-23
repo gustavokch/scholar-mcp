@@ -1,10 +1,10 @@
 import datetime
 import re
-import unicodedata
 from collections.abc import Callable
 from typing import Protocol, TypeVar
 
 from scholar_mcp.medical.models import BrazilGuideline, MedicalArticle
+from scholar_mcp.query_relax import PORTUGUESE_STOPWORDS, normalize_portuguese
 from scholar_mcp.ranking import ScoringEngine
 
 # Recency weight and half-life mirror the scholar path defaults (0.3 / 7 years).
@@ -19,36 +19,20 @@ DEFAULT_AGE_YEARS = 10.0
 # override a clear lexical mismatch.
 SOURCE_POSITION_WEIGHT = 0.35
 
+# Score factor for a Brazilian guideline with no retrievable body (no
+# allowed-host/local document URL, no fulltext id, no abstract). This is a
+# score annotation, not a ranking lever: rank_brazil_guidelines partitions
+# body-less records into a second tier after every record with a body, and
+# every body-less record takes the same factor, so changing this value
+# rescales the stored ``score`` without moving any record. Kept at the
+# spec's 0.5 (ENAMED misses plan B4) so ``score`` still tells a reader the
+# record was damped.
+NO_FULL_TEXT_SCORE_FACTOR = 0.5
+
 # Mirrors the private pattern in scholar_mcp.ranking. Declared locally rather
 # than imported: that copy is private to its module, and normalization has
 # already reduced the text to ASCII, so the two are intentionally identical.
 _WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-
-# Stored already accent-folded, because tokenization folds before it consults
-# this set -- an accented member would never be matched. Two consumers share
-# it: client-side re-ranking here, and outbound query composition in
-# medical/brazil_moh.py. One source of truth keeps a term from being scored as
-# substantive while being dropped from the query, or the reverse.
-PORTUGUESE_STOPWORDS = frozenset({
-    "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos",
-    "e", "em", "entre", "na", "nao", "nas", "no", "nos", "o", "os", "ou",
-    "para", "pela", "pelo", "por", "que", "se", "sem", "sob", "sobre",
-    "um", "uma", "umas", "uns",
-})
-
-
-def normalize_portuguese(text: str | None) -> str:
-    """Fold Portuguese diacritics to ASCII and lowercase.
-
-    NFKD splits an accented character into its base plus a combining mark;
-    encoding to ASCII with ``ignore`` then drops the marks. This also discards
-    any non-Latin script, which is acceptable: a record whose text is entirely
-    non-Latin cannot match a Portuguese query.
-    """
-    if not text:
-        return ""
-    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
-    return folded.lower()
 
 
 def tokenize_portuguese(text: str | None) -> list[str]:
@@ -89,6 +73,7 @@ def _rank_records(
     text_fields: Callable[[R], tuple[str, str]],
     position_weight: float,
     current_year: int | None = None,
+    score_factor: Callable[[R], float] | None = None,
 ) -> list[R]:
     """Score and order records by lexical coverage, source position, and recency.
 
@@ -102,6 +87,12 @@ def _rank_records(
     the ``1/sqrt(rank + 1)`` prior. Pass non-zero only when the input is
     already relevance-ordered by a single source. Leave it at 0.0 for merged
     multi-source pools, where list position reflects task order.
+
+    ``score_factor``, when given, multiplies each record's score as it is
+    assigned -- a call re-scores every record from its raw fields each time,
+    so folding a factor in here (rather than mutating ``.score`` after this
+    function returns) is idempotent by construction: a second call recomputes
+    the same score, it never compounds a prior call's damping.
 
     Makes no network calls. Assigns ``score`` on the given objects in place and
     returns a new list ordered by it, source order breaking ties. A query that
@@ -142,6 +133,8 @@ def _rank_records(
         )
 
         final_score = RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recency
+        if score_factor is not None:
+            final_score *= score_factor(record)
         record.score = final_score
         scored.append((final_score, idx, record))
 
@@ -195,8 +188,14 @@ def rank_brazil_guidelines(
 
     ``position_weight`` is non-zero because BVS returns a single
     relevance-sorted list, which is the condition that prior is meant for.
+
+    Records with no retrievable body (``has_full_text`` false) keep their
+    title signal but score halved, and then sort into a second tier behind
+    every record with a body: the tier is the rule that enforces the gate,
+    the halving is a score annotation only. Cards never disappear from the
+    result set.
     """
-    return _rank_records(
+    ranked = _rank_records(
         guidelines,
         query,
         tokenizer=tokenize_portuguese,
@@ -206,4 +205,15 @@ def rank_brazil_guidelines(
         ),
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,
+        score_factor=lambda g: 1.0 if g.has_full_text else NO_FULL_TEXT_SCORE_FACTOR,
     )
+    if any(g.score is not None and not g.has_full_text for g in ranked):
+        # Tier by construction: a multiplicative factor cannot sink a
+        # body-less card below every body record for arbitrary score
+        # spreads, so body-less records sort into a second tier after the
+        # scored sort. Stable within tiers; scores stay damped, never
+        # dropped, so title signal survives.
+        ranked = [g for g in ranked if g.has_full_text] + [
+            g for g in ranked if not g.has_full_text
+        ]
+    return ranked

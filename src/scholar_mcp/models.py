@@ -7,6 +7,11 @@ from typing import Any, Literal
 # "failed" (other error or raised), "disabled" (never queried: configured off).
 SourceStatus = Literal["ok", "empty", "blocked", "failed", "disabled"]
 
+# Every backend that stamps PaperMetadata.source, plus "" (unstamped: arXiv
+# and OpenAlex metadata, or a record that never passed a provider). Widen
+# this union -- not the call sites -- when a new search provider arrives.
+PaperSource = Literal["pubmed", "crossref", "s2", "europepmc", ""]
+
 
 @dataclass
 class IdentifierMap:
@@ -55,6 +60,15 @@ class PaperMetadata:
     last_author_h_index: int | None = None
     score: float | None = None
     ranking_metrics: dict[str, Any] | None = None
+    # Which backend produced the record, from the PaperSource union above.
+    # Set by each provider so a search envelope can say which backend
+    # answered (ENAMED misses plan B2/B5).
+    source: PaperSource = ""
+    # Provider-native document type; the CrossRef provider parses the
+    # ``type`` field ("journal-article", "book", ...). Empty when the
+    # backend reports none. Stays a plain str: the CrossRef type vocabulary
+    # is open, so a Literal would lie.
+    doc_type: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -29,6 +29,12 @@ class CacheMetadata:
     cached: bool
     cache_age: int
     error: bool = False
+    # The relaxed variant that produced the results, when a PubMed-backed
+    # search walked the query-relaxation ladder past the original query.
+    # None when the original query sufficed or nothing was found. Surfaced
+    # in the MCP tool envelope by server._with_degraded so the caller can
+    # see the ladder worked.
+    relaxed_query: str | None = None
 
 
 class SQLiteCacheManager:

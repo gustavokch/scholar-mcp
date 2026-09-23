@@ -499,6 +499,37 @@ async def test_get_full_text_caches_success(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_get_full_text_pre_v1_cache_row_is_not_served(tmp_path: Path):
+    """A row written under the un-versioned key holds a body already cut to
+    the old 50k ceiling with no ``total_chars``. It must be a miss under the
+    v2 key rather than served with a wrong ``truncated: false``.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        stale_row = {
+            "source": "who-iris",
+            "handle": "10665/311551",
+            "url": "https://iris.who.int/handle/10665/311551",
+            "truncated": False,
+            "status": "success",
+            "title": "Guideline",
+            "content_type": "full_text",
+            "content": "z" * 50000,
+        }
+        await cache.set("who_iris_fulltext:10665/311551", stale_row, source="who_iris")
+
+        find_route = respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([]))
+        payload, meta = await engine.get_full_text("10665/311551")
+
+        assert meta.cached is False
+        assert len(find_route.calls) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def make_blank_pdf(pages: int = 1) -> bytes:
     """Copy of tests.test_pdf_parser.make_blank_pdf: no cross-test import pattern exists."""
     writer = PdfWriter()
@@ -601,6 +632,36 @@ async def test_get_full_text_truncates_served_content_not_cached(tmp_path: Path,
         zero, _ = await engine.get_full_text("10665/311551", max_chars=0)
         assert zero["truncated"] is True
         assert zero["content"].endswith("[... Truncated due to max_chars limit ...]")
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_default_serves_serving_budget_not_ceiling(
+    tmp_path: Path, monkeypatch
+):
+    """A plain call (max_chars=None) serves the shared serving default, not
+    the 600k storage ceiling, for a body longer than the default."""
+    from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        import scholar_mcp.medical.who_iris as who_iris_mod
+        monkeypatch.setattr(
+            who_iris_mod, "pdf_bytes_to_text", lambda b: "x" * 120_000
+        )
+
+        respx.get(IRIS_PID_FIND_URL).respond(json=_pid_find_item())
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/item-uuid-1/bundles").respond(json=_bundles_page([_bundle()]))
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-uuid-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream()]))
+        respx.get(f"{IRIS_BITSTREAM_CONTENT_URL}/bit-1/content").respond(content=b"%PDF-fake")
+
+        payload, _ = await engine.get_full_text("10665/311551", max_chars=None)
+        assert payload["total_chars"] == 120_000
+        assert payload["truncated"] is True
+        assert len(payload["content"]) <= DEFAULT_SERVING_CHARS + 100
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1026,3 +1087,25 @@ async def test_get_full_text_not_found_includes_pdf_url(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def test_serve_full_text_query_returns_passages():
+    """The WHO IRIS path shares the passage helper: a topic query returns
+    the head plus scored windows with offsets, not just the head cut."""
+    filler = "word padding "
+    body = filler * 400 + "unique target finding about immunization coverage" + filler * 4000
+    payload = {"content": body, "total_chars": len(body)}
+    served = WHOIRISEngine._serve_full_text(dict(payload), None, query="immunization coverage")
+    assert "immunization coverage" in served["content"] or "immunization" in served["content"]
+    assert served["passages"], "the target window must be served"
+    assert all(p["score"] >= 1 for p in served["passages"])
+    assert served["total_chars"] == len(body)
+
+
+def test_serve_full_text_offset_pages_body():
+    body = "abcdefghij" * 1000
+    payload = {"content": body, "total_chars": len(body)}
+    served = WHOIRISEngine._serve_full_text(dict(payload), 100, offset=500)
+    assert served["content"] == body[500:600]
+    assert served["truncated"] is True
+    assert served["passages"] == []

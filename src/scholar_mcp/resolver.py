@@ -17,7 +17,7 @@ from scholar_mcp.models import (
     RelatedPaper,
     SourceStatus,
 )
-
+from scholar_mcp.query_relax import content_overlap_count
 from scholar_mcp.parsers.jats import list_sections, select_sections
 from scholar_mcp.providers.arxiv import ARXIV_PDF, ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
@@ -43,6 +43,12 @@ class WaterfallResolver:
     # resolver for the whole process, so two concurrent MCP calls would
     # otherwise overwrite each other's map between the write and the read.
     last_search_sources: dict[str, SourceStatus] = ContextScoped(dict)
+
+    # The relaxed variant that answered ``search()``'s PubMed call, or None
+    # when the full query answered directly. Same contract as
+    # PubMedProvider.last_relaxed_query, carried into the search_papers
+    # envelope (finding 3).
+    last_relaxed_query: str | None = ContextScoped(lambda: None)
 
     def __init__(
         self,
@@ -435,6 +441,7 @@ class WaterfallResolver:
         limit = min(num_results, 50)
         source_mode = source.lower().strip()
         self.last_search_sources = {}
+        self.last_relaxed_query = None
 
         # Compute candidate pool depth if reranking is enabled
         should_rerank = rerank and self.settings.ranking_enabled
@@ -464,6 +471,7 @@ class WaterfallResolver:
                     sort="relevance",
                 ),
             )
+            self.last_relaxed_query = self.pubmed.last_relaxed_query
         elif source_mode == "crossref":
             papers = await self._run_backend(
                 "crossref",
@@ -508,8 +516,16 @@ class WaterfallResolver:
                     sort="relevance",
                 ),
             )
-            # 2. If PubMed returns fewer than fetch_limit, top up from CrossRef
-            if len(papers) < fetch_limit:
+            self.last_relaxed_query = self.pubmed.last_relaxed_query
+            # 2. Top up from CrossRef only when PubMed left the requested
+            # page short (fewer than `limit`, not `fetch_limit`): a
+            # satisfied page must not pay a CrossRef round-trip whose
+            # records can only dilute the re-rank pool with off-topic
+            # bibliographic matches (ENAMED misses E7). Each top-up record
+            # must share at least one accent-folded content token between
+            # the query and its title+abstract, or it is junk from the
+            # top-up rather than evidence.
+            if len(papers) < limit:
                 needed = fetch_limit - len(papers)
                 crossref_papers = await self._run_backend(
                     "crossref",
@@ -521,12 +537,15 @@ class WaterfallResolver:
                         journal=journal,
                         year_start=year_start,
                         year_end=year_end,
+                        journal_articles_only=True,
                     ),
                 )
                 # Deduplicate: PubMed records win on conflict
                 seen_dois = {p.doi.lower() for p in papers if p.doi}
                 seen_titles = {p.title.lower().strip() for p in papers if p.title}
                 for cp in crossref_papers:
+                    if content_overlap_count(query, cp.title, cp.abstract) < 1:
+                        continue
                     if cp.doi and cp.doi.lower() in seen_dois:
                         continue
                     if cp.title and cp.title.lower().strip() in seen_titles:

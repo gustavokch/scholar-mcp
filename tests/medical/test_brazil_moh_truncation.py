@@ -9,9 +9,11 @@ import respx
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
+    CACHE_SCHEMA,
     MAX_FULL_TEXT_CHARS,
     BrazilMoHEngine,
 )
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -85,10 +87,10 @@ async def test_over_ceiling_reports_total_chars_with_max_chars(tmp_path: Path, m
 
 
 @respx.mock
-async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
+async def test_default_serves_serving_budget_not_ceiling(
     tmp_path: Path, monkeypatch
 ):
-    full = "x" * 62000
+    full = "x" * 620000
     monkeypatch.setattr(
         "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
     )
@@ -105,10 +107,11 @@ async def test_over_ceiling_clamps_to_ceiling_when_max_chars_none(
             )
         )
         payload, _ = await engine.get_full_text("biblio-1", max_chars=None)
-        assert payload["total_chars"] == 62000
-        # Ceiling binds: over-ceiling content is truncated even with no limit.
+        assert payload["total_chars"] == 620000
+        # The default serves the serving budget, not the storage ceiling:
+        # a plain get_full_text call must not return 600k chars.
         assert payload["truncated"] is True
-        assert len(payload["content"]) <= MAX_FULL_TEXT_CHARS + 100
+        assert len(payload["content"]) <= DEFAULT_SERVING_CHARS + 100
     finally:
         await cache.close()
         await http_client.aclose()
@@ -164,7 +167,7 @@ async def test_abstract_path_total_chars_matches_abstract(tmp_path: Path):
 async def test_cache_stores_capped_content_with_full_total_chars(
     tmp_path: Path, monkeypatch
 ):
-    full = "z" * 62000
+    full = "z" * 620000
     monkeypatch.setattr(
         "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
     )
@@ -181,9 +184,53 @@ async def test_cache_stores_capped_content_with_full_total_chars(
             )
         )
         await engine.get_full_text("biblio-1")
-        cached, _ = await cache.get("brazil_moh_fulltext:biblio-1")
+        cached, _ = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert len(cached["content"]) <= MAX_FULL_TEXT_CHARS
-        assert cached["total_chars"] == 62000
+        assert cached["total_chars"] == 620000
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_fulltext_pre_v1_cache_row_is_not_served(tmp_path: Path, monkeypatch):
+    """A row written under the un-versioned key holds a body already cut to
+    the old 50k ceiling with no ``total_chars``. Serving it under the v2 key
+    would score/page only that stub and report ``truncated: false`` on a
+    body that is actually truncated -- it must be a miss instead.
+    """
+    full = "z" * 620000
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda _: full
+    )
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(
+                200, content=b"%PDF", headers={"content-type": "application/pdf"}
+            )
+        )
+        stale_row = {
+            "source": "brazil-moh",
+            "record_id": "biblio-1",
+            "document_url": FI_ADMIN_URL,
+            "truncated": False,
+            "status": "success",
+            "title": "Protocolo",
+            "content_type": "full_text",
+            "content": "z" * 50000,
+        }
+        await cache.set("brazil_moh_fulltext:biblio-1", stale_row, source="brazil_moh")
+
+        payload, meta = await engine.get_full_text("biblio-1")
+
+        assert meta.cached is False
+        assert payload["total_chars"] == 620000
     finally:
         await cache.close()
         await http_client.aclose()

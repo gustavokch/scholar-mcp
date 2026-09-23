@@ -115,11 +115,15 @@ async def search_papers(
         # ContextScoped attribute — embedding it would let a later request
         # mutate what this call returned.
         snapshot = dict(sources)
-        return {
+        envelope: dict[str, Any] = {
             "papers": payload[:clamped_num],
             "sources": snapshot,
             "degraded": any(v in ("blocked", "failed") for v in snapshot.values()),
         }
+        relaxed_query = getattr(resolver, "last_relaxed_query", None)
+        if relaxed_query is not None:
+            envelope["relaxed_query"] = relaxed_query
+        return envelope
     except Exception as ex:
         return {
             "papers": [],
@@ -135,9 +139,14 @@ def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, An
 
     The format_* functions already surface FETCH_ERROR_NOTE in the markdown;
     this adds the key zimqa and other machine consumers read directly.
+    The relaxation variant that answered is surfaced alongside it: without
+    this reader the relaxed_query the engines compute never reaches a
+    caller-visible field.
     """
     if meta.error:
         payload["degraded"] = True
+    if meta.relaxed_query is not None:
+        payload["relaxed_query"] = meta.relaxed_query
     return payload
 
 
@@ -589,6 +598,8 @@ if settings.enable_medical_tools:
     async def get_who_iris_full_text(
         handle: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """Retrieve full text of a WHO IRIS guideline by handle.
 
@@ -600,9 +611,15 @@ if settings.enable_medical_tools:
                 full landing-page URL. Handles are returned by
                 search_who_iris_guidelines as `handle`.
             max_chars: Maximum character limit for the returned text (defaults to 50,000).
+            query: Optional topic terms: returns the 2k head plus the top-scoring
+                passages within max_chars, with their offsets in `passages`.
+            offset: Character offset for paging through a long body
+                (body[offset:offset+max_chars]); ignored when query is given.
         """
         try:
-            payload, meta = await who_iris_engine.get_full_text(handle, max_chars=max_chars)
+            payload, meta = await who_iris_engine.get_full_text(
+                handle, max_chars=max_chars, query=query, offset=offset
+            )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
             return payload
         except Exception as ex:
@@ -650,6 +667,8 @@ if settings.enable_medical_tools:
     async def get_brazil_moh_full_text(
         record_id: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """Retrieve full text of a Brazilian Ministry of Health document.
 
@@ -661,11 +680,15 @@ if settings.enable_medical_tools:
             record_id: The `record_id` field returned by
                 search_brazil_moh_guidelines (e.g. 'biblio-1701387').
             max_chars: Maximum character limit for the returned text
-                (defaults to 50,000, which is also the ceiling).
+                (defaults to 50,000; capped at the 600,000 storage ceiling).
+            query: Optional topic terms: returns the 2k head plus the top-scoring
+                passages within max_chars, with their offsets in `passages`.
+            offset: Character offset for paging through a long body
+                (body[offset:offset+max_chars]); ignored when query is given.
         """
         try:
             payload, meta = await brazil_moh_engine.get_full_text(
-                record_id, max_chars=max_chars
+                record_id, max_chars=max_chars, query=query, offset=offset
             )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
             return payload

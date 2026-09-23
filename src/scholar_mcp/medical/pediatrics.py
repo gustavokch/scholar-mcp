@@ -537,4 +537,12 @@ class PediatricsEngine:
             [a.to_dict() for a in articles],
             source="pediatric_journals",
         )
-        return articles, CacheMetadata(cached=False, cache_age=0, error=pubmed_meta.error)
+        return (
+            articles,
+            CacheMetadata(
+                cached=False,
+                cache_age=0,
+                error=pubmed_meta.error,
+                relaxed_query=pubmed_meta.relaxed_query,
+            ),
+        )

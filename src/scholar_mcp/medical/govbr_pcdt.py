@@ -16,6 +16,7 @@ import urllib.parse
 from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
+    CACHE_SCHEMA,
     GOVBR_HEADERS,
     PORTUGUESE_STOPWORDS,
     SEVEN_DAYS_SECONDS,
@@ -24,7 +25,7 @@ from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
     score_item,
     tokenize_portuguese,
 )
-from scholar_mcp.medical.models import BrazilGuideline
+from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -190,11 +191,22 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
     them (extended corpus rows carry their real source); crawled and seed
     rows default to the MS/CONITEC PCDT shape.
     """
+    document_url = item.get("download_url", "")
     return BrazilGuideline(
         title=item.get("title", ""),
         record_id=item.get("record_id", ""),
-        document_url=item.get("download_url", ""),
+        document_url=document_url,
         fulltext_id=item.get("record_id", ""),
+        # One shared rule (medical.models.has_retrievable_body): a catalog
+        # download URL -- every one is a first-party Plone file URL -- or
+        # description text served as the abstract fallback. ``fulltext_id``
+        # here is the catalog id, not a fi-admin view, so it is not passed
+        # as fulltext evidence.
+        has_full_text=has_retrievable_body(
+            document_url,
+            fallback_text=item.get("description", ""),
+            url_trusted=True,
+        ),
         source="brazil-moh",
         abstract=item.get("description", ""),
         country="Brasil",
@@ -321,7 +333,7 @@ class GovBrPCDTEngine:
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
 
-        cache_key = f"govbr_pcdt_search:{limit}:{query_norm}"
+        cache_key = f"govbr_pcdt_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and isinstance(cached_data, list):
             return [BrazilGuideline.from_dict(d) for d in cached_data], meta

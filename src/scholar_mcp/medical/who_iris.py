@@ -5,10 +5,10 @@ from typing import Any
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import WHOGuideline
+from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS, serve_body
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
-from scholar_mcp.utils.text import truncate_content
 
 IRIS_API_BASE = "https://iris.who.int/server/api"
 IRIS_BROWSE_TITLE_URL = f"{IRIS_API_BASE}/discover/browses/title/items"
@@ -21,8 +21,14 @@ IRIS_BITSTREAM_CONTENT_URL = f"{IRIS_API_BASE}/core/bitstreams"
 IRIS_ITEM_TYPE_FILTER = "Publications,equals"
 MAX_PAGE_SIZE = 100
 MAX_RESULTS = 200
-MAX_FULL_TEXT_CHARS = 50_000
+MAX_FULL_TEXT_CHARS = 600_000
 MAX_CONCURRENT_PDF_RESOLUTIONS = 10
+
+# Bumped whenever a cached row's shape changes. See brazil_moh.CACHE_SCHEMA
+# for the rationale: an un-bumped key serves a pre-change row (body cut to
+# the old 50k ceiling, no total_chars) as if current, for the full TTL.
+# v2: 600k bodies with total_chars.
+CACHE_SCHEMA = "v2"
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +324,8 @@ class WHOIRISEngine:
         self,
         handle: str,
         max_chars: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
     ) -> tuple[dict[str, Any], CacheMetadata]:
         normalized = _normalize_handle(handle)
         base = {
@@ -333,10 +341,15 @@ class WHOIRISEngine:
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
 
-        cache_key = f"who_iris_fulltext:{normalized}"
+        cache_key = f"who_iris_fulltext:{CACHE_SCHEMA}:{normalized}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            return self._serve_full_text(cached_data, max_chars), meta
+            return (
+                self._serve_full_text(
+                    cached_data, max_chars, query=query, offset=offset
+                ),
+                meta,
+            )
 
         # ok_statuses lets a 404 through so not-found is distinguishable from a
         # network failure (get() otherwise collapses both to None).
@@ -373,11 +386,17 @@ class WHOIRISEngine:
             item.get("uuid") or ""
         )
         if pdf_text:
-            result = {"content_type": "pdf", "content": pdf_text, "pdf_url": pdf_url}
+            result = {
+                "content_type": "pdf",
+                "content": pdf_text[:MAX_FULL_TEXT_CHARS],
+                "total_chars": len(pdf_text),
+                "pdf_url": pdf_url,
+            }
         elif abstract:
             result = {
                 "content_type": "abstract",
-                "content": abstract,
+                "content": abstract[:MAX_FULL_TEXT_CHARS],
+                "total_chars": len(abstract),
                 "pdf_url": pdf_url,
             }
         else:
@@ -390,7 +409,10 @@ class WHOIRISEngine:
         payload = {**base, "status": "success", "title": title, **result}
         if not errored:
             await self.cache.set(cache_key, payload, source="who_iris")
-        return self._serve_full_text(payload, max_chars), CacheMetadata(cached=False, cache_age=0, error=errored)
+        return (
+            self._serve_full_text(payload, max_chars, query=query, offset=offset),
+            CacheMetadata(cached=False, cache_age=0, error=errored),
+        )
 
     async def _extract_pdf_text(self, item_uuid: str) -> tuple[str, str, bool]:
         """Extract the primary PDF's text and URL. Returns (text, pdf_url, errored)."""
@@ -410,12 +432,24 @@ class WHOIRISEngine:
             return "", pdf_url, True
 
     @staticmethod
-    def _serve_full_text(payload: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
-        served = dict(payload)
-        content, truncated = truncate_content(
-            served.get("content") or "",
-            MAX_FULL_TEXT_CHARS if max_chars is None else max_chars,
+    def _serve_full_text(
+        payload: dict[str, Any],
+        max_chars: int | None,
+        query: str | None = None,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        # Same serving contract as BrazilMoHEngine: the storage ceiling caps
+        # the serving budget from above, while a missing max_chars serves
+        # the shared serving default, not the ceiling. Targeted reads use
+        # ``query`` (passages) or ``offset`` (paging), otherwise the head
+        # cut. Old cache rows predate ``total_chars`` and degrade to the
+        # stored length.
+        limit = (
+            DEFAULT_SERVING_CHARS
+            if max_chars is None
+            else min(max(1, max_chars), MAX_FULL_TEXT_CHARS)
         )
-        served["content"] = content
-        served["truncated"] = truncated
-        return served
+        stored = payload.get("content") or ""
+        total = payload.get("total_chars", len(stored))
+        served = serve_body(stored, total, limit, query=query, offset=offset)
+        return {**payload, **served, "total_chars": total}

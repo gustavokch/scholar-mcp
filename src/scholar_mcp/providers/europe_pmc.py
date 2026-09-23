@@ -63,6 +63,7 @@ class EuropePMCProvider(BaseProvider):
                 pmid=str(rec.get("pmid") or ids.pmid),
                 pmcid=rec.get("pmcid"),
                 abstract=rec.get("abstractText") or "",
+                source="europepmc",
             )
         except Exception:
             return None

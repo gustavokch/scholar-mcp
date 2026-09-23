@@ -145,15 +145,25 @@ class MedicalDatabasesEngine:
             self._search_cochrane(query),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        pubmed_res, trials_res, cochrane_res = results
 
         papers: list[dict[str, Any]] = []
         errored = False
-        for res in results:
+        relaxed_query: str | None = None
+        for name, res in (
+            ("pubmed", pubmed_res),
+            ("trials", trials_res),
+            ("cochrane", cochrane_res),
+        ):
             if isinstance(res, BaseException):
                 # gather returned the exception instead of a result
                 logger.warning("Medical database sub-search raised", exc_info=res)
                 errored = True
                 continue
+            if name == "pubmed" and res[1].relaxed_query:
+                # The PubMed leg walked the relaxation ladder past the
+                # original query; surface which variant answered.
+                relaxed_query = res[1].relaxed_query
             if not res or not res[0]:
                 errored = errored or res[1].error
                 continue
@@ -176,7 +186,10 @@ class MedicalDatabasesEngine:
             [a.to_dict() for a in final_articles],
             source="pubmed",
         )
-        return final_articles, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return (
+            final_articles,
+            CacheMetadata(cached=False, cache_age=0, error=errored, relaxed_query=relaxed_query),
+        )
 
     async def search_medical_journals(
         self,
@@ -211,4 +224,12 @@ class MedicalDatabasesEngine:
             [a.to_dict() for a in final_articles],
             source="pubmed",
         )
-        return final_articles, CacheMetadata(cached=False, cache_age=0, error=pubmed_meta.error)
+        return (
+            final_articles,
+            CacheMetadata(
+                cached=False,
+                cache_age=0,
+                error=pubmed_meta.error,
+                relaxed_query=pubmed_meta.relaxed_query,
+            ),
+        )

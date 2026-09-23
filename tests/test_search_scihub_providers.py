@@ -38,6 +38,45 @@ def test_pubmed_query_builder_applies_filters():
 
 
 @respx.mock
+async def test_pubmed_search_surfaces_relaxed_variant(client):
+    """finding 3: relax=True defaults on the scholar path with no metadata
+    channel, so a relaxed answer is indistinguishable from an exact one.
+    The full query returns no hits; a relaxed variant does; the caller must
+    be able to see which variant actually answered.
+    """
+    respx.get(url__startswith=ESEARCH).mock(
+        side_effect=[
+            httpx.Response(200, json={"esearchresult": {"idlist": []}}),
+            httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}}),
+        ]
+    )
+    respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": {
+                    "uids": ["32000000"],
+                    "32000000": {
+                        "title": "A Relaxed Paper",
+                        "authors": [{"name": "Doudna J"}],
+                        "pubdate": "2020 Mar",
+                        "fulljournalname": "Nature",
+                    },
+                }
+            },
+        )
+    )
+    provider = PubMedProvider(client, Settings())
+    results = await provider.search(
+        "novel therapeutic approaches for treating diabetes mellitus type",
+        num_results=5,
+    )
+    assert len(results) == 1
+    assert provider.last_relaxed_query is not None
+    assert provider.last_relaxed_query != "novel therapeutic approaches for treating diabetes mellitus type"
+
+
+@respx.mock
 async def test_pubmed_search_returns_metadata(client):
     esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
@@ -132,7 +171,7 @@ async def test_pubmed_search_captures_pubtype_and_issn(client):
 
 @respx.mock
 async def test_crossref_search_returns_metadata(client):
-    respx.get(url__startswith=CROSSREF).mock(
+    route = respx.get(url__startswith=CROSSREF).mock(
         return_value=httpx.Response(
             200,
             json={
@@ -140,6 +179,7 @@ async def test_crossref_search_returns_metadata(client):
                     "items": [
                         {
                             "DOI": "10.1038/xref1",
+                            "type": "journal-article",
                             "title": ["A CrossRef Paper"],
                             "author": [{"given": "Ada", "family": "Lovelace"}],
                             "container-title": ["Science"],
@@ -153,6 +193,24 @@ async def test_crossref_search_returns_metadata(client):
     results = await CrossRefProvider(client).search("crispr", num_results=5)
     assert results[0].doi == "10.1038/xref1"
     assert "Ada Lovelace" in results[0].authors
+    # finding 5: a direct CrossRef search is not the resolver's top-up, and
+    # must not carry the top-up's journal-article-only constraint -- a
+    # preprint or proceedings paper is a legitimate result here.
+    assert "type:journal-article" not in route.calls.last.request.url.params.get("filter", "")
+    assert results[0].doc_type == "journal-article"
+    assert results[0].source == "crossref"
+    assert results[0].to_dict()["source"] == "crossref"
+
+
+@respx.mock
+async def test_crossref_search_journal_articles_only_sends_type_filter(client):
+    route = respx.get(url__startswith=CROSSREF).mock(
+        return_value=httpx.Response(200, json={"message": {"items": []}})
+    )
+    await CrossRefProvider(client).search(
+        "crispr", num_results=5, journal_articles_only=True
+    )
+    assert "type:journal-article" in route.calls.last.request.url.params.get("filter", "")
 
 
 @respx.mock
@@ -943,3 +1001,77 @@ async def test_mirror_penalty_is_capped(client, monkeypatch):
     for _ in range(MAX_MIRROR_PENALTY + 5):
         await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/x"))
     assert provider._mirror_penalties["https://m1.example"] == MAX_MIRROR_PENALTY
+
+
+_ESUMMARY_RECORD = {
+    "result": {
+        "uids": ["32000000"],
+        "32000000": {
+            "title": "A Relaxed PubMed Paper",
+            "authors": [{"name": "Doudna J"}],
+            "pubdate": "2020 Mar",
+            "fulljournalname": "Nature",
+            "elocationid": "doi: 10.1038/relaxed",
+        },
+    }
+}
+
+
+@respx.mock
+async def test_pubmed_search_sends_ncbi_credentials(client):
+    """The provider was missing api_key/email/tool entirely (2.8 req/s
+    instead of 9 with a key). Both esearch and esummary must carry them."""
+    esearch_route = respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+    )
+    esummary_route = respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(200, json=_ESUMMARY_RECORD)
+    )
+    settings = Settings(pubmed_api_key="KEY123", pubmed_email="a@b.c", pubmed_tool="T")
+    results = await PubMedProvider(client, settings).search("crispr", num_results=5)
+    assert len(results) == 1
+    for route in (esearch_route, esummary_route):
+        params = route.calls.last.request.url.params
+        assert params.get("api_key") == "KEY123"
+        assert params.get("email") == "a@b.c"
+        assert params.get("tool") == "T"
+
+
+@respx.mock
+async def test_pubmed_search_relaxes_long_query_preserving_filters(client):
+    """An 8-token query ANDs to zero hits; the ladder rebuilds the
+    author filter around the relaxed prefix and stops at the first hit."""
+    def _router(request: httpx.Request) -> httpx.Response:
+        term = request.url.params.get("term", "")
+        if "theta" in term:
+            return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+        return httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+
+    esearch_route = respx.get(url__startswith=ESEARCH).mock(side_effect=_router)
+    respx.get(url__startswith=ESUMMARY).mock(
+        return_value=httpx.Response(200, json=_ESUMMARY_RECORD)
+    )
+    results = await PubMedProvider(client, Settings()).search(
+        "alpha beta gamma delta epsilon zeta eta theta", author="Doudna J"
+    )
+    assert len(results) == 1
+    assert results[0].pmid == "32000000"
+    terms = [c.request.url.params.get("term", "") for c in esearch_route.calls]
+    assert len(terms) == 2
+    assert "theta" in terms[0] and '"Doudna J"[Author]' in terms[0]
+    assert terms[1].startswith("alpha beta gamma delta epsilon")
+    assert "zeta" not in terms[1]
+    assert '"Doudna J"[Author]' in terms[1]
+    assert "theta" not in terms[1]
+
+
+@respx.mock
+async def test_pubmed_search_does_not_relax_on_esearch_error(client):
+    esearch_route = respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(500)
+    )
+    provider = PubMedProvider(client, Settings())
+    results = await provider.search("alpha beta gamma delta epsilon zeta eta theta")
+    assert results == []
+    assert provider.last_error is not None
+    assert len(esearch_route.calls) == 1

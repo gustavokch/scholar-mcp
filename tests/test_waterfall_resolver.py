@@ -367,6 +367,29 @@ async def test_disabled_s2_is_not_reported_as_empty():
     assert r.last_search_sources == {"s2": "disabled"}
 
 
+async def test_search_carries_pubmed_relaxed_variant_into_resolver(monkeypatch):
+    """finding 3: the resolver must surface which variant answered so
+    search_papers can tell the caller it answered a relaxed query."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    paper = PaperMetadata(title="A", pmid="1")
+
+    async def fake_search(*args, **kwargs):
+        r.pubmed.last_relaxed_query = "novel therapeutic approaches"
+        return [paper]
+
+    r.pubmed.search = fake_search
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_relaxed_query == "novel therapeutic approaches"
+
+
+async def test_search_relaxed_variant_none_when_full_query_answers():
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[PaperMetadata(title="A", pmid="1")])
+    r.pubmed.last_relaxed_query = None
+    await r.search("q", source="pubmed", rerank=False)
+    assert r.last_relaxed_query is None
+
+
 async def test_last_search_sources_is_per_request():
     """The resolver is a module-level singleton in server.py, so two concurrent
     MCP calls share the instance. Each must read back only its own map.
@@ -444,3 +467,69 @@ async def test_waterfall_resolver_search_without_rerank():
     r.ranking_pipeline.rank_papers.assert_not_awaited()
     assert r.pubmed.search.await_args.kwargs.get("sort") == "relevance"
 
+
+
+async def test_auto_top_up_drops_crossref_junk_keeps_relevant():
+    """PubMed empty + CrossRef junk: the top-up gate keeps only records
+    sharing a content token with the query (ENAMED misses E7)."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = None
+    junk = PaperMetadata(
+        title="Half hours with modern scientists",
+        doi="10.1/junk",
+        source="crossref",
+        doc_type="journal-article",
+    )
+    relevant = PaperMetadata(
+        title="How Well Does The Parkland Formula Estimate Actual Fluid Volumes?",
+        doi="10.1/relevant",
+        source="crossref",
+        doc_type="journal-article",
+    )
+    r.crossref.search = AsyncMock(return_value=[junk, relevant])
+    r.crossref.last_error = None
+
+    results = await r.search(
+        "Parkland formula burn resuscitation fluid calculation",
+        source="auto",
+        num_results=5,
+        rerank=False,
+    )
+    titles = [p.title for p in results]
+    assert relevant.title in titles
+    assert junk.title not in titles
+
+
+async def test_auto_top_up_requests_journal_articles_only():
+    """finding 5: the resolver's CrossRef top-up dilutes a re-rank pool with
+    non-journal records, so it alone opts into the type filter -- a direct
+    CrossRef search must not."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    r.pubmed.search = AsyncMock(return_value=[])
+    r.pubmed.last_error = None
+    r.crossref.search = AsyncMock(return_value=[])
+    r.crossref.last_error = None
+
+    await r.search("burn resuscitation", source="auto", num_results=5, rerank=False)
+
+    r.crossref.search.assert_awaited_once()
+    assert r.crossref.search.await_args.kwargs["journal_articles_only"] is True
+
+
+async def test_auto_skips_crossref_top_up_when_page_satisfied():
+    """PubMed already filled the requested page: no CrossRef round-trip,
+    even though the re-rank candidate pool is not full."""
+    r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
+    mock_papers = [
+        PaperMetadata(title="Paper 1", pmid="1", doi="10.1001/1", year="2015"),
+        PaperMetadata(title="Paper 2", pmid="2", doi="10.1001/2", year="2026"),
+    ]
+    r.pubmed.search = AsyncMock(return_value=mock_papers)
+    r.pubmed.last_error = None
+    r.crossref.search = AsyncMock(return_value=[PaperMetadata(title="Junk")])
+    r.ranking_pipeline.rank_papers = AsyncMock(return_value=mock_papers)
+
+    results = await r.search("cancer", source="auto", num_results=2, rerank=True)
+    assert len(results) == 2
+    r.crossref.search.assert_not_awaited()

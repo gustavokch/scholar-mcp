@@ -227,3 +227,14 @@ def parse_folder_index(html: str, base_url: str, parent_path: str) -> list[str]:
         if normalized not in folders:
             folders.append(normalized)
     return folders
+
+
+# Bumped whenever a cached gov.br search row's shape changes. Both engines
+# store BrazilGuideline.to_dict() rows and read them back through
+# from_dict(), which fills a missing field with its default rather than
+# failing -- so an un-bumped key serves a pre-change row as if current:
+# has_full_text silently False, for the full cache_ttl_brazil_moh (30 days).
+# Declared here rather than reused from brazil_moh.CACHE_SCHEMA because
+# brazil_moh imports both engines; the reverse import would be a cycle.
+# v2: has_full_text (ENAMED misses plan B4).
+CACHE_SCHEMA = "v2"

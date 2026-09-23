@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata, RelatedPaper
 from scholar_mcp.providers.base import failure_reason
+from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.ranking import classify_evidence_grade
 from scholar_mcp.utils.ctxstate import ContextScoped
 from scholar_mcp.utils.http import AsyncHttpClient
@@ -25,9 +26,34 @@ class PubMedProvider:
     # invisible to a concurrent request sharing this singleton provider.
     last_error: str | None = ContextScoped(lambda: None)
 
+    # Set to the relaxed variant that produced hits when the full query
+    # returned none and relax=True walked the ladder; None when the full
+    # query answered directly or relax=False. The resolver reads this so
+    # search_papers can tell the caller it answered a different question
+    # than the one asked (finding 3: relax=True with no metadata channel
+    # made a relaxed answer indistinguishable from an exact one).
+    last_relaxed_query: str | None = ContextScoped(lambda: None)
+
     def __init__(self, http_client: AsyncHttpClient, settings: Settings | None = None) -> None:
         self.http_client = http_client
         self.settings = settings or Settings.load()
+
+    def _base_params(self) -> dict[str, Any]:
+        """NCBI credentials for E-utilities.
+
+        Missing until now: without an api_key NCBI serves 2.8 req/s, with
+        one 9 req/s (Settings.ncbi_rate_limit, already honored by the shared
+        http client). Only set keys are sent, so keyless callers behave as
+        before.
+        """
+        params: dict[str, Any] = {}
+        if self.settings.pubmed_api_key:
+            params["api_key"] = self.settings.pubmed_api_key
+        if self.settings.pubmed_email:
+            params["email"] = self.settings.pubmed_email
+        if self.settings.pubmed_tool:
+            params["tool"] = self.settings.pubmed_tool
+        return params
 
     @staticmethod
     def build_query(
@@ -57,10 +83,13 @@ class PubMedProvider:
         year_start: int | None = None,
         year_end: int | None = None,
         sort: str = "relevance",
+        relax: bool = True,
     ) -> list[PaperMetadata]:
         term = self.build_query(query, author, journal, year_start, year_end)
         self.last_error = None
+        self.last_relaxed_query = None
         search_params: dict[str, Any] = {
+            **self._base_params(),
             "db": "pubmed",
             "term": term,
             "retmax": min(num_results, 200),
@@ -82,10 +111,38 @@ class PubMedProvider:
 
             data = resp.json()
             id_list = data.get("esearchresult", {}).get("idlist", [])
+            if not id_list and relax:
+                # PubMed ANDs every term: a long natural-language query
+                # over-constrains esearch to zero hits while a leading-token
+                # prefix returns hits. Walk the shared ladder past the
+                # already tried full query, rebuilding the caller's filters
+                # around each relaxed variant, stopping at the first hit.
+                # At most MAX_RELAX_EXTRA_CALLS extra esearch calls; a fetch
+                # failure is not a zero-hit and ends the walk.
+                for variant in relax_ladder(query)[1 : 1 + MAX_RELAX_EXTRA_CALLS]:
+                    step_term = self.build_query(
+                        variant, author, journal, year_start, year_end
+                    )
+                    if step_term == term:
+                        continue
+                    step_resp = await self.http_client.get(
+                        ESEARCH_URL,
+                        params={**search_params, "term": step_term},
+                    )
+                    if step_resp is None or step_resp.status_code != 200:
+                        self.last_error = failure_reason(
+                            self.http_client, resp=step_resp
+                        )
+                        return []
+                    id_list = step_resp.json().get("esearchresult", {}).get("idlist", [])
+                    if id_list:
+                        self.last_relaxed_query = variant
+                        break
             if not id_list:
                 return []
 
             summary_params = {
+                **self._base_params(),
                 "db": "pubmed",
                 "id": ",".join(id_list),
                 "retmode": "json",
@@ -148,6 +205,7 @@ class PubMedProvider:
                         issn=issn,
                         study_type=study_type,
                         evidence_grade=evidence_grade,
+                        source="pubmed",
                     )
                 )
 
@@ -190,7 +248,12 @@ class PubMedProvider:
             try:
                 s_resp = await self.http_client.get(
                     ESEARCH_URL,
-                    params={"db": "pubmed", "term": f'"{ids.doi}"[Location ID]', "retmode": "json"},
+                    params={
+                        **self._base_params(),
+                        "db": "pubmed",
+                        "term": f'"{ids.doi}"[Location ID]',
+                        "retmode": "json",
+                    },
                 )
                 if s_resp and s_resp.status_code == 200:
                     id_list = s_resp.json().get("esearchresult", {}).get("idlist", [])
@@ -205,7 +268,13 @@ class PubMedProvider:
         try:
             resp = await self.http_client.get(
                 EFETCH_URL,
-                params={"db": "pubmed", "id": pmid, "rettype": "xml", "retmode": "xml"},
+                params={
+                    **self._base_params(),
+                    "db": "pubmed",
+                    "id": pmid,
+                    "rettype": "xml",
+                    "retmode": "xml",
+                },
             )
             if resp is None or resp.status_code != 200 or not resp.content:
                 return None
@@ -285,6 +354,7 @@ class PubMedProvider:
                 pmcid=self._own_article_id(article, "pmc") or ids.pmcid,
                 abstract=abstract,
                 oa_status="unknown",
+                source="pubmed",
             )
         except Exception:
             return None
@@ -296,6 +366,7 @@ class PubMedProvider:
     ) -> list[RelatedPaper]:
         clean_pmid = pmid.strip()
         params = {
+            **self._base_params(),
             "dbfrom": "pubmed",
             "id": clean_pmid,
             "cmd": "neighbor_score",
@@ -340,6 +411,7 @@ class PubMedProvider:
 
             # Fetch metadata via esummary
             summary_params = {
+                **self._base_params(),
                 "db": "pubmed",
                 "id": ",".join(target_ids),
                 "retmode": "json",

@@ -1,13 +1,18 @@
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import respx
 
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.databases import MedicalDatabasesEngine
 from scholar_mcp.medical.models import MedicalArticle
+from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+EU_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+EU_FETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
@@ -495,6 +500,194 @@ async def test_search_medical_journals_ranks_on_user_query_before_truncation(tmp
         articles, _ = await engine.search_medical_journals("metformin diabetes")
         assert len(articles) == 15
         assert articles[0].title == "Metformin diabetes outcomes"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+_EFETCH_ARTICLE = (
+    "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>888</PMID>"
+    "<Article><Journal><Title>Lancet</Title></Journal>"
+    "<ArticleTitle>Clinical study of infectious mononucleosis</ArticleTitle>"
+    "<Abstract><AbstractText>Rash in adolescent mononucleosis.</AbstractText></Abstract>"
+    "</Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+).encode()
+
+
+def _esearch_terms():
+    return [
+        c.request.url.params.get("term", "")
+        for c in respx.calls
+        if c.request.url.params.get("term") is not None
+    ]
+
+
+@respx.mock
+async def test_pubmed_client_relaxes_long_query_to_first_hit(tmp_path: Path):
+    """An 11-token query ANDs to zero hits; the ladder must stop at the
+    first non-empty prefix and report it as relaxed_query."""
+    from scholar_mcp.query_relax import relax_ladder
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    query = (
+        "Epstein-Barr virus infectious mononucleosis exudative tonsillitis "
+        "posterior cervical lymphadenopathy rash adolescent"
+    )
+    try:
+        def _router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            # Full query stays empty; 5-token prefix hits.
+            if len(term.split()) > 5:
+                return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["888"]}})
+
+        respx.get(EU_SEARCH_URL).mock(side_effect=_router)
+        respx.get(EU_FETCH_URL).respond(content=_EFETCH_ARTICLE)
+
+        articles, meta = await client.search_articles(query, max_results=5)
+        assert len(articles) == 1
+        assert meta.error is False
+        expected = relax_ladder(query)
+        # Full -> 5 -> 4 -> 3 fits the 3-call budget, so every rung is
+        # reachable and the first relaxed variant answers.
+        assert meta.relaxed_query == expected[1]
+        assert len(meta.relaxed_query.split()) == 5
+        # Initial + 5-token: stopped at the first hit, the 4- and
+        # 3-token variants were never sent.
+        assert len(respx.calls) == 3  # 2 esearch + 1 efetch
+        assert len(_esearch_terms()) == 2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_pubmed_client_relax_capped_at_three_extra_esearch(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(EU_SEARCH_URL).respond(json={"esearchresult": {"idlist": []}})
+
+        articles, meta = await client.search_articles(
+            "alpha beta gamma delta epsilon zeta eta theta", max_results=5
+        )
+        assert articles == []
+        assert meta.error is False
+        assert meta.relaxed_query is None
+        assert len(_esearch_terms()) == 4  # initial + at most 3 extra
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_pubmed_client_does_not_relax_on_fetch_error(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(EU_SEARCH_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+        articles, meta = await client.search_articles(
+            "NSAIDs third trimester pregnancy contraindications"
+        )
+        assert articles == []
+        assert meta.error is True
+        # Retries of the same failing request are fine; no relaxed
+        # (shortened) variant may be sent after a fetch error.
+        terms = _esearch_terms()
+        assert terms, "esearch must have been attempted"
+        assert all(
+            t == "NSAIDs third trimester pregnancy contraindications" for t in terms
+        )
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_pubmed_client_relax_false_sends_single_esearch(tmp_path: Path):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(EU_SEARCH_URL).respond(json={"esearchresult": {"idlist": []}})
+
+        articles, meta = await client.search_articles(
+            "NSAIDs third trimester pregnancy contraindications", relax=False
+        )
+        assert articles == []
+        assert meta.error is False
+        assert meta.relaxed_query is None
+        assert len(_esearch_terms()) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_pubmed_client_cache_key_stays_original_query(tmp_path: Path):
+    """A relaxed hit is cached under the original query: repeating the
+    original query must not re-issue esearch."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        def _router(request: httpx.Request) -> httpx.Response:
+            term = request.url.params.get("term", "")
+            if len(term.split()) > 4:
+                return httpx.Response(200, json={"esearchresult": {"idlist": []}})
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["888"]}})
+
+        route = respx.get(EU_SEARCH_URL).mock(side_effect=_router)
+        respx.get(EU_FETCH_URL).respond(content=_EFETCH_ARTICLE)
+
+        articles, meta = await client.search_articles(
+            "NSAIDs third trimester pregnancy contraindications", max_results=5
+        )
+        assert len(articles) == 1
+        assert meta.relaxed_query is not None
+        first_call_count = route.call_count
+
+        articles2, meta2 = await client.search_articles(
+            "NSAIDs third trimester pregnancy contraindications", max_results=5
+        )
+        assert len(articles2) == 1
+        assert route.call_count == first_call_count
+        # finding 4: the cache-hit branch must report the same variant the
+        # cache-miss call walked the ladder to find, not None.
+        assert meta2.relaxed_query == meta.relaxed_query
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pubmed_client_legacy_list_shaped_cache_row_still_loads(tmp_path: Path):
+    """A row written before finding 4's fix is a bare list, not
+    ``{"articles": ..., "relaxed_query": ...}``. It must still load, with
+    relaxed_query reported as None -- the variant is not recoverable from a
+    legacy row, and that is an honest degrade, not a wrong answer."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        article = MedicalArticle(title="Legacy", pmid="1")
+        await cache.set(
+            "pubmed:search:legacy query:5", [article.to_dict()], source="pubmed"
+        )
+        articles, meta = await client.search_articles("legacy query", max_results=5)
+        assert len(articles) == 1
+        assert articles[0].title == "Legacy"
+        assert meta.relaxed_query is None
     finally:
         await cache.close()
         await http_client.aclose()
