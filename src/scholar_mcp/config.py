@@ -1,6 +1,9 @@
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Sci-Hub mirrors, pruned 2026-09-19. Removed as permanently dead (probed with a
 # DOI request): sci-hub.hkvisa.net (403 "Just a moment" bot shield on every path),
@@ -103,6 +106,13 @@ class Settings:
     # 45 s because camoufox startup plus Bunny CDN challenge execution on
     # pesquisa.bvsalud.org runs 15 s-25 s; 30 s cut off legitimate searches.
     brazil_browser_timeout_s: float = 45.0
+    # Whole-call ceiling for get_brazil_moh_full_text network work (record
+    # lookup plus PDF fetch). Published alongside brazil_chain_timeout_s so
+    # the caller honors two ceilings instead of one blanket timeout: the
+    # search chain (stages + browser tier) and one document fetch are
+    # different budgets, and the 45 s browser tier must never be served
+    # into a 20 s blanket and read as a backend failure.
+    brazil_fulltext_timeout_s: float = 30.0
     enable_medical_tools: bool = True
 
     @property
@@ -127,6 +137,30 @@ class Settings:
         def _env(name: str) -> str | None:
             """Env value as a stripped string, or None when unset/blank."""
             return (os.getenv(name) or "").strip() or None
+
+        def _float_env(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "invalid %s=%r, falling back to %s", name, raw, default
+                )
+                return default
+
+        def _int_env(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None or not raw.strip():
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "invalid %s=%r, falling back to %s", name, raw, default
+                )
+                return default
 
         mirrors_env = os.getenv("SCIHUB_MIRRORS")
         mirrors = (
@@ -161,69 +195,60 @@ class Settings:
                 os.getenv("PREFER_SCIHUB_OVER_UNPAYWALL"), False
             ),
             scihub_mirrors=mirrors,
-            request_timeout=int(os.getenv("SCHOLAR_REQUEST_TIMEOUT", "30")),
-            total_budget_seconds=int(os.getenv("SCHOLAR_TOTAL_BUDGET", "45")),
-            max_concurrency=int(os.getenv("SCHOLAR_MAX_CONCURRENCY", "5")),
-            cache_size=int(os.getenv("SCHOLAR_CACHE_SIZE", "500")),
-            cache_ttl_seconds=int(os.getenv("SCHOLAR_CACHE_TTL", "3600")),
-            cache_ttl_idmap_failure=int(os.getenv("CACHE_TTL_IDMAP_FAILURE", "60")),
-            max_chars=int(os.getenv("SCHOLAR_MAX_CHARS", "50000")),
-            title_match_threshold=float(os.getenv("SCHOLAR_TITLE_MATCH_THRESHOLD", "80")),
+            request_timeout=_int_env("SCHOLAR_REQUEST_TIMEOUT", 30),
+            total_budget_seconds=_int_env("SCHOLAR_TOTAL_BUDGET", 45),
+            max_concurrency=_int_env("SCHOLAR_MAX_CONCURRENCY", 5),
+            cache_size=_int_env("SCHOLAR_CACHE_SIZE", 500),
+            cache_ttl_seconds=_int_env("SCHOLAR_CACHE_TTL", 3600),
+            cache_ttl_idmap_failure=_int_env("CACHE_TTL_IDMAP_FAILURE", 60),
+            max_chars=_int_env("SCHOLAR_MAX_CHARS", 50000),
+            title_match_threshold=_float_env("SCHOLAR_TITLE_MATCH_THRESHOLD", 80.0),
             download_dir=Path(os.getenv("SCHOLAR_DOWNLOAD_DIR", "./downloads")),
             ranking_enabled=_bool(os.getenv("RANKING_ENABLED"), True),
-            ranking_weight_relevance=float(os.getenv("RANKING_WEIGHT_RELEVANCE", "0.30")),
-            ranking_weight_citations=float(os.getenv("RANKING_WEIGHT_CITATIONS", "0.20")),
-            ranking_weight_recency=float(os.getenv("RANKING_WEIGHT_RECENCY", "0.15")),
-            ranking_weight_evidence_grade=float(
-                os.getenv("RANKING_WEIGHT_EVIDENCE_GRADE", "0.20")
+            ranking_weight_relevance=_float_env("RANKING_WEIGHT_RELEVANCE", 0.30),
+            ranking_weight_citations=_float_env("RANKING_WEIGHT_CITATIONS", 0.20),
+            ranking_weight_recency=_float_env("RANKING_WEIGHT_RECENCY", 0.15),
+            ranking_weight_evidence_grade=_float_env("RANKING_WEIGHT_EVIDENCE_GRADE", 0.20),
+            ranking_weight_journal_impact=_float_env("RANKING_WEIGHT_JOURNAL_IMPACT", 0.10),
+            ranking_weight_author_authority=_float_env(
+                "RANKING_WEIGHT_AUTHOR_AUTHORITY", 0.05
             ),
-            ranking_weight_journal_impact=float(
-                os.getenv("RANKING_WEIGHT_JOURNAL_IMPACT", "0.10")
+            ranking_position_weight=_float_env("RANKING_POSITION_WEIGHT", 0.25),
+            ranking_recency_half_life_years=_float_env(
+                "RANKING_RECENCY_HALF_LIFE_YEARS", 7.0
             ),
-            ranking_weight_author_authority=float(
-                os.getenv("RANKING_WEIGHT_AUTHOR_AUTHORITY", "0.05")
+            ranking_candidate_multiplier=_int_env("RANKING_CANDIDATE_MULTIPLIER", 3),
+            ranking_min_candidates=_int_env("RANKING_MIN_CANDIDATES", 20),
+            ranking_max_candidates=_int_env("RANKING_MAX_CANDIDATES", 50),
+            ranking_enrichment_timeout=_float_env("RANKING_ENRICHMENT_TIMEOUT", 1.5),
+            citation_check_supported_threshold=_float_env(
+                "CITATION_CHECK_SUPPORTED_THRESHOLD", 0.5
             ),
-            ranking_position_weight=float(os.getenv("RANKING_POSITION_WEIGHT", "0.25")),
-            ranking_recency_half_life_years=float(
-                os.getenv("RANKING_RECENCY_HALF_LIFE_YEARS", "7.0")
-            ),
-            ranking_candidate_multiplier=int(os.getenv("RANKING_CANDIDATE_MULTIPLIER", "3")),
-            ranking_min_candidates=int(os.getenv("RANKING_MIN_CANDIDATES", "20")),
-            ranking_max_candidates=int(os.getenv("RANKING_MAX_CANDIDATES", "50")),
-            ranking_enrichment_timeout=float(os.getenv("RANKING_ENRICHMENT_TIMEOUT", "1.5")),
-            citation_check_supported_threshold=float(
-                os.getenv("CITATION_CHECK_SUPPORTED_THRESHOLD", "0.5")
-            ),
-            citation_check_weak_threshold=float(
-                os.getenv("CITATION_CHECK_WEAK_THRESHOLD", "0.15")
-            ),
+            citation_check_weak_threshold=_float_env("CITATION_CHECK_WEAK_THRESHOLD", 0.15),
             cache_db_path=Path(
                 os.getenv("SCHOLAR_CACHE_DB", "~/.cache/scholar_mcp/cache.db")
             ).expanduser(),
-            cache_max_entries=int(os.getenv("CACHE_MAX_SIZE", "1000")),
-            cache_ttl_fda=int(os.getenv("CACHE_TTL_FDA", "86400")),
-            cache_ttl_pubmed=int(os.getenv("CACHE_TTL_PUBMED", "3600")),
-            cache_ttl_who=int(os.getenv("CACHE_TTL_WHO", "604800")),
-            cache_ttl_rxnorm=int(os.getenv("CACHE_TTL_RXNORM", "2592000")),
-            cache_ttl_guidelines=int(os.getenv("CACHE_TTL_GUIDELINES", "604800")),
-            cache_ttl_bright_futures=int(os.getenv("CACHE_TTL_BRIGHT_FUTURES", "2592000")),
-            cache_ttl_aap_policy=int(os.getenv("CACHE_TTL_AAP_POLICY", "604800")),
-            cache_ttl_pediatric_journals=int(
-                os.getenv("CACHE_TTL_PEDIATRIC_JOURNALS", "3600")
-            ),
-            cache_ttl_child_health=int(os.getenv("CACHE_TTL_CHILD_HEALTH", "604800")),
-            cache_ttl_pediatric_drugs=int(os.getenv("CACHE_TTL_PEDIATRIC_DRUGS", "86400")),
-            cache_ttl_clinical_trials=int(os.getenv("CACHE_TTL_CLINICAL_TRIALS", "86400")),
-            cache_ttl_who_iris=int(os.getenv("CACHE_TTL_WHO_IRIS", "2592000")),
-            cache_ttl_brazil_moh=int(os.getenv("CACHE_TTL_BRAZIL_MOH", "2592000")),
-            brazil_stage_timeout_s=float(os.getenv("BRAZIL_STAGE_TIMEOUT_S", "20.0")),
-            brazil_chain_timeout_s=float(os.getenv("BRAZIL_CHAIN_TIMEOUT_S", "90.0")),
-            scihub_mirror_timeout_s=float(os.getenv("SCIHUB_MIRROR_TIMEOUT_S", "12.0")),
-            scihub_tier_timeout_s=float(os.getenv("SCIHUB_TIER_TIMEOUT_S", "20.0")),
+            cache_max_entries=_int_env("CACHE_MAX_SIZE", 1000),
+            cache_ttl_fda=_int_env("CACHE_TTL_FDA", 86400),
+            cache_ttl_pubmed=_int_env("CACHE_TTL_PUBMED", 3600),
+            cache_ttl_who=_int_env("CACHE_TTL_WHO", 604800),
+            cache_ttl_rxnorm=_int_env("CACHE_TTL_RXNORM", 2592000),
+            cache_ttl_guidelines=_int_env("CACHE_TTL_GUIDELINES", 604800),
+            cache_ttl_bright_futures=_int_env("CACHE_TTL_BRIGHT_FUTURES", 2592000),
+            cache_ttl_aap_policy=_int_env("CACHE_TTL_AAP_POLICY", 604800),
+            cache_ttl_pediatric_journals=_int_env("CACHE_TTL_PEDIATRIC_JOURNALS", 3600),
+            cache_ttl_child_health=_int_env("CACHE_TTL_CHILD_HEALTH", 604800),
+            cache_ttl_pediatric_drugs=_int_env("CACHE_TTL_PEDIATRIC_DRUGS", 86400),
+            cache_ttl_clinical_trials=_int_env("CACHE_TTL_CLINICAL_TRIALS", 86400),
+            cache_ttl_who_iris=_int_env("CACHE_TTL_WHO_IRIS", 2592000),
+            cache_ttl_brazil_moh=_int_env("CACHE_TTL_BRAZIL_MOH", 2592000),
+            brazil_stage_timeout_s=_float_env("BRAZIL_STAGE_TIMEOUT_S", 20.0),
+            brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 90.0),
+            scihub_mirror_timeout_s=_float_env("SCIHUB_MIRROR_TIMEOUT_S", 12.0),
+            scihub_tier_timeout_s=_float_env("SCIHUB_TIER_TIMEOUT_S", 20.0),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
-            brazil_browser_timeout_s=float(
-                os.getenv("BRAZIL_BROWSER_TIMEOUT_S", "45.0")
-            ),
+            brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 45.0),
+            brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

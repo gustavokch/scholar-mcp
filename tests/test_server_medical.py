@@ -114,6 +114,32 @@ async def test_search_brazil_moh_guidelines_returns_error_envelope(monkeypatch):
     assert result["source"] == "brazil-moh"
 
 
+async def test_search_brazil_moh_guidelines_preserves_engine_error_kind(monkeypatch):
+    # The engine (T5/T6) is the sole source of truth for error_kind; the
+    # server must not re-derive a verdict from `guidelines`. A non-empty
+    # results list paired with a non-"ok" kind proves no rewrite happens.
+    from scholar_mcp.medical.models import BrazilGuideline
+
+    mock = AsyncMock(
+        return_value=(
+            [BrazilGuideline(title="Protocolo", record_id="biblio-1")],
+            CacheMetadata(cached=False, cache_age=0, error_kind="cdn_challenge"),
+        )
+    )
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("tuberculose")
+    assert result["diagnostics"]["error_kind"] == "cdn_challenge"
+
+
+async def test_search_brazil_moh_guidelines_defensive_unknown_error_kind(monkeypatch):
+    # If a producer ever leaves error_kind unset, the server must not invent
+    # a clean "ok"/"successful_empty" verdict for it.
+    mock = AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0)))
+    monkeypatch.setattr(srv.brazil_moh_engine, "search_guidelines", mock)
+    result = await srv.search_brazil_moh_guidelines("x")
+    assert result["diagnostics"]["error_kind"] == "unknown"
+
+
 async def test_get_brazil_moh_full_text_tool(monkeypatch):
     mock = AsyncMock(
         return_value=(

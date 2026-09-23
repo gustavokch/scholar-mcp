@@ -421,7 +421,9 @@ class GovBrAZEngine:
             # pin a false success for cache_ttl_brazil_moh and hide the
             # failure from errored_any in brazil_moh.
             logger.warning("gov.br A-Z catalog is empty; reporting search error")
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            return [], CacheMetadata(
+                cached=False, cache_age=0, error=True, error_kind="backend_error"
+            )
 
         scored_items: list[tuple[float, dict[str, Any]]] = []
         for item in catalog.values():

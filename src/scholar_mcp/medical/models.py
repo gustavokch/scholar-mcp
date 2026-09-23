@@ -250,6 +250,18 @@ class BrazilGuideline:
     retrievable (allowed-host or local document URL, a fulltext id, or a
     non-empty abstract). Body-less catalog cards rank lower but are never
     dropped -- titles still carry signal.
+
+    ``record_id`` is the stable Solr document id (e.g. ``biblio-1701387`` or
+    a bundled ``ms-*`` corpus key). It is the fold key for downstream
+    machine consumers (``med:brmoh:{record_id}``): the same query must
+    return the same ``record_id`` for the same document across calls, and
+    ``get_brazil_moh_full_text`` resolves it back to the document.
+    ``doi`` carries a DOI resolved out of the record's link list when the
+    source provides one; BVS non-conventional records usually carry none,
+    so it stays empty rather than guessed.
+    ``abstract_synthetic`` marks a body fabricated from DeCS descriptors or
+    ``ti_en`` (see ``_coerce_abstract``): it is a search snippet, never a
+    full-text abstract fallback.
     """
 
     title: str = ""
@@ -260,6 +272,7 @@ class BrazilGuideline:
     has_full_text: bool = False
     source: str = "brazil-moh"
     abstract: str = ""
+    abstract_synthetic: bool = False
     year: str = ""
     issued: str = ""
     country: str = ""
@@ -267,6 +280,7 @@ class BrazilGuideline:
     languages: list[str] = field(default_factory=list)
     collections: list[str] = field(default_factory=list)
     mesh_subjects: list[str] = field(default_factory=list)
+    doi: str = ""
     score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:

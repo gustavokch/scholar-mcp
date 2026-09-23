@@ -35,6 +35,25 @@ them, blending a generic scorer against a Solr ordering tuned for this
 corpus degraded it. The BVS ordering is not discarded but retained as a
 weighted position prior, because a relaxed ``OR`` pool is far larger than
 the over-fetch window and the server still chooses which slice we see.
+
+Downstream contract (ENAMED 2026 misses, track B §2): every
+``search_guidelines`` call reports a machine-readable ``error_kind`` on its
+``CacheMetadata`` -- ``ok`` | ``successful_empty`` | ``cdn_challenge`` |
+``origin_outage`` | ``timeout`` | ``backend_error`` -- plus ``http_status``,
+``challenge_hit``, ``timeout`` and ``cache_hit`` (``CacheMetadata.cached``)
+fields, so the caller distinguishes a CDN shield from a sick origin
+instead of reading one ``backend_error``. ``origin_outage`` must never
+count against any caller-side breaker, and a search that ends in one is
+never cached. One document fetch is the exception: an abstract served
+after a failed PDF fetch is held for ``DEGRADED_RESULT_TTL_SECONDS`` and
+carries its ``error_kind`` inside the cached row, so every hit in that
+window reports the same degradation the first caller saw. ``record_id``
+is the stable Solr document id and the fold key for ``med:brmoh:``.
+Published budgets: the search chain (``brazil_chain_timeout_s``,
+per-stage ``brazil_stage_timeout_s``, browser tier
+``brazil_browser_timeout_s``) is a separate budget from one document
+fetch (``brazil_fulltext_timeout_s``) -- a slow search never eats into
+the full-text ceiling, and vice versa.
 """
 
 import asyncio
@@ -62,7 +81,7 @@ from scholar_mcp.medical.ranking import (
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import AsyncHttpClient
-from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
 
 _BVS_HOST = "pesquisa.bvsalud.org"
 BVS_SEARCH_URL = f"https://{_BVS_HOST}/portal/"
@@ -116,6 +135,13 @@ CACHE_SCHEMA = "v2"
 # ceiling (45 s) firing first.
 _CAMOUFOX_NAV_TIMEOUT_MS = 30000
 
+# A Camoufox launch needs tens of seconds; below this floor the browser
+# tier cannot do useful work, so skip the launch outright. Not independently
+# measured for this deployment -- 20.0 is a conservative floor consistent
+# with "tens of seconds" that still leaves headroom for navigation on a
+# ceiling that clears it. Raise once a real launch-time measurement exists.
+_CAMOUFOX_MIN_USEFUL_CEILING_S = 20.0
+
 _BVS_CHALLENGE_MARKERS = (
     "shield-templates",
     "b-cdn.net",
@@ -137,6 +163,28 @@ _BVS_OUTAGE_MARKERS = (
     "gateway timeout",
 )
 
+# Machine-readable failure taxonomy for the §2 contract, defined in
+# sqlite_cache.py next to ``CacheMetadata.error_kind``. "ok" means records
+# were returned; "successful_empty" means the endpoint answered cleanly and
+# there is genuinely nothing matching (not a failure). "cdn_challenge" is a
+# Bunny/CDN shield 403 or block-HTML page (retryable once via the browser
+# path); "origin_outage" is a 5xx or origin error page (no retry, no breaker
+# count, never cached); "timeout" is a stage/chain/transport timeout;
+# "backend_error" is anything else.
+
+# Raised abstract cap (S2.1): shaped hits must carry a decidable body, and
+# the old downstream previews truncated well below what the source provides.
+# BVS ``ab`` fields run to a few KB; 2000 chars keeps the full abstract of a
+# technical manual while bounding the merged payload.
+ABSTRACT_MAX_CHARS = 2000
+
+# BVS search retries only 429: a 5xx from this host is an origin outage, and
+# retrying it four times with backoff burns the stage budget that the
+# remaining stages (or the browser tier) need. The non-challenge shield-403
+# burst retry still applies inside the HTTP layer even under this override.
+_BVS_RETRYABLE_STATUSES = frozenset({429})
+
+_DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
 
 @dataclass
@@ -153,12 +201,37 @@ class _SearchState:
     short-circuits subsequent BVS stages in the same call. ``bvs_shielded``
     is also set when a 200 carries block-HTML instead of JSON; truncated
     JSON or other garbage sets no flag, since a single extra stage is not
-    a cascade.
+    a cascade. ``http_status``/``challenge_hit``/``error_kind`` feed the §2
+    diagnostics contract; ``stages_attempted`` and ``overfetch_window`` are
+    observed per call for the S0.1 error-taxonomy table.
     """
 
     bvs_shielded: bool = False
     bvs_origin_down: bool = False
     bvs_timed_out: bool = False
+    http_status: int | None = None
+    challenge_hit: bool = False
+    error_kind: BvsErrorKind | Literal[""] = ""
+    stages_attempted: int = 0
+    overfetch_window: int = 0
+
+
+@dataclass
+class _SearchOutcome:
+    """The fields that vary across ``search_guidelines``' meta+log call sites.
+
+    ``query``, ``norm_collection``, ``clamped``, and ``call_start`` are the
+    same for every exit of one ``search_guidelines`` call, so they stay as
+    plain arguments to ``_finalize_search`` rather than living here.
+    """
+
+    cached: bool
+    cache_age: int
+    error: bool
+    state: _SearchState
+    records: list[BrazilGuideline]
+    rerank_in: int
+    rerank_out: int
 
 
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
@@ -170,6 +243,15 @@ VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
 # after the scraper recovers, long enough that a burst of queries does not
 # re-run the whole BVS chain each time.
 DEGRADED_RESULT_TTL_SECONDS = 300
+
+# The classified failure that produced a cached full-text payload travels
+# inside the row under this key. Without it, only the first caller in the
+# 300 s degraded window sees ``error_kind`` (and the ``degraded`` flag
+# server.py derives from it); everyone behind the cache reads a byte-identical
+# payload as clean. Private to the stored row: ``_serve_full_text`` strips it,
+# so it never reaches a caller. Rows written before this key existed read as
+# "" -- the same value they reported before.
+_CACHED_ERROR_KIND_KEY = "_error_kind"
 
 BRAZIL_COUNTRY = "Brasil"
 
@@ -398,11 +480,56 @@ def _select_document_url(doc: dict[str, Any]) -> str:
     return urls[0]
 
 
+def _extract_doi(doc: dict[str, Any]) -> str:
+    """First DOI found in the record's link list, or "".
+
+    BVS non-conventional records usually carry no DOI; the field stays
+    empty rather than guessed. Scans ``ur`` for a bare ``10.xxxx/...``
+    string or a ``doi.org`` URL, cuts URL query/fragment, and strips
+    trailing punctuation the Solr field occasionally appends. The left
+    boundary keeps mid-string numeric paths (``v10.1234/...``) from
+    matching.
+    """
+    for url in _as_list(doc.get("ur")):
+        match = _DOI_RE.search(url or "")
+        if match:
+            doi = re.split(r"[?#]", match.group(0), maxsplit=1)[0]
+            return doi.rstrip(".,;:)]}")
+    return ""
+
+
+def _coerce_abstract(doc: dict[str, Any]) -> tuple[str, bool]:
+    """Record abstract under the raised cap, never silently empty when text exists.
+
+    ``ab`` is truncated to ``ABSTRACT_MAX_CHARS`` (S2.1). When the source
+    provides no abstract but indexes DeCS descriptors, those become the
+    decidable body (``Temas (DeCS): ...``); when even those are absent but
+    an English title distinct from the Portuguese one exists, it stands in.
+    Genuinely textless records keep "" so the caller can still tell them
+    apart from a populated snippet.
+
+    Returns ``(body, synthetic)``: ``synthetic`` is True when the body was
+    fabricated from descriptors or ``ti_en`` rather than the source abstract.
+    """
+    raw = _first(doc.get("ab")).strip()
+    if raw:
+        return raw[:ABSTRACT_MAX_CHARS], False
+    mesh = _as_list(doc.get("mh"))
+    if mesh:
+        fallback = "Temas (DeCS): " + "; ".join(mesh)
+        return fallback[:ABSTRACT_MAX_CHARS], True
+    title = _first(doc.get("ti")).strip()
+    title_en = _first(doc.get("ti_en")).strip()
+    if title_en and title_en != title:
+        return title_en[:ABSTRACT_MAX_CHARS], True
+    return "", False
+
+
 def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
     """Map one Solr document onto a BrazilGuideline."""
     document_url = _select_document_url(doc)
     year, issued = _parse_issued(doc.get("da"))
-    abstract = _first(doc.get("ab"))
+    abstract, synthetic = _coerce_abstract(doc)
     fulltext_id = _derive_fulltext_id(document_url)
     return BrazilGuideline(
         title=_first(doc.get("ti")),
@@ -414,13 +541,16 @@ def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
         # the flag lets ranking damp them instead of citing them as
         # evidence (ENAMED misses plan B4). One shared rule with the gov.br
         # converters: see medical.models.has_retrievable_body.
+        # A synthetic body (DeCS descriptors or ti_en) is a search snippet,
+        # not a retrievable body, so it is not offered as fallback_text.
         has_full_text=has_retrievable_body(
             document_url,
             fulltext_id=fulltext_id,
-            fallback_text=abstract,
+            fallback_text="" if synthetic else abstract,
             url_trusted=is_allowed_bvs_host(document_url),
         ),
         abstract=abstract,
+        abstract_synthetic=synthetic,
         year=year,
         issued=issued,
         country=_parse_country(doc.get("pais_publicacao")),
@@ -428,6 +558,7 @@ def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
         languages=_as_list(doc.get("la")),
         collections=_as_list(doc.get("db")),
         mesh_subjects=_as_list(doc.get("mh")),
+        doi=_extract_doi(doc),
     )
 
 
@@ -484,6 +615,22 @@ def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return unique
 
 
+def _classify_failure(failure: Any) -> BvsErrorKind:
+    """Map an ``AsyncHttpClient`` failure onto a ``BvsErrorKind``.
+
+    403 -> cdn_challenge, 5xx -> origin_outage, transport-kind failures ->
+    timeout, anything else -> backend_error.
+    """
+    status = getattr(failure, "status", None)
+    if status == 403:
+        return "cdn_challenge"
+    if status is not None and 500 <= status < 600:
+        return "origin_outage"
+    if getattr(failure, "kind", "") == "transport":
+        return "timeout"
+    return "backend_error"
+
+
 class BrazilMoHEngine:
     """Search and full-text retrieval for Brazilian MoH publications."""
 
@@ -513,7 +660,15 @@ class BrazilMoHEngine:
         carrying block-HTML (shield/challenge page) instead of JSON also
         sets ``state.bvs_shielded`` so later BVS stages short-circuit;
         truncated JSON or other garbage sets no flag.
+
+        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
+        5xx here is an origin outage, and burning backoff retries on it
+        spends the stage budget the remaining stages need. The failure is
+        classified onto ``state`` (``cdn_challenge`` vs ``origin_outage``
+        vs ``timeout`` vs ``backend_error``) for the §2 contract.
         """
+        state.stages_attempted += 1
+        state.overfetch_window = max(state.overfetch_window, count)
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
@@ -522,16 +677,23 @@ class BrazilMoHEngine:
                 "output": "json",
                 "count": count,
             },
+            retryable_statuses=_BVS_RETRYABLE_STATUSES,
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            if failure is not None:
-                if failure.status == 403:
-                    state.bvs_shielded = True
-                elif failure.status is not None and 500 <= failure.status < 600:
-                    state.bvs_origin_down = True
+            state.http_status = getattr(failure, "status", None)
+            kind = _classify_failure(failure)
+            state.error_kind = kind
+            if kind == "cdn_challenge":
+                state.bvs_shielded = True
+                state.challenge_hit = True
+            elif kind == "origin_outage":
+                state.bvs_origin_down = True
+            elif kind == "timeout":
+                state.bvs_timed_out = True
             return [], True
 
+        state.http_status = resp.status_code
         try:
             data = resp.json()
         except ValueError:
@@ -540,8 +702,11 @@ class BrazilMoHEngine:
             ) or self.http_client.is_challenge_html(resp):
                 logger.warning("brazil_moh search returned block-HTML payload")
                 state.bvs_shielded = True
+                state.challenge_hit = True
+                state.error_kind = "cdn_challenge"
             else:
                 logger.warning("brazil_moh search returned non-JSON payload")
+                state.error_kind = "backend_error"
             return [], True
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
@@ -562,10 +727,10 @@ class BrazilMoHEngine:
         Returns min(brazil_stage_timeout_s, chain_budget_remaining).
         A setting <= 0 disables that bound.
         """
-        stage_budget = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        stage_budget = float(self.settings.brazil_stage_timeout_s)
         if chain_start is None:
             return stage_budget
-        chain_budget = float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return stage_budget
         remaining = max(chain_budget - (time.monotonic() - chain_start), 0.0)
@@ -612,9 +777,9 @@ class BrazilMoHEngine:
         and expired), the stage is skipped, ``on_timeout`` is fired, and ``default``
         is returned. If both bounds are disabled (<= 0), ``coro`` runs unbounded.
         """
-        stage_setting = float(getattr(self.settings, "brazil_stage_timeout_s", 0.0) or 0.0)
+        stage_setting = float(self.settings.brazil_stage_timeout_s)
         chain_setting = (
-            float(getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0)
+            float(self.settings.brazil_chain_timeout_s)
             if chain_start is not None
             else 0.0
         )
@@ -642,6 +807,8 @@ class BrazilMoHEngine:
 
     def _mark_bvs_timed_out(self, state: _SearchState) -> None:
         state.bvs_timed_out = True
+        if not state.error_kind:
+            state.error_kind = "timeout"
 
     async def _bvs_stage(
         self,
@@ -662,24 +829,222 @@ class BrazilMoHEngine:
             on_timeout=_on_timeout,
         )
 
+    def _overfetch_count(self, clamped: int, chain_start: float | None = None) -> int:
+        """Over-fetch window for one BVS stage, adaptive to the chain budget.
+
+        Full window is ``min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)``.
+        When the chain has burned over half its budget (slow origin), the
+        remaining stages shrink to ``min(clamped * 3, 60)``: a huge window
+        against a sick Solr endpoint only buys latency, and the client-side
+        ranker cannot lift what the server never returns in time. The window
+        is adaptive from the chain start, so the title-scoped first stage
+        already shrinks when the PCDT/A-Z phase has burned over half the
+        chain budget.
+        """
+        full = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+        if chain_start is None:
+            return full
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
+        if chain_budget <= 0:
+            return full
+        elapsed = time.monotonic() - chain_start
+        if elapsed < chain_budget / 2:
+            return full
+        return min(clamped * 3, 60)
+
+    @staticmethod
+    def _apply_since_year(
+        records: list[BrazilGuideline], since_year: int | None
+    ) -> list[BrazilGuideline]:
+        """Drop records published before ``since_year`` (S2.2).
+
+        ``since_year <= 0`` or ``None`` disables the filter. Records with a
+        missing or unparseable year are kept: absence of metadata must not
+        read as old. This runs before ranking so the relaxed-OR slice cannot
+        drown 2024-2025 documents under a larger pool of pre-2015 ones.
+        """
+        if not since_year or since_year <= 0:
+            return records
+        kept: list[BrazilGuideline] = []
+        for record in records:
+            try:
+                year = int((record.year or "").strip()[:4])
+            except ValueError:
+                kept.append(record)
+                continue
+            if year >= since_year:
+                kept.append(record)
+        return kept
+
+    @staticmethod
+    def _finalize_records(
+        records: list[BrazilGuideline],
+        query: str,
+        since_year: int | None,
+        clamped: int,
+    ) -> tuple[list[BrazilGuideline], int]:
+        """Filter by ``since_year``, rank, then slice to ``clamped``.
+
+        Shared by the cache-hit and cache-miss paths of ``search_guidelines``
+        so the cache can hold one unfiltered row per (collection, limit,
+        query) and still reproduce the exact per-``since_year`` result --
+        filtering before ranking, as ``_apply_since_year`` requires.
+        """
+        filtered = BrazilMoHEngine._apply_since_year(records, since_year)
+        ranked = rank_brazil_guidelines(filtered, query)[:clamped]
+        return ranked, len(filtered)
+
+    def _search_meta(
+        self,
+        *,
+        error: bool,
+        state: _SearchState,
+        records: list[BrazilGuideline],
+    ) -> CacheMetadata:
+        """Build the §2 diagnostics-bearing CacheMetadata for a search call."""
+        if not error and records:
+            kind = "ok"
+        elif not error:
+            kind = state.error_kind or "successful_empty"
+            if kind not in ("successful_empty", "ok") and not (
+                state.challenge_hit or state.bvs_origin_down
+            ):
+                kind = "successful_empty"
+        else:
+            kind = state.error_kind or "backend_error"
+            if state.bvs_timed_out:
+                kind = "timeout"
+            elif kind == "ok":
+                kind = "backend_error"
+        return CacheMetadata(
+            cached=False,
+            cache_age=0,
+            error=error,
+            error_kind=kind,
+            http_status=state.http_status,
+            challenge_hit=state.challenge_hit,
+            timeout=state.bvs_timed_out,
+        )
+
+    def _log_diagnostics(
+        self,
+        *,
+        query: str,
+        norm_collection: str,
+        clamped: int,
+        state: _SearchState,
+        meta: CacheMetadata,
+        elapsed_s: float,
+        cache_hit: bool,
+        rerank_in: int,
+        rerank_out: int,
+    ) -> None:
+        """Emit the S0.1 per-call diagnostics line (no behavior change)."""
+        logger.info(
+            "brazil_moh search query=%r collection=%s limit=%d "
+            "elapsed=%.2fs http_status=%s challenge_hit=%s cache_hit=%s "
+            "timeout=%s overfetch_window=%d stages=%d rerank_in=%d "
+            "rerank_out=%d error=%s error_kind=%s",
+            query,
+            norm_collection,
+            clamped,
+            elapsed_s,
+            state.http_status,
+            state.challenge_hit,
+            cache_hit,
+            state.bvs_timed_out,
+            state.overfetch_window,
+            state.stages_attempted,
+            rerank_in,
+            rerank_out,
+            meta.error,
+            meta.error_kind,
+        )
+
+    def _finalize_search(
+        self,
+        outcome: _SearchOutcome,
+        *,
+        query: str,
+        norm_collection: str,
+        clamped: int,
+        call_start: float,
+    ) -> CacheMetadata:
+        """Build the CacheMetadata for one search_guidelines exit and log it.
+
+        Collapses the cache-hit and cache-miss meta-building paths behind one
+        call: a cache hit carries its own ``cached``/``cache_age`` and a
+        simpler success/empty classification, while every other exit goes
+        through ``_search_meta``'s state-based classification.
+        """
+        elapsed_s = time.monotonic() - call_start
+        if outcome.cached:
+            meta = CacheMetadata(
+                cached=True,
+                cache_age=outcome.cache_age,
+                error=False,
+                error_kind="ok" if outcome.records else "successful_empty",
+            )
+        else:
+            meta = self._search_meta(
+                error=outcome.error, state=outcome.state, records=outcome.records
+            )
+        self._log_diagnostics(
+            query=query,
+            norm_collection=norm_collection,
+            clamped=clamped,
+            state=outcome.state,
+            meta=meta,
+            elapsed_s=elapsed_s,
+            cache_hit=outcome.cached,
+            rerank_in=outcome.rerank_in,
+            rerank_out=outcome.rerank_out,
+        )
+        return meta
+
     async def search_guidelines(
         self,
         query: str,
         limit: int = 10,
         collection: str = "all",
+        since_year: int | None = None,
     ) -> tuple[list[BrazilGuideline], CacheMetadata]:
         norm_collection = (collection or "all").strip().lower()
         if norm_collection not in VALID_COLLECTIONS:
             logger.warning("unknown brazil_moh collection %r", collection)
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+            return [], CacheMetadata(
+                cached=False, cache_age=0, error=True, error_kind="backend_error"
+            )
 
         clamped = min(max(1, limit), MAX_RESULTS)
 
-        if norm_collection == "pcdt":
-            return await self.pcdt_engine.search(query, limit=clamped)
-
-        if norm_collection == "az":
-            return await self.az_engine.search(query, limit=clamped)
+        if norm_collection in ("pcdt", "az"):
+            sub_engine = (
+                self.pcdt_engine if norm_collection == "pcdt" else self.az_engine
+            )
+            # The sub-engine ranks its catalog and slices to the limit it is
+            # handed, so asking for `clamped` and dropping pre-``since_year``
+            # rows afterwards returns fewer rows than the caller asked for
+            # while matching ones sat further down that ranking. Widen the
+            # window instead and slice after the filter -- the catalogs are
+            # local, so a wider window costs no extra request.
+            fetch_limit = (
+                min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+                if since_year and since_year > 0
+                else clamped
+            )
+            records, sub_meta = await sub_engine.search(query, limit=fetch_limit)
+            records = self._apply_since_year(records, since_year)[:clamped]
+            return records, CacheMetadata(
+                cached=sub_meta.cached,
+                cache_age=sub_meta.cache_age,
+                error=sub_meta.error,
+                error_kind=sub_meta.error_kind
+                or ("ok" if records else "successful_empty"),
+                http_status=sub_meta.http_status,
+                challenge_hit=sub_meta.challenge_hit,
+                timeout=sub_meta.timeout,
+            )
 
         # A blank query deliberately browses the collection. A query that
         # carries text but sanitizes away to nothing is different: composing
@@ -689,17 +1054,48 @@ class BrazilMoHEngine:
         tokens = _usable_tokens(query)
         if (query or "").strip() and not tokens:
             logger.info("brazil_moh query %r has no searchable tokens", query)
-            return [], CacheMetadata(cached=False, cache_age=0, error=False)
+            return [], CacheMetadata(
+                cached=False, cache_age=0, error=False, error_kind="successful_empty"
+            )
 
         # Keyed on the composed strict title-scoped query, not the raw one:
         # "dengue" and "  dengue  " compose identically and must share one
         # cache row. The fallback and relaxed queries never enter the key --
         # they derive from the same user query, so one user query keeps one row.
+        # ``since_year`` is deliberately absent from the key: the cached row
+        # holds the unfiltered merge, and ``_finalize_records`` applies the
+        # year filter uniformly on every read (hit or miss), so one row
+        # serves every ``since_year`` instead of fragmenting the 30-day
+        # cache per distinct year requested.
         title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
-        cache_key = f"brazil_moh_search:{CACHE_SCHEMA}:{norm_collection}:{clamped}:{title_composed}"
+        cache_key = (
+            f"brazil_moh_search:{CACHE_SCHEMA}:{norm_collection}:{clamped}:{title_composed}"
+        )
+        call_start = time.monotonic()
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            return [BrazilGuideline.from_dict(item) for item in cached_data], meta
+            cached_records, _ = self._finalize_records(
+                [BrazilGuideline.from_dict(item) for item in cached_data],
+                query,
+                since_year,
+                clamped,
+            )
+            hit_meta = self._finalize_search(
+                _SearchOutcome(
+                    cached=True,
+                    cache_age=meta.cache_age,
+                    error=False,
+                    state=_SearchState(),
+                    records=cached_records,
+                    rerank_in=0,
+                    rerank_out=len(cached_records),
+                ),
+                query=query,
+                norm_collection=norm_collection,
+                clamped=clamped,
+                call_start=call_start,
+            )
+            return cached_records, hit_meta
 
         # Query PCDT engine first. Every stage runs under its own budget, so
         # one stalled stage costs its budget and the chain moves on. The chain
@@ -719,7 +1115,7 @@ class BrazilMoHEngine:
         # real browser. Track BVS errors on their own flag.
         bvs_errored = False
 
-        count = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
+        count = self._overfetch_count(clamped, chain_start)
         # The all-field query is built once and shared by the all-field
         # fallback stage and the browser tier, which need the identical
         # composition. Both consumers only run when `tokens` is non-empty.
@@ -793,7 +1189,7 @@ class BrazilMoHEngine:
             or_title_records, or_title_errored = await self._bvs_stage(
                 "title-scoped-or",
                 or_title_composed,
-                count,
+                self._overfetch_count(clamped, chain_start),
                 state,
                 chain_start=chain_start,
             )
@@ -819,7 +1215,7 @@ class BrazilMoHEngine:
             fallback_records, fallback_errored = await self._bvs_stage(
                 "all-field",
                 all_composed,
-                count,
+                self._overfetch_count(clamped, chain_start),
                 state,
                 chain_start=chain_start,
             )
@@ -841,7 +1237,7 @@ class BrazilMoHEngine:
             relaxed_records, relaxed_errored = await self._bvs_stage(
                 "relaxed",
                 composed_relaxed,
-                count,
+                self._overfetch_count(clamped, chain_start),
                 state,
                 chain_start=chain_start,
             )
@@ -861,7 +1257,9 @@ class BrazilMoHEngine:
             and self.settings.brazil_browser_fallback
         ):
             docs = await self._camoufox_search(
-                all_composed, count, ceiling=self._browser_ceiling(chain_start)
+                all_composed,
+                self._overfetch_count(clamped, chain_start),
+                ceiling=self._browser_ceiling(chain_start),
             )
             if docs:
                 browser_records = [
@@ -888,10 +1286,44 @@ class BrazilMoHEngine:
 
         if not records and errored_any:
             if local_records:
-                return rank_brazil_guidelines(local_records, query)[:clamped], CacheMetadata(
-                    cached=False, cache_age=0, error=False
+                # Same filter-rank-slice order as every other exit: slicing
+                # first would hand the caller fewer rows than it asked for
+                # whenever `since_year` drops a high-ranked old document.
+                ranked_local, rerank_in_local = self._finalize_records(
+                    local_records, query, since_year, clamped
                 )
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+                local_meta = self._finalize_search(
+                    _SearchOutcome(
+                        cached=False,
+                        cache_age=0,
+                        error=False,
+                        state=state,
+                        records=ranked_local,
+                        rerank_in=rerank_in_local,
+                        rerank_out=len(ranked_local),
+                    ),
+                    query=query,
+                    norm_collection=norm_collection,
+                    clamped=clamped,
+                    call_start=call_start,
+                )
+                return ranked_local, local_meta
+            fail_meta = self._finalize_search(
+                _SearchOutcome(
+                    cached=False,
+                    cache_age=0,
+                    error=True,
+                    state=state,
+                    records=[],
+                    rerank_in=0,
+                    rerank_out=0,
+                ),
+                query=query,
+                norm_collection=norm_collection,
+                clamped=clamped,
+                call_start=call_start,
+            )
+            return [], fail_meta
 
         # Merge local gov.br records (first) and BVS records, deduplicating
         # by record_id.
@@ -904,17 +1336,33 @@ class BrazilMoHEngine:
                 seen_ids.add(r.record_id)
             merged_records.append(r)
 
-        # Rank, then slice. Slicing first would hand the ranker only `clamped`
-        # of the `count` over-fetched candidates and discard the rest in BVS
+        # Filter, rank, then slice -- via the same helper the cache-hit path
+        # uses, so caching the unfiltered merge below reproduces this exact
+        # per-``since_year`` result on every future read. Filtering before
+        # ranking matters: a large relaxed-OR pool must not drown 2024-2025
+        # documents under pre-2015 ones (S2.2). Ranking before slicing
+        # matters too: slicing first would hand the ranker only `clamped` of
+        # the `count` over-fetched candidates and discard the rest in BVS
         # order, defeating the over-fetch.
-        records = rank_brazil_guidelines(merged_records, query)[:clamped]
+        records, rerank_in = self._finalize_records(
+            merged_records, query, since_year, clamped
+        )
 
         # A chain with a stalled stage returns partial results; caching them
-        # under the 30-day TTL would make a transient stall permanent.
+        # under the 30-day TTL would make a transient stall permanent. An
+        # origin outage is never cached at all: it is not evidence about
+        # the corpus, and pinning it would both poison the TTL and count a
+        # sick origin against the caller's breaker on replay.
+        #
+        # The row cached is the unfiltered merge, not the sliced `records`
+        # returned to this caller: `since_year` is not part of `cache_key`,
+        # so the same row must reproduce the correct result for any
+        # `since_year` a later call asks for (via `_finalize_records` on
+        # read).
         if not errored_any:
             await self.cache.set(
                 cache_key,
-                [record.to_dict() for record in records],
+                [record.to_dict() for record in merged_records],
                 source="brazil_moh",
             )
         elif not bvs_errored:
@@ -925,31 +1373,51 @@ class BrazilMoHEngine:
             # its own cost. Hold the degraded merge briefly instead.
             await self.cache.set(
                 cache_key,
-                [record.to_dict() for record in records],
+                [record.to_dict() for record in merged_records],
                 source="brazil_moh",
                 ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
-        return records, CacheMetadata(cached=False, cache_age=0, error=False)
-
-    def _browser_ceiling(self, chain_start: float) -> float:
-        """Ceiling for the browser tier: the flat per-tier cap, shrunk to the
-        chain budget still left when the browser tier starts. The whole chain
-        (PCDT + every BVS stage + browser) is what the caller's hard timeout
-        bounds, so a flat 45 s browser cap after five stalled 20 s stages
-        would outlast a 90 s chain ceiling. ``brazil_chain_timeout_s <= 0``
-        disables the chain bound and leaves the flat cap.
-        """
-        ceiling = float(self.settings.brazil_browser_timeout_s)
-        chain_budget = float(
-            getattr(self.settings, "brazil_chain_timeout_s", 0.0) or 0.0
+        done_meta = self._finalize_search(
+            _SearchOutcome(
+                cached=False,
+                cache_age=0,
+                error=False,
+                state=state,
+                records=records,
+                rerank_in=rerank_in,
+                rerank_out=len(records),
+            ),
+            query=query,
+            norm_collection=norm_collection,
+            clamped=clamped,
+            call_start=call_start,
         )
-        if chain_budget > 0:
-            remaining = chain_budget - (time.monotonic() - chain_start)
-            ceiling = min(ceiling, max(remaining, 0.0))
-        return ceiling
+        return records, done_meta
+
+    def _browser_ceiling(self, chain_start: float) -> float | None:
+        """Ceiling for the browser tier, in seconds.
+
+        Returns ``None`` when ``brazil_chain_timeout_s`` is unset (<= 0): the
+        chain bound is disabled, so the browser tier is unbounded by the
+        chain and the caller falls back to the flat per-tier cap
+        (``brazil_browser_timeout_s``) alone.
+
+        Otherwise returns the flat per-tier cap shrunk to the chain budget
+        still left when the browser tier starts, floored at ``0.0``. The
+        whole chain (PCDT + every BVS stage + browser) is what the caller's
+        hard timeout bounds, so a flat 45 s browser cap after five stalled
+        20 s stages would outlast a 90 s chain ceiling. A returned ``0.0``
+        means the chain budget is exhausted: the caller must skip the tier,
+        never launch with a zero timeout.
+        """
+        chain_budget = float(self.settings.brazil_chain_timeout_s)
+        if chain_budget <= 0:
+            return None
+        remaining = chain_budget - (time.monotonic() - chain_start)
+        return min(float(self.settings.brazil_browser_timeout_s), max(remaining, 0.0))
 
     async def _camoufox_search(
-        self, composed: str, count: int, ceiling: float
+        self, composed: str, count: int, ceiling: float | None
     ) -> list[dict[str, Any]]:
         """Last-resort rendered fetch of the BVS JSON search payload.
 
@@ -960,9 +1428,32 @@ class BrazilMoHEngine:
         dicts so ``_dedupe_by_id``/``_build_record``/``_is_brazilian`` apply
         unchanged. Any failure or timeout returns ``[]``.
 
-        ``ceiling`` is mandatory: the caller passes the chain budget left
-        (see ``_browser_ceiling``), never the flat cap alone.
+        ``ceiling`` comes from ``_browser_ceiling``: ``None`` means the chain
+        bound is disabled, so the flat per-tier cap
+        (``brazil_browser_timeout_s``) alone applies; ``0.0`` means the chain
+        budget is exhausted and the tier is skipped outright, never launched
+        with a zero timeout; any positive value is the seconds actually left.
+        Whichever value results (``effective_ceiling``) bounds both the
+        overall ``wait_for`` and, after subtracting the time the launch
+        itself took, the in-browser navigation -- so navigation can never
+        silently outlive what launch already spent. An ``effective_ceiling``
+        below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
+        Camoufox launch needs tens of seconds, so a doomed ceiling would only
+        burn startup time.
         """
+        if ceiling is not None and ceiling <= 0:
+            logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
+            return []
+
+        effective_ceiling = (
+            float(self.settings.brazil_browser_timeout_s) if ceiling is None else ceiling
+        )
+        if effective_ceiling < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+            logger.info(
+                "brazil_moh camoufox tier skipped: %.1fs ceiling below useful floor",
+                effective_ceiling,
+            )
+            return []
         try:
             from camoufox.async_api import AsyncCamoufox
         except ImportError:
@@ -975,10 +1466,16 @@ class BrazilMoHEngine:
         )
 
         async def _run() -> list[dict[str, Any]]:
+            launch_start = time.monotonic()
             async with AsyncCamoufox(headless=True) as browser:
+                launch_elapsed = time.monotonic() - launch_start
+                nav_budget_s = max(effective_ceiling - launch_elapsed, 0.0)
+                nav_timeout_ms = min(
+                    _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
+                )
                 page = await browser.new_page()
                 await page.goto(
-                    target, wait_until="domcontentloaded", timeout=_CAMOUFOX_NAV_TIMEOUT_MS
+                    target, wait_until="domcontentloaded", timeout=nav_timeout_ms
                 )
                 content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
@@ -1000,13 +1497,19 @@ class BrazilMoHEngine:
             return _extract_docs(data)
 
         try:
-            return await asyncio.wait_for(_run(), timeout=ceiling)
+            return await asyncio.wait_for(_run(), timeout=effective_ceiling)
         except Exception:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
             return []
 
-    async def _lookup_record(self, record_id: str) -> tuple[BrazilGuideline | None, bool]:
-        """Resolve one record by its Solr id. Returns (record, errored)."""
+    async def _lookup_record(
+        self, record_id: str
+    ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
+        """Resolve one record by its Solr id. Returns (record, error_kind).
+
+        Second element is a ``BvsErrorKind`` on failure and ``None`` on
+        success/not-found.
+        """
         # The id is caller-controlled; escape it so a quote or backslash
         # cannot terminate the id:"..." phrase and rewrite the query.
         escaped = record_id.replace("\\", "\\\\").replace('"', '\\"')
@@ -1014,13 +1517,19 @@ class BrazilMoHEngine:
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
             params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
+            retryable_statuses=_BVS_RETRYABLE_STATUSES,
         )
         if resp is None:
-            return None, True
+            failure = getattr(self.http_client, "last_failure", None)
+            return None, _classify_failure(failure)
         try:
             data = resp.json()
         except ValueError:
-            return None, True
+            if self.http_client.is_unexpected_html(
+                resp
+            ) or self.http_client.is_challenge_html(resp):
+                return None, "cdn_challenge"
+            return None, "backend_error"
         # ``id:"..."`` is a phrase query against a tokenized field, so a
         # near-miss record can come back ahead of the requested one. Only an
         # exact id is accepted: the wrong record would otherwise be served and
@@ -1031,22 +1540,30 @@ class BrazilMoHEngine:
             if _first(doc.get("id")) == record_id
         ]
         if not docs:
-            return None, False
-        return _build_record(docs[0]), False
+            return None, None
+        return _build_record(docs[0]), None
 
-    async def _extract_pdf_text(self, document_url: str) -> tuple[str, bool]:
-        """Fetch and extract the document PDF. Returns (text, errored).
+    async def _extract_pdf_text(
+        self, document_url: str
+    ) -> tuple[str, BvsErrorKind | None]:
+        """Fetch and extract the document PDF. Returns (text, error_kind).
 
-        Gates on content-type explicitly. ``get_bytes`` is not used here:
-        its HTML guard only catches Cloudflare-style challenge pages, so a
+        ``error_kind`` is a ``BvsErrorKind`` on failure and ``None`` on
+        success. Gates on content-type explicitly. ``get_bytes`` is not used
+        here: its HTML guard only catches Cloudflare-style challenge pages, so a
         plain "Estamos em manutenção" WAF page would reach the PDF parser.
 
         Redirects are followed (the BVS hosts hand off between themselves),
         but the response's final URL is re-checked against the allowlist so
         a redirect cannot carry the fetch off-host.
+
+        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
+        5xx from the document host is an origin outage, and retrying it
+        would burn the caller's remaining budget on a fetch that will not
+        succeed.
         """
         if not _is_allowed_host(document_url):
-            return "", False
+            return "", None
         # Pick headers by hostname, not by substring: "gov.br" appearing in
         # a query string or path on a non-gov host must not match.
         try:
@@ -1054,28 +1571,31 @@ class BrazilMoHEngine:
         except ValueError:
             host = ""
         headers = GOVBR_HEADERS if host.endswith("gov.br") else BVS_HEADERS
-        resp = await self.http_client.get(document_url, headers=headers)
+        resp = await self.http_client.get(
+            document_url, headers=headers, retryable_statuses=_BVS_RETRYABLE_STATUSES
+        )
         if resp is None:
-            return "", True
+            failure = getattr(self.http_client, "last_failure", None)
+            return "", _classify_failure(failure)
         if not _is_allowed_host(str(resp.url)):
             logger.info(
                 "brazil_moh full text redirected off the allowed hosts (%s)",
                 str(resp.url),
             )
-            return "", True
+            return "", "backend_error"
         content_type = resp.headers.get("content-type", "").lower()
         if "application/pdf" not in content_type:
             logger.info(
                 "brazil_moh full text is not a PDF (content-type=%r)", content_type
             )
-            return "", True
+            return "", "backend_error"
         try:
             # Unbounded here: the ceiling is applied at cache/serve time so
             # the pre-truncation length survives as ``total_chars``.
-            return pdf_bytes_to_text(resp.content), False
+            return pdf_bytes_to_text(resp.content), None
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
-            return "", True
+            return "", "backend_error"
 
     async def _serve_local_text(
         self,
@@ -1096,7 +1616,8 @@ class BrazilMoHEngine:
         def _local_error(status: str, error_text: str) -> tuple[dict[str, Any], CacheMetadata]:
             return (
                 {**base, "status": status, "error": error_text,
-                 "title": record.title, "content_type": "none", "content": ""},
+                  "title": record.title, "content_type": "none", "content": "",
+                  "abstract_fallback": False},
                 CacheMetadata(cached=False, cache_age=0, error=False),
             )
 
@@ -1117,7 +1638,8 @@ class BrazilMoHEngine:
             logger.warning("brazil_moh local text read failed (%s): %s", path, exc)
             return (
                 {**base, "status": "error", "error": "local text read failed",
-                 "title": record.title, "content_type": "none", "content": ""},
+                 "title": record.title, "content_type": "none", "content": "",
+                 "abstract_fallback": False},
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
         total_chars = len(text)
@@ -1126,6 +1648,7 @@ class BrazilMoHEngine:
             "content_type": "text",
             "content": text[:MAX_FULL_TEXT_CHARS],
             "total_chars": total_chars,
+            "abstract_fallback": False,
         }
         await self.cache.set(cache_key, payload, source="brazil_moh")
         return (
@@ -1140,6 +1663,16 @@ class BrazilMoHEngine:
         query: str | None = None,
         offset: int = 0,
     ) -> tuple[dict[str, Any], CacheMetadata]:
+        """Fetch one document's full text under the published full-text ceiling.
+
+        Budget: ``brazil_fulltext_timeout_s`` bounds the record lookup plus
+        the PDF fetch, kept separate from the search-chain budget above.
+        A timeout surfaces as ``status=error`` with ``error_kind=timeout``
+        in the metadata and is never cached. When the PDF cannot be
+        retrieved but the record carries an abstract, the abstract is served with
+        ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
+        explicit flag, never a silent substitution (S2.4).
+        """
         normalized = (record_id or "").strip()
         base = {
             "source": "brazil-moh",
@@ -1150,54 +1683,136 @@ class BrazilMoHEngine:
         if not normalized:
             return (
                 {**base, "status": "error", "error": "record_id is required",
-                 "title": "", "content_type": "none", "content": ""},
+                 "title": "", "content_type": "none", "content": "",
+                 "abstract_fallback": False},
                 CacheMetadata(cached=False, cache_age=0, error=True),
             )
 
         cache_key = f"brazil_moh_fulltext:{CACHE_SCHEMA}:{normalized}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
+            payload = self._serve_full_text(
+                cached_data, max_chars, query=query, offset=offset
+            )
+            payload.setdefault(
+                "abstract_fallback", payload.get("content_type") == "abstract"
+            )
+            # Replay the kind stored with the row. A degraded payload lives
+            # for DEGRADED_RESULT_TTL_SECONDS, so without this every request
+            # behind the first one in that window reports a clean result.
+            return payload, CacheMetadata(
+                cached=True,
+                cache_age=meta.cache_age,
+                error=False,
+                error_kind=cached_data.get(_CACHED_ERROR_KIND_KEY, ""),
+            )
+
+        ceiling = float(self.settings.brazil_fulltext_timeout_s)
+
+        def _timeout_result(title_str: str) -> tuple[dict[str, Any], CacheMetadata]:
             return (
-                self._serve_full_text(
-                    cached_data, max_chars, query=query, offset=offset
+                {**base, "status": "error", "error": "full text fetch timed out",
+                 "title": title_str, "content_type": "none", "content": "",
+                 "abstract_fallback": False},
+                CacheMetadata(
+                    cached=False, cache_age=0, error=True,
+                    error_kind="timeout", timeout=True,
                 ),
-                meta,
             )
 
-        record = await self.pcdt_engine.get_guideline(normalized)
-        if record is None:
-            record = await self.az_engine.get_guideline(normalized)
-        if record is not None:
-            errored = False
-        else:
-            record, errored = await self._lookup_record(normalized)
+        async def _resolve() -> tuple[
+            BrazilGuideline | None, bool, dict[str, Any], CacheMetadata | None
+        ]:
+            record = await self.pcdt_engine.get_guideline(normalized)
+            if record is None:
+                record = await self.az_engine.get_guideline(normalized)
+            if record is not None:
+                return record, False, {}, None
+            record, error_kind = await self._lookup_record(normalized)
+            if error_kind:
+                return (
+                    None,
+                    True,
+                    {**base, "status": "error", "error": "bvs request failed",
+                     "title": "", "content_type": "none", "content": "",
+                     "abstract_fallback": False},
+                    CacheMetadata(
+                        cached=False, cache_age=0, error=True,
+                        error_kind=error_kind or "backend_error",
+                    ),
+                )
+            if record is None:
+                return (
+                    None,
+                    False,
+                    {**base, "status": "not_found", "error": "no record for id",
+                     "title": "", "content_type": "none", "content": "",
+                     "abstract_fallback": False},
+                    CacheMetadata(
+                        cached=False, cache_age=0, error=False,
+                        error_kind="successful_empty",
+                    ),
+                )
+            return record, False, {}, None
 
-        if errored:
-            return (
-                {**base, "status": "error", "error": "bvs request failed",
-                 "title": "", "content_type": "none", "content": ""},
-                CacheMetadata(cached=False, cache_age=0, error=True),
+        budget_start = time.monotonic()
+        try:
+            if ceiling > 0:
+                record, errored, early_payload, early_meta = await asyncio.wait_for(
+                    _resolve(), timeout=ceiling
+                )
+            else:
+                record, errored, early_payload, early_meta = await _resolve()
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "brazil_moh full text lookup for %r exceeded its %.1fs budget",
+                normalized,
+                ceiling,
             )
-        if record is None:
-            return (
-                {**base, "status": "not_found", "error": "no record for id",
-                 "title": "", "content_type": "none", "content": ""},
-                CacheMetadata(cached=False, cache_age=0, error=False),
-            )
+            return _timeout_result("")
+        if early_meta is not None:
+            return early_payload, early_meta
 
         base["document_url"] = record.document_url
         if record.document_url.startswith("local:"):
             return await self._serve_local_text(
                 cache_key, base, record, max_chars, query=query, offset=offset
             )
-        pdf_text, errored = await self._extract_pdf_text(record.document_url)
+        if ceiling > 0:
+            remaining = ceiling - (time.monotonic() - budget_start)
+            if remaining <= 0:
+                logger.warning(
+                    "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                    normalized,
+                    ceiling,
+                )
+                return _timeout_result(record.title)
+        else:
+            remaining = ceiling
+        try:
+            if ceiling > 0:
+                pdf_text, error_kind = await asyncio.wait_for(
+                    self._extract_pdf_text(record.document_url), timeout=remaining
+                )
+            else:
+                pdf_text, error_kind = await self._extract_pdf_text(record.document_url)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                normalized,
+                ceiling,
+            )
+            return _timeout_result(record.title)
+        errored = error_kind is not None
 
         if pdf_text:
             source_text = pdf_text
             content_type = "pdf"
-        elif record.abstract:
+            abstract_fallback = False
+        elif record.abstract and not record.abstract_synthetic:
             source_text = record.abstract
             content_type = "abstract"
+            abstract_fallback = True
         else:
             # A transient fetch failure with nothing to fall back on is an
             # error, not an absence: callers must retry, not move on.
@@ -1210,8 +1825,15 @@ class BrazilMoHEngine:
             return (
                 {**base, "status": status,
                  "error": error_text,
-                 "title": record.title, "content_type": "none", "content": ""},
-                CacheMetadata(cached=False, cache_age=0, error=errored),
+                 "title": record.title, "content_type": "none", "content": "",
+                 "abstract_fallback": False},
+                CacheMetadata(
+                    cached=False, cache_age=0, error=errored,
+                    # The classified kind, not a blanket backend_error: an
+                    # origin_outage reported here would count against a
+                    # caller-side breaker the taxonomy exempts it from.
+                    error_kind=error_kind or "successful_empty",
+                ),
             )
 
         total_chars = len(source_text)
@@ -1221,15 +1843,32 @@ class BrazilMoHEngine:
             "content_type": content_type,
             "content": source_text[:MAX_FULL_TEXT_CHARS],
             "total_chars": total_chars,
+            "abstract_fallback": abstract_fallback,
         }
-        payload = {**base, "status": "success", "title": record.title, **result}
-        # An errored payload is never cached: a transient block must not
-        # poison a 30-day TTL.
+        # The kind is written into the row itself so a later cache hit reports
+        # the same degradation this caller sees; _serve_full_text strips it
+        # from what either caller receives.
+        payload = {
+            **base, "status": "success", "title": record.title, **result,
+            _CACHED_ERROR_KIND_KEY: error_kind or "ok",
+        }
         if not errored:
             await self.cache.set(cache_key, payload, source="brazil_moh")
+        else:
+            # A PDF fetch that failed and fell back to the abstract is
+            # still cached -- at the shorter degraded TTL, so the next
+            # request retries the PDF instead of serving a stale fallback
+            # indefinitely.
+            await self.cache.set(
+                cache_key, payload, source="brazil_moh",
+                ttl=DEGRADED_RESULT_TTL_SECONDS,
+            )
         return (
             self._serve_full_text(payload, max_chars, query=query, offset=offset),
-            CacheMetadata(cached=False, cache_age=0, error=errored),
+            CacheMetadata(
+                cached=False, cache_age=0, error=False,
+                error_kind=error_kind or "ok",
+            ),
         )
 
     @staticmethod
@@ -1255,5 +1894,9 @@ class BrazilMoHEngine:
         # Old cache rows predate ``total_chars`` and degrade to the stored
         # length (truncation at the ceiling reads as False) — accepted.
         total = payload.get("total_chars", len(stored))
-        served = serve_body(stored, total, limit, query=query, offset=offset)
-        return {**payload, **served, "total_chars": total}
+        served = {**payload, **serve_body(stored, total, limit, query=query, offset=offset),
+                  "total_chars": total}
+        # The stored error kind is cache bookkeeping, not part of the tool's
+        # response shape.
+        served.pop(_CACHED_ERROR_KIND_KEY, None)
+        return served

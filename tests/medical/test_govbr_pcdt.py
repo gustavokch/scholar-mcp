@@ -135,6 +135,32 @@ async def test_pcdt_7_day_cache_refresh(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_search_reports_error_when_catalog_unavailable(tmp_path):
+    """An empty catalog is an outage, not a zero-result search.
+
+    A failed PCDT search must not report error=True alongside
+    error_kind=successful_empty -- that pair reads as a genuine zero-match
+    search rather than a backend outage.
+    """
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings)
+    try:
+        engine.get_catalog = AsyncMock(return_value={})
+
+        results, meta = await engine.search("acromegalia", limit=5)
+
+        assert results == []
+        assert meta.error is True
+        assert meta.error_kind != "successful_empty"
+        assert meta.error_kind == "backend_error"
+        _, cache_meta = await engine.cache.get("govbr_pcdt_search:5:acromegalia")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_refresh_total_crawl_failure_caches_nothing(tmp_path):
     """All letter pages fail: catalog stays empty and nothing is cached."""
     settings = Settings()
@@ -262,6 +288,40 @@ async def test_brazil_moh_engine_pcdt_integration(tmp_path, monkeypatch):
             assert fulltext["content_type"] == "pdf"
             assert "Acromegalia" in fulltext["content"]
             assert ft_meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_brazil_moh_search_guidelines_pcdt_engine_failure_not_successful_empty(tmp_path):
+    """A failed PCDT sub-engine search must not surface as error_kind=successful_empty.
+
+    ``search_guidelines`` rebuilds sub-engine meta as
+    ``error_kind=sub_meta.error_kind or ("ok" if records else "successful_empty")``.
+    Before this fix, the PCDT engine never set ``error_kind`` on failure, so a
+    genuinely failed search reported error=True *and* "genuinely nothing
+    matching" at the same time.
+    """
+    from scholar_mcp.medical.brazil_moh import BrazilMoHEngine
+    from scholar_mcp.utils.http import AsyncHttpClient
+
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+
+    try:
+        engine.pcdt_engine.get_catalog = AsyncMock(return_value={})
+
+        records, meta = await engine.search_guidelines(
+            "acromegalia", limit=5, collection="pcdt"
+        )
+
+        assert records == []
+        assert meta.error is True
+        assert meta.error_kind != "successful_empty"
+        assert meta.error_kind == "backend_error"
     finally:
         await cache.close()
         await http_client.aclose()

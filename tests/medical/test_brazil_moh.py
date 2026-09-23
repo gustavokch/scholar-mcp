@@ -392,6 +392,7 @@ import httpx
 import pytest
 import respx
 
+import scholar_mcp.server as server
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.brazil_moh import (
     BVS_HEADERS,
@@ -751,6 +752,35 @@ async def test_search_fallback_cached_under_title_scoped_key(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_search_since_year_shares_one_cache_row_across_years(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc(da="202609")]))
+        )
+        first, first_meta = await engine.search_guidelines("dengue", limit=5, since_year=2020)
+        second, second_meta = await engine.search_guidelines("dengue", limit=5, since_year=2025)
+
+        # Both since_year values are satisfied by the 2026 record, so the
+        # second call must be served from the first call's cache row rather
+        # than issuing its own upstream search.
+        assert route.call_count == 1
+        assert first_meta.cached is False
+        assert second_meta.cached is True
+        assert [r.record_id for r in first] == [r.record_id for r in second]
+
+        # A since_year the record does not satisfy still filters correctly
+        # against the same cached row, with no further upstream calls.
+        third, third_meta = await engine.search_guidelines("dengue", limit=5, since_year=2027)
+        assert route.call_count == 1
+        assert third_meta.cached is True
+        assert third == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 from scholar_mcp.medical.brazil_moh import (
     _is_allowed_host,
     is_allowed_bvs_host,
@@ -953,9 +983,13 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
-        assert meta.error is True
+        # C2: abstract fallback is a success (error=False), cached degraded
+        # (brief TTL) -- but error_kind still carries the real PDF-fetch
+        # failure so machine consumers see the degradation.
+        assert meta.error is False
+        assert meta.error_kind == "backend_error"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is False
+        assert cache_meta.cached is True
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1003,9 +1037,63 @@ async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Pa
         respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
-        assert meta.error is True
+        # C2: abstract fallback is a success (error=False), cached degraded
+        # (brief TTL) -- but error_kind still carries the real PDF-fetch
+        # failure so machine consumers see the degradation.
+        assert meta.error is False
+        assert meta.error_kind == "timeout"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is False
+        assert cache_meta.cached is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_pdf_origin_outage_reports_degraded(tmp_path: Path):
+    """A 503 from the PDF host still serves the abstract, but the metadata
+    must say the result is degraded via ``error_kind`` even though ``error``
+    itself stays False (spec-required)."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(503, text="Service Unavailable")
+        )
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["abstract_fallback"] is True
+        assert meta.error is False
+        assert meta.error_kind == "origin_outage"
+        assert server._with_degraded(dict(payload), meta)["degraded"] is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_brazil_moh_full_text_tool_reports_degraded_on_pdf_failure(
+    tmp_path: Path, monkeypatch
+):
+    """The MCP tool itself (not just the engine) must surface ``degraded``
+    when the PDF fetch failed and the abstract was substituted."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1", ab=["Resumo."])])
+            )
+        )
+        respx.get(FI_ADMIN_URL).mock(
+            return_value=httpx.Response(503, text="Service Unavailable")
+        )
+        monkeypatch.setattr(server, "brazil_moh_engine", engine)
+        result = await server.get_brazil_moh_full_text("biblio-1")
+        assert result["abstract_fallback"] is True
+        assert result["degraded"] is True
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1254,7 +1342,7 @@ async def test_extract_pdf_text_headers_by_hostname(tmp_path, monkeypatch):
         text, errored = await engine._extract_pdf_text(
             "https://docs.bvsalud.org/x?ref=gov.br"
         )
-        assert errored is False
+        assert errored is None
         assert text == "texto"
         sent = respx.calls.last.request.headers
         # User-Agent is identical in both header sets; Accept is GOVBR-only.
@@ -1282,9 +1370,35 @@ async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeyp
         _text, errored = await engine._extract_pdf_text(
             "https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia.pdf/@@download/file"
         )
-        assert errored is False
+        assert errored is None
         sent = respx.calls.last.request.headers
         assert sent["accept"] == GOVBR_HEADERS["Accept"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
+    """A 5xx from the document host must not burn the retry ladder.
+
+    ``_BVS_RETRYABLE_STATUSES`` only retries 429, so a 503 is fatal on the
+    first attempt: one request, and the caller gets ``origin_outage`` back.
+    """
+    settings = Settings()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    route = respx.get("https://docs.bvsalud.org/x").mock(
+        return_value=httpx.Response(503, text="Service Unavailable")
+    )
+    try:
+        text, error_kind = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x"
+        )
+        assert route.call_count == 1
+        assert text == ""
+        assert error_kind == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1623,8 +1737,8 @@ async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_
         enable_browser_fallback=True,
         brazil_browser_fallback=True,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=10.0,
-        brazil_browser_timeout_s=5.0,
+        brazil_chain_timeout_s=30.0,
+        brazil_browser_timeout_s=25.0,
         request_timeout=5,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01, min_429_wait=0.0)
@@ -2166,19 +2280,35 @@ async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, mon
 
 
 async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
-    """Worst case must stay inside the documented 60 s caller ceiling: a
-    browser tier on a flat 30 s ceiling after five stalled 10 s stages is
-    ~90 s. The browser gets only the chain budget that is still left."""
+    """Worst case must stay inside the documented caller ceiling: a browser
+    tier on a flat 40 s ceiling after stalled stages would outlive the chain.
+    The browser gets only the chain budget that is still left.
+
+    The useful-launch floor is lowered to 2.0 s for this test so the chain
+    budget can be 5.0 s: the real floor (20.0 s) forces a chain budget just
+    above it, which leaves under a second of wall clock for everything ahead
+    of the browser tier and turns a slow runner into a red test. Here the
+    margin is 3 s and the whole test costs ~5 s instead of ~20 s.
+
+    The fake ``goto`` actually blocks past whatever timeout it is handed, so
+    only the caller's own ``wait_for`` can end the call -- this makes
+    ``elapsed`` a real measurement of the ceiling the guard computed, not a
+    vacuous one. A tier still running on the flat 40 s cap would blow the
+    upper bound.
+    """
     import time as _time
 
+    from scholar_mcp.medical import brazil_moh as _brazil_moh
+
+    monkeypatch.setattr(_brazil_moh, "_CAMOUFOX_MIN_USEFUL_CEILING_S", 2.0)
     settings = Settings(
         cache_ttl_seconds=3600,
         enable_browser_fallback=True,
         brazil_browser_fallback=True,
         request_timeout=5,
         brazil_stage_timeout_s=0.05,
-        brazil_chain_timeout_s=0.5,
-        brazil_browser_timeout_s=30.0,
+        brazil_chain_timeout_s=5.0,
+        brazil_browser_timeout_s=40.0,
     )
     http_client = AsyncHttpClient(settings, max_retries=1, backoff_base=0.01)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
@@ -2199,15 +2329,14 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
         url = ""
 
         async def goto(self, url, *a, **k):
-            return None
-
-        async def wait_for_selector(self, selector, timeout=None):
-            return None
-
-        async def wait_for_timeout(self, ms):
             import asyncio as _asyncio
 
-            await _asyncio.sleep(5.0)  # far past any remaining chain budget
+            # Block well past whatever nav timeout the guard computed, so
+            # only the caller's outer wait_for(effective_ceiling) can end
+            # this call. If the guard ever stopped shrinking the ceiling to
+            # the chain budget, this would run past the flat 40 s cap too.
+            nav_timeout_ms = k.get("timeout", 40000)
+            await _asyncio.sleep((nav_timeout_ms / 1000.0) + 10.0)
             return None
 
         async def content(self):
@@ -2242,9 +2371,11 @@ async def test_browser_tier_is_bounded_by_chain_budget(tmp_path, monkeypatch):
             start = _time.monotonic()
             records, meta = await engine.search_guidelines("dengue", limit=10)
             elapsed = _time.monotonic() - start
-        # ...but only with the chain budget left: ~0.5 s ceiling, not 30 s.
+        # ...but only with the chain budget left: ~5 s ceiling, not 40 s.
         assert attempts == [True]
-        assert elapsed < 2.0, f"browser tier outlived the chain budget: {elapsed:.1f}s"
+        assert 4.0 <= elapsed <= 8.0, (
+            f"browser tier did not stop at the chain budget: {elapsed:.1f}s"
+        )
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2363,7 +2494,7 @@ async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monke
     )
     try:
         with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
-            docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
+            docs = await engine._camoufox_search("dengue", count=10, ceiling=25.0)
         assert docs == []
         messages = [r.getMessage() for r in caplog.records]
         assert any("origin returned an error page" in m for m in messages)
@@ -2397,13 +2528,56 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
     }
     _install_fake_camoufox(monkeypatch, json.dumps(payload))
     try:
-        docs = await engine._camoufox_search("triagem", count=10, ceiling=5.0)
+        docs = await engine._camoufox_search("triagem", count=10, ceiling=25.0)
         assert [d["id"] for d in docs] == ["1"]
     finally:
         await cache.close()
         await http_client.aclose()
 
 
+async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
+    """``ceiling=0.0`` means the chain budget is exhausted (W6): the browser
+    tier must return [] without ever importing camoufox, never launch with a
+    zero-second timeout."""
+    import sys as _sys
+
+    engine, cache, http_client = await _engine(tmp_path)
+
+    class _NeverImported:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"camoufox.async_api.{name} accessed despite exhausted ceiling"
+            )
+
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
+    try:
+        docs = await engine._camoufox_search("dengue", count=10, ceiling=0.0)
+        assert docs == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeypatch):
+    """A positive ceiling that cannot outlast a Camoufox launch must also
+    skip without importing camoufox."""
+    import sys as _sys
+
+    engine, cache, http_client = await _engine(tmp_path)
+
+    class _NeverImported:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"camoufox.async_api.{name} accessed below the useful floor"
+            )
+
+    monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
+    try:
+        docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
+        assert docs == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
@@ -2549,6 +2723,53 @@ async def test_fetch_records_non_json_garbage_does_not_trip_breaker(tmp_path):
         assert state.bvs_origin_down is False
         assert state.bvs_timed_out is False
         assert engine._bvs_unavailable(state) is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_search_meta_keeps_cdn_challenge_kind_when_chain_recovers(tmp_path):
+    """A shield 403 the chain recovered from must not be reported as a clean empty.
+
+    Scenario: the BVS title-scoped stage hits the Bunny CDN shield (403) and
+    ``state.error_kind`` is set to ``"cdn_challenge"``; the PCDT sub-engine
+    then legitimately finds nothing for the query, so the call as a whole
+    does not error. ``"successful_empty"`` must mean the endpoint answered
+    cleanly with no matches, not "a shield was hit but we recovered".
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        state = _SearchState(challenge_hit=True, error_kind="cdn_challenge")
+        meta = engine._search_meta(
+            error=False,
+            state=state,
+            records=[],
+        )
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.challenge_hit is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_search_meta_still_collapses_unflagged_kinds_to_successful_empty(
+    tmp_path,
+):
+    """Without a challenge or origin-down flag, a stray kind still collapses.
+
+    Guards the coercion itself: a leftover ``error_kind`` from an earlier
+    stage that neither shielded nor took the origin down must still report
+    as a clean empty search.
+    """
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        state = _SearchState(error_kind="timeout")
+        meta = engine._search_meta(
+            error=False,
+            state=state,
+            records=[],
+        )
+        assert meta.error_kind == "successful_empty"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2834,7 +3055,7 @@ async def test_full_text_resolves_az_record(tmp_path):
     try:
         engine.pcdt_engine.get_guideline = AsyncMock(return_value=None)
         engine.az_engine.get_guideline = AsyncMock(return_value=_az_record())
-        engine._extract_pdf_text = AsyncMock(return_value=("texto do manual", False))
+        engine._extract_pdf_text = AsyncMock(return_value=("texto do manual", None))
 
         payload, meta = await engine.get_full_text(
             "govbr-svsa-tuberculose-manual-tuberculose"

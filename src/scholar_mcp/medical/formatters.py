@@ -318,6 +318,8 @@ def format_brazil_moh_guidelines(
                 lines.append(f"- **Collections:** {', '.join(g.collections)}")
             if g.mesh_subjects:
                 lines.append(f"- **DeCS/MeSH:** {', '.join(g.mesh_subjects)}")
+            if g.doi:
+                lines.append(f"- **DOI:** {g.doi}")
             if g.document_url:
                 lines.append(f"- **URL:** {g.document_url}")
             if g.document_url and not g.has_full_text:

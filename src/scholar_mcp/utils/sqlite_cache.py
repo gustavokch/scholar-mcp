@@ -3,7 +3,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import aiosqlite
 
@@ -23,12 +23,27 @@ CREATE INDEX IF NOT EXISTS idx_cache_expires ON cache_entries(created_at, ttl_se
 CREATE INDEX IF NOT EXISTS idx_cache_lru ON cache_entries(last_accessed);
 """
 
+# Engine diagnostics contract (ENAMED 2026 misses, track B §2), currently
+# populated by the BVS (brazil_moh) engine on its search path. Lives here,
+# next to ``CacheMetadata``, rather than in brazil_moh.py, so this generic
+# cache module does not need a reverse import from a specific medical
+# engine. ``origin_outage`` must not count against any caller-side breaker.
+BvsErrorKind = Literal[
+    "ok", "successful_empty", "cdn_challenge", "origin_outage", "timeout", "backend_error"
+]
+
 
 @dataclass
 class CacheMetadata:
     cached: bool
     cache_age: int
     error: bool = False
+    # All defaulted so every existing constructor keeps working; "" means
+    # the producer predates the contract (or is a non-BVS engine).
+    error_kind: BvsErrorKind | Literal[""] = ""
+    http_status: int | None = None
+    challenge_hit: bool = False
+    timeout: bool = False
     # The relaxed variant that produced the results, when a PubMed-backed
     # search walked the query-relaxation ladder past the original query.
     # None when the original query sufficed or nothing was found. Surfaced
@@ -49,8 +64,35 @@ class SQLiteCacheManager:
         self.settings = settings
         self._db: aiosqlite.Connection | None = None
         self._init_lock = asyncio.Lock()
+        # Serializes concurrent get/set against one shared connection. Under
+        # concurrency 4 the BVS chain issues PCDT + A-Z + several BVS stages
+        # at once; without this, an expiry DELETE racing an INSERT OR REPLACE
+        # on the same connection loses rows and surfaces as flaky
+        # cache-miss storms. Contention scope is one event loop, matching
+        # _init_lock above.
+        self._io_lock = asyncio.Lock()
         self._hits = 0
         self._misses = 0
+        # asyncio.Lock binds to whichever loop first awaits on it while
+        # contended (see PR #31); unlike AsyncRateLimiter's registry, this
+        # class serializes real awaited DB I/O under _io_lock, so that fix's
+        # threading.Lock-around-arithmetic-only pattern does not transfer --
+        # holding a threading.Lock across an ``await`` would block the whole
+        # OS thread and deadlock any sibling coroutine on the same loop.
+        # Instead this class declares itself single-loop and asserts it on
+        # every public entry point, before either lock is touched.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _check_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is None:
+            self._loop = loop
+        elif loop is not self._loop:
+            raise RuntimeError(
+                f"SQLiteCacheManager({self.db_path}) is single-loop: it was first "
+                "used on a different asyncio event loop and cannot be shared "
+                "across loops."
+            )
 
     def _ttl_for(self, source: str, ttl: int | None) -> int:
         if ttl is not None:
@@ -85,36 +127,39 @@ class SQLiteCacheManager:
         return self._db
 
     async def init_db(self) -> None:
+        self._check_loop()
         await self._ensure_db()
 
     async def get(self, key: str) -> tuple[Any | None, CacheMetadata]:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
 
-        async with db.execute(
-            "SELECT data, created_at, ttl_seconds FROM cache_entries WHERE key = ?",
-            (key,),
-        ) as cur:
-            row = await cur.fetchone()
+        async with self._io_lock:
+            db = await self._ensure_db()
+            async with db.execute(
+                "SELECT data, created_at, ttl_seconds FROM cache_entries WHERE key = ?",
+                (key,),
+            ) as cur:
+                row = await cur.fetchone()
 
-        if row is None:
-            self._misses += 1
-            return None, CacheMetadata(cached=False, cache_age=0)
+            if row is None:
+                self._misses += 1
+                return None, CacheMetadata(cached=False, cache_age=0)
 
-        data_json, created_at, ttl_seconds = row
-        if created_at + ttl_seconds < now:
-            await db.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
+            data_json, created_at, ttl_seconds = row
+            if created_at + ttl_seconds < now:
+                await db.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
+                await db.commit()
+                self._misses += 1
+                return None, CacheMetadata(cached=False, cache_age=0)
+
+            await db.execute(
+                "UPDATE cache_entries SET last_accessed = ? WHERE key = ?",
+                (now, key),
+            )
             await db.commit()
-            self._misses += 1
-            return None, CacheMetadata(cached=False, cache_age=0)
 
-        await db.execute(
-            "UPDATE cache_entries SET last_accessed = ? WHERE key = ?",
-            (now, key),
-        )
-        await db.commit()
-
-        self._hits += 1
+            self._hits += 1
         cache_age = max(0, int(now - created_at))
         data = json.loads(data_json)
         return data, CacheMetadata(cached=True, cache_age=cache_age)
@@ -126,76 +171,85 @@ class SQLiteCacheManager:
         source: str,
         ttl: int | None = None,
     ) -> None:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
         resolved_ttl = self._ttl_for(source, ttl)
         data_json = json.dumps(data)
 
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO cache_entries
-            (key, source, data, created_at, ttl_seconds, last_accessed)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (key, source, data_json, now, resolved_ttl, now),
-        )
-        await db.commit()
-
-        # Evict oldest entries if capacity exceeded
-        async with db.execute("SELECT COUNT(*) FROM cache_entries") as cur:
-            count = (await cur.fetchone())[0]
-
-        if count > self.settings.cache_max_entries:
-            excess = count - self.settings.cache_max_entries
+        async with self._io_lock:
+            db = await self._ensure_db()
             await db.execute(
                 """
-                DELETE FROM cache_entries
-                WHERE key IN (
-                    SELECT key FROM cache_entries
-                    ORDER BY last_accessed ASC
-                    LIMIT ?
-                )
+                INSERT OR REPLACE INTO cache_entries
+                (key, source, data, created_at, ttl_seconds, last_accessed)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (excess,),
+                (key, source, data_json, now, resolved_ttl, now),
             )
             await db.commit()
 
+            # Evict oldest entries if capacity exceeded
+            async with db.execute("SELECT COUNT(*) FROM cache_entries") as cur:
+                count = (await cur.fetchone())[0]
+
+            if count > self.settings.cache_max_entries:
+                excess = count - self.settings.cache_max_entries
+                await db.execute(
+                    """
+                    DELETE FROM cache_entries
+                    WHERE key IN (
+                        SELECT key FROM cache_entries
+                        ORDER BY last_accessed ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (excess,),
+                )
+                await db.commit()
+
     async def get_stats(self) -> dict[str, Any]:
-        db = await self._ensure_db()
+        self._check_loop()
         now = time.time()
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM cache_entries WHERE created_at + ttl_seconds >= ?",
-            (now,),
-        ) as cur:
-            total_active = (await cur.fetchone())[0]
+        async with self._io_lock:
+            db = await self._ensure_db()
+            async with db.execute(
+                "SELECT COUNT(*) FROM cache_entries WHERE created_at + ttl_seconds >= ?",
+                (now,),
+            ) as cur:
+                total_active = (await cur.fetchone())[0]
 
-        async with db.execute(
-            """
-            SELECT source, COUNT(*)
-            FROM cache_entries
-            WHERE created_at + ttl_seconds >= ?
-            GROUP BY source
-            """,
-            (now,),
-        ) as cur:
-            source_rows = await cur.fetchall()
+            async with db.execute(
+                """
+                SELECT source, COUNT(*)
+                FROM cache_entries
+                WHERE created_at + ttl_seconds >= ?
+                GROUP BY source
+                """,
+                (now,),
+            ) as cur:
+                source_rows = await cur.fetchall()
+
+            hits = self._hits
+            misses = self._misses
 
         sources = {row[0]: row[1] for row in source_rows}
-        total_requests = self._hits + self._misses
-        hit_rate = (self._hits / total_requests) if total_requests > 0 else 0.0
+        total_requests = hits + misses
+        hit_rate = (hits / total_requests) if total_requests > 0 else 0.0
         db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
 
         return {
             "total_entries": total_active,
-            "hits": self._hits,
-            "misses": self._misses,
+            "hits": hits,
+            "misses": misses,
             "hit_rate": hit_rate,
             "sources": sources,
             "db_size_bytes": db_size,
         }
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        self._check_loop()
+        async with self._io_lock:
+            if self._db is not None:
+                await self._db.close()
+                self._db = None

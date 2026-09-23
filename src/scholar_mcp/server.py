@@ -138,12 +138,15 @@ def _with_degraded(payload: dict[str, Any], meta: CacheMetadata) -> dict[str, An
     """Add the machine-readable degraded flag when the engine flagged an error.
 
     The format_* functions already surface FETCH_ERROR_NOTE in the markdown;
-    this adds the key zimqa and other machine consumers read directly.
+    this adds the key zimqa and other machine consumers read directly. Some
+    engines keep ``error=False`` on a substituted result (e.g. an abstract
+    fallback after a failed PDF fetch) but still classify the failure in
+    ``error_kind`` -- that must surface as degraded too.
     The relaxation variant that answered is surfaced alongside it: without
     this reader the relaxed_query the engines compute never reaches a
     caller-visible field.
     """
-    if meta.error:
+    if meta.error or meta.error_kind not in ("", "ok", "successful_empty"):
         payload["degraded"] = True
     if meta.relaxed_query is not None:
         payload["relaxed_query"] = meta.relaxed_query
@@ -659,7 +662,16 @@ if settings.enable_medical_tools:
             guidelines, meta = await brazil_moh_engine.search_guidelines(
                 query, limit=limit, collection=norm_collection
             )
-            return _with_degraded(format_brazil_moh_guidelines(guidelines, query, meta), meta)
+            payload = format_brazil_moh_guidelines(guidelines, query, meta)
+            payload["diagnostics"] = {
+                "error_kind": meta.error_kind or "unknown",
+                "http_status": meta.http_status,
+                "challenge_hit": meta.challenge_hit,
+                "cache_hit": meta.cached,
+                "timeout": meta.timeout,
+            }
+            payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
+            return _with_degraded(payload, meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "brazil-moh"}
 
@@ -691,7 +703,7 @@ if settings.enable_medical_tools:
                 record_id, max_chars=max_chars, query=query, offset=offset
             )
             payload["cache"] = {"cached": meta.cached, "cache_age": meta.cache_age}
-            return payload
+            return _with_degraded(payload, meta)
         except Exception as ex:
             return {"status": "error", "error": str(ex), "source": "brazil-moh", "content": ""}
 
