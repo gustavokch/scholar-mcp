@@ -139,6 +139,41 @@ async def test_spent_deadline_issues_no_request_at_all():
         AsyncHttpClient.reset_dead_hosts()
 
 
+async def test_spent_deadline_does_not_inherit_an_earlier_calls_failure():
+    """A call that issues no request must not report the previous call's status.
+
+    ``last_failure`` is cleared only on success, and its ``ContextScoped`` dict
+    is shared with child tasks, so a stale ``FetchFailure`` outlives the call
+    that produced it. Reporting it from the bailout hands the caller an HTTP
+    status this call never received -- and the §2 classification is made from
+    exactly that status, so a stage that opened no socket would be recorded as
+    an ``origin_outage`` against the host.
+    """
+    client, calls = _client(_always_503, max_retries=1)
+    try:
+        await client.get("https://example.org/degraded")
+        assert client.last_failure is not None
+        assert client.last_failure.status == 503
+
+        assert (
+            await client.get(
+                "https://example.org/degraded", deadline=time.monotonic()
+            )
+            is None
+        )
+        # The second call issued nothing, so the first call's attempt is still
+        # the only one on the transport.
+        assert calls["count"] == 1
+        failure = client.last_failure
+        assert failure is not None
+        assert failure.kind == "transport"
+        assert failure.status is None
+        assert failure.detail == "DeadlineExceeded"
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()
+
+
 async def test_deadline_none_keeps_the_full_ladder():
     """The default must not change behaviour for the callers that do not opt in."""
     client, calls = _client(_always_503, max_retries=3)

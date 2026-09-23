@@ -537,6 +537,14 @@ class AsyncHttpClient:
         # window fails at a consistent speed, so the previous attempt is the
         # best available predictor of the next.
         last_attempt_cost = 0.0
+        # Whether *this* call has already written ``last_failure``. The
+        # attribute itself cannot answer that: it is cleared only on success,
+        # and its ContextScoped dict is shared with child tasks, so a stale
+        # FetchFailure outlives the call that made it. The bailout below needs
+        # the intra-call answer -- keep the 503 from the attempt before the
+        # limiter parked us past the deadline -- without inheriting an earlier
+        # call's status for a call that opened no socket.
+        recorded_failure = False
 
         for attempt in range(self.max_retries):
             await limiter.acquire()
@@ -547,7 +555,7 @@ class AsyncHttpClient:
                 # or a shielded 403 installs) for longer than the whole budget.
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    if self.last_failure is None:
+                    if not recorded_failure:
                         self.last_failure = FetchFailure(
                             "transport", None, "DeadlineExceeded"
                         )
@@ -612,6 +620,7 @@ class AsyncHttpClient:
                     self.last_failure = FetchFailure(
                         "http", resp.status_code, resp.reason_phrase or ""
                     )
+                    recorded_failure = True
 
                     if (
                         deadline is not None
