@@ -446,8 +446,8 @@ def _topic_filtered(
     single incidental term that happens to be absent empties the pool -- the
     conservative direction for a fallback.
 
-    ponytail: DF over the candidate pool only; real IDF over the PCDT
-    catalogue if a ~15-document pool proves too coarse.
+    Follow-up: document frequency is taken over the candidate pool only; real
+    IDF over the PCDT catalogue if a ~15-document pool proves too coarse.
     """
     # Solr operators are stripped for the same reason ``_usable_tokens``
     # strips them before a token reaches the index: they are query syntax, not
@@ -472,7 +472,7 @@ def _topic_filtered(
     discriminating = {t for t, f in frequencies.items() if f == lowest}
     return [
         record
-        for record, carried in zip(records, per_record)
+        for record, carried in zip(records, per_record, strict=True)
         if carried & discriminating
     ]
 
