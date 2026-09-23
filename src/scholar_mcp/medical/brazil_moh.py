@@ -657,6 +657,7 @@ class BrazilMoHEngine:
         composed: str,
         count: int,
         state: _SearchState,
+        deadline: float | None = None,
     ) -> tuple[list[BrazilGuideline], bool]:
         """One BVS search request, parsed, deduplicated and Brazil-filtered.
 
@@ -670,10 +671,14 @@ class BrazilMoHEngine:
         Transient 5xx retries inside this call
         (``_BVS_RETRYABLE_STATUSES``): the host alternates 5xx and 200 across
         consecutive requests, so the next attempt usually carries the records
-        this one missed, and it arrives fast enough to fit the stage budget.
-        A failure surviving the bounded ladder is classified onto ``state``
-        (``cdn_challenge`` vs ``origin_outage`` vs ``timeout`` vs
-        ``backend_error``) for the §2 contract.
+        this one missed. ``deadline`` (absolute ``time.monotonic()``, the
+        stage's own ceiling) keeps that ladder inside the stage budget: it
+        declines a retry that would land past the deadline instead of being
+        cancelled mid-attempt by ``_stage``. A failure surviving the ladder is
+        classified onto ``state`` (``cdn_challenge`` vs ``origin_outage`` vs
+        ``timeout`` vs ``backend_error``) for the §2 contract -- and because
+        the ladder ends itself, a degraded window still classifies on the
+        host's real status rather than on the cancellation.
         """
         state.stages_attempted += 1
         state.overfetch_window = max(state.overfetch_window, count)
@@ -686,6 +691,7 @@ class BrazilMoHEngine:
                 "count": count,
             },
             retryable_statuses=_BVS_RETRYABLE_STATUSES,
+            deadline=deadline,
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
@@ -829,9 +835,19 @@ class BrazilMoHEngine:
         def _on_timeout() -> None:
             self._mark_bvs_timed_out(state)
 
+        # The ladder underneath gets the stage's own ceiling as a deadline, so
+        # it stops itself rather than being cancelled by the ``wait_for`` in
+        # ``_stage``. Computed here, from the same ``_stage_budget``: the stage
+        # bound is fixed, so this deadline lands at or before the one
+        # ``_stage`` derives a moment later, and the chain bound makes the two
+        # coincide. A retry is refused before either, because the refusal test
+        # weighs the backoff plus the cost of another attempt.
+        budget = self._stage_budget(chain_start)
+        deadline = time.monotonic() + budget if budget > 0 else None
+
         return await self._stage(
             stage,
-            self._fetch_records(composed_query, count, state),
+            self._fetch_records(composed_query, count, state, deadline=deadline),
             ([], True),
             chain_start=chain_start,
             on_timeout=_on_timeout,
@@ -1511,12 +1527,16 @@ class BrazilMoHEngine:
             return []
 
     async def _lookup_record(
-        self, record_id: str
+        self, record_id: str, deadline: float | None = None
     ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
         """Resolve one record by its Solr id. Returns (record, error_kind).
 
         Second element is a ``BvsErrorKind`` on failure and ``None`` on
         success/not-found.
+
+        ``deadline`` (absolute ``time.monotonic()``) bounds the retry ladder
+        underneath this call so it ends itself while the host's status is still
+        readable, instead of being cancelled by the caller's ceiling.
         """
         # The id is caller-controlled; escape it so a quote or backslash
         # cannot terminate the id:"..." phrase and rewrite the query.
@@ -1526,6 +1546,7 @@ class BrazilMoHEngine:
             headers=BVS_HEADERS,
             params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
             retryable_statuses=_BVS_RETRYABLE_STATUSES,
+            deadline=deadline,
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
@@ -1552,7 +1573,7 @@ class BrazilMoHEngine:
         return _build_record(docs[0]), None
 
     async def _extract_pdf_text(
-        self, document_url: str
+        self, document_url: str, deadline: float | None = None
     ) -> tuple[str, BvsErrorKind | None]:
         """Fetch and extract the document PDF. Returns (text, error_kind).
 
@@ -1568,14 +1589,15 @@ class BrazilMoHEngine:
         Transient 5xx retries inside this call
         (``_BVS_RETRYABLE_STATUSES``): the document host answers per request
         rather than per outage, so the attempt after a 5xx often returns the
-        document. The ladder is bounded in attempt count only
-        (``AsyncHttpClient.max_retries``), never in elapsed time: it does not
-        consult the budget left. Against a host that is genuinely down, the
-        attempts cost roughly ``max_retries x TTFB`` plus backoff, which
-        exceeds ``brazil_fulltext_timeout_s``, so the caller's
-        ``asyncio.wait_for`` is what ends the call and the result is a
-        ``timeout`` rather than a classified ``origin_outage``. That is the
-        accepted cost of recovering the far more common transient 5xx.
+        document. With ``deadline`` (absolute ``time.monotonic()``) the ladder
+        is bounded in elapsed time as well as in attempt count: it declines a
+        retry once the backoff plus another attempt would land past the
+        deadline, and clamps the in-flight attempt to the time left. Against a
+        host that is genuinely down the call therefore returns while the status
+        is still readable, and the result is a classified ``origin_outage``
+        rather than a ``timeout`` with no HTTP status. Without a deadline the
+        ladder is attempt-bounded only and the caller's own ceiling is what
+        ends it.
         """
         if not _is_allowed_host(document_url):
             return "", None
@@ -1587,7 +1609,10 @@ class BrazilMoHEngine:
             host = ""
         headers = GOVBR_HEADERS if host.endswith("gov.br") else BVS_HEADERS
         resp = await self.http_client.get(
-            document_url, headers=headers, retryable_statuses=_BVS_RETRYABLE_STATUSES
+            document_url,
+            headers=headers,
+            retryable_statuses=_BVS_RETRYABLE_STATUSES,
+            deadline=deadline,
         )
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
@@ -1681,12 +1706,17 @@ class BrazilMoHEngine:
         """Fetch one document's full text under the published full-text ceiling.
 
         Budget: ``brazil_fulltext_timeout_s`` bounds the record lookup plus
-        the PDF fetch, kept separate from the search-chain budget above.
-        A timeout surfaces as ``status=error`` with ``error_kind=timeout``
-        in the metadata and is never cached. When the PDF cannot be
-        retrieved but the record carries an abstract, the abstract is served with
+        the PDF fetch, kept separate from the search-chain budget above. One
+        deadline covers both phases and is handed down into the retry ladders,
+        which decline a retry that would land past it -- no share is reserved
+        for the PDF phase, because cutting the lookup short would lose the
+        record and the abstract with it. A lookup timeout surfaces as
+        ``status=error`` with ``error_kind=timeout`` and is never cached. A
+        budget exhausted after the lookup succeeded is not a dead end: the
+        abstract is already in memory, so it is served with
         ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
-        explicit flag, never a silent substitution (S2.4).
+        explicit flag, never a silent substitution (S2.4) -- exactly as a
+        failed PDF fetch is.
         """
         normalized = (record_id or "").strip()
         base = {
@@ -1743,7 +1773,9 @@ class BrazilMoHEngine:
                 record = await self.az_engine.get_guideline(normalized)
             if record is not None:
                 return record, False, {}, None
-            record, error_kind = await self._lookup_record(normalized)
+            record, error_kind = await self._lookup_record(
+                normalized, deadline=deadline
+            )
             if error_kind:
                 return (
                     None,
@@ -1771,6 +1803,13 @@ class BrazilMoHEngine:
             return record, False, {}, None
 
         budget_start = time.monotonic()
+        # One deadline for the whole call, shared by both phases and handed
+        # down into the retry ladders. No fraction is reserved for the PDF
+        # phase: cutting a lookup short loses the record, and with it the
+        # abstract fallback -- the slowest measured healthy BVS lookup (27.9 s)
+        # needs nearly the whole ceiling. The ladder being budget-aware is what
+        # leaves time for the PDF in a degraded window.
+        deadline = budget_start + ceiling if ceiling > 0 else None
         try:
             if ceiling > 0:
                 record, errored, early_payload, early_meta = await asyncio.wait_for(
@@ -1793,31 +1832,47 @@ class BrazilMoHEngine:
             return await self._serve_local_text(
                 cache_key, base, record, max_chars, query=query, offset=offset
             )
+        pdf_text = ""
+        error_kind: BvsErrorKind | None = None
         if ceiling > 0:
             remaining = ceiling - (time.monotonic() - budget_start)
-            if remaining <= 0:
-                logger.warning(
-                    "brazil_moh full text fetch for %r exceeded its %.1fs budget",
-                    normalized,
-                    ceiling,
-                )
-                return _timeout_result(record.title)
         else:
             remaining = ceiling
-        try:
-            if ceiling > 0:
-                pdf_text, error_kind = await asyncio.wait_for(
-                    self._extract_pdf_text(record.document_url), timeout=remaining
-                )
-            else:
-                pdf_text, error_kind = await self._extract_pdf_text(record.document_url)
-        except (asyncio.TimeoutError, TimeoutError):
+        if ceiling > 0 and remaining <= 0:
+            # Budget gone before the PDF phase starts. Not a dead end: the
+            # lookup succeeded, so the abstract below is already in memory and
+            # costs no network. Returning a bare timeout here would discard
+            # the one answer the caller can still be given.
             logger.warning(
                 "brazil_moh full text fetch for %r exceeded its %.1fs budget",
                 normalized,
                 ceiling,
             )
-            return _timeout_result(record.title)
+            error_kind = "timeout"
+        else:
+            try:
+                if ceiling > 0:
+                    pdf_text, error_kind = await asyncio.wait_for(
+                        self._extract_pdf_text(
+                            record.document_url, deadline=deadline
+                        ),
+                        timeout=remaining,
+                    )
+                else:
+                    pdf_text, error_kind = await self._extract_pdf_text(
+                        record.document_url
+                    )
+            except (asyncio.TimeoutError, TimeoutError):
+                # Same reasoning as above: fall through to the abstract rather
+                # than return. The deadline handed to the ladder should make
+                # this the rare case -- a single attempt still in flight when
+                # the ceiling lands -- not the common one.
+                logger.warning(
+                    "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                    normalized,
+                    ceiling,
+                )
+                error_kind = "timeout"
         errored = error_kind is not None
 
         if pdf_text:

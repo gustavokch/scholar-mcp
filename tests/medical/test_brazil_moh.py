@@ -1508,31 +1508,29 @@ async def test_search_retries_502_then_succeeds(tmp_path: Path):
 
 
 @respx.mock
-async def test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout(
+async def test_5xx_ladder_stops_inside_the_stage_ceiling_and_keeps_the_status(
     tmp_path: Path,
 ):
-    """Known cost of retrying 5xx: a fast honest 504 becomes a stage timeout.
+    """A degraded window costs the ladder, not the classification.
 
-    In a degraded window the host answers 504 quickly and never recovers. The
-    ladder is bounded in attempt count, not in elapsed time, so it costs
-    ``attempts x (TTFB + limiter spacing)`` and the stage ceiling fires before
-    it ends. The caller loses the ``origin_outage`` classification it used to
-    get on the first 504 and sees ``timeout`` with no HTTP status instead.
+    The host answers 504 quickly and never recovers. The ladder is bounded in
+    elapsed time as well as attempt count, so it declines the retry that would
+    land past the stage ceiling and returns while the 504 is still readable.
+    The caller keeps ``origin_outage`` with the real HTTP status instead of the
+    statusless ``timeout`` an attempt-bounded ladder produced when the stage's
+    own ``wait_for`` cancelled it mid-attempt.
 
     Everything here is scaled down to keep the test fast: the limiter is
     replaced with a private fast one so the result does not depend on what the
     process-global BVS bucket owes from an earlier test. In production the
-    spacing is 1 req/s, which only makes the overrun larger.
-
-    This is the trade the retry widening accepts, recorded so that a later
-    budget-aware ladder -- one that stops when the remaining budget cannot fit
-    another attempt -- shows up as a failure here instead of passing unnoticed.
+    spacing is 1 req/s, which only makes the overrun the ladder now avoids
+    larger.
     """
     engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
     # A private full bucket: deterministic 0.05 s spacing, no debt inherited
     # from whichever test touched the shared BVS limiter before this one.
     _pin_fast_limiter(http_client, rate_per_sec=20.0)
-    # ~0.4 s of stage budget against a 0.1 s TTFB plus 0.05 s spacing: two
+    # ~0.4 s of stage budget against a 0.1 s TTFB plus 0.05 s spacing: some
     # attempts fit, the full four-attempt ladder does not.
     engine.settings.brazil_stage_timeout_s = 0.45
     engine.settings.enable_browser_fallback = False
@@ -1547,14 +1545,12 @@ async def test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout(
 
         assert records == []
         assert meta.error is True
-        # The ladder, not a single attempt, is what overran the ceiling. No
-        # upper bound is asserted: the timeout kind below already proves the
-        # ladder was cut short rather than allowed to finish, which would
-        # instead have classified as origin_outage.
-        assert route.call_count >= 2
-        # The honest 504 is gone: no status survives, only the timeout.
-        assert meta.error_kind == "timeout"
-        assert meta.http_status is None
+        # The ladder ended itself: it did not spend every attempt, and it did
+        # not have to be cancelled from outside.
+        assert 1 <= route.call_count < http_client.max_retries
+        # The honest 504 survives, which is the whole point.
+        assert meta.error_kind == "origin_outage"
+        assert meta.http_status == 504
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3248,6 +3244,115 @@ async def test_clean_bvs_result_is_cached_when_only_an_auxiliary_stage_fails(tmp
         assert route.call_count == 1, "the BVS chain re-ran while AZ was down"
         assert second_meta.cached is True
         assert [r.record_id for r in second] == [r.record_id for r in first]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_exhausted_budget_still_serves_the_abstract(
+    tmp_path: Path,
+):
+    """A PDF phase that runs out of budget must not discard the record.
+
+    The lookup already succeeded, so the abstract is in memory and costs no
+    network. Returning a bare timeout instead throws away the one answer the
+    caller can still be given.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_fulltext_timeout_s = 0.3
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=_bvs_response(
+                    [_bvs_doc(record_id="biblio-1", ab=["Resumo do protocolo."])]
+                ),
+            )
+        )
+
+        async def _never_answers(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(5.0)
+            return httpx.Response(200, content=b"%PDF-1.4")
+
+        respx.get(FI_ADMIN_URL).mock(side_effect=_never_answers)
+
+        payload, meta = await engine.get_full_text("biblio-1")
+
+        assert payload["content_type"] == "abstract"
+        assert payload["abstract_fallback"] is True
+        assert payload["content"] == "Resumo do protocolo."
+        assert payload["title"] == "Protocolo"
+        assert meta.error is False
+        assert meta.error_kind == "timeout"
+        # Cached at the degraded TTL so the next request retries the PDF.
+        _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
+        assert cache_meta.cached is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_exhausted_budget_without_an_abstract_reports_timeout(
+    tmp_path: Path,
+):
+    """With nothing to fall back on the result stays an error, and the title
+    the lookup did retrieve survives in it."""
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_fulltext_timeout_s = 0.3
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200, json=_bvs_response([_bvs_doc(record_id="biblio-1")])
+            )
+        )
+
+        async def _never_answers(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(5.0)
+            return httpx.Response(200, content=b"%PDF-1.4")
+
+        respx.get(FI_ADMIN_URL).mock(side_effect=_never_answers)
+
+        payload, meta = await engine.get_full_text("biblio-1")
+
+        assert payload["status"] == "error"
+        assert payload["content_type"] == "none"
+        assert payload["title"] == "Protocolo"
+        assert meta.error is True
+        assert meta.error_kind == "timeout"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_full_text_lookup_ladder_stops_inside_the_budget(tmp_path: Path):
+    """The lookup ladder must end itself and keep the host's real status.
+
+    A degraded window answers 504 fast and never recovers. An attempt-bounded
+    ladder outlives the full-text ceiling, the caller's ``wait_for`` cancels it
+    mid-attempt, and the 504 is replaced by a statusless timeout.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.5)
+    _pin_fast_limiter(http_client, rate_per_sec=20.0)
+    engine.settings.brazil_fulltext_timeout_s = 0.6
+    try:
+
+        async def _slow_504(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.1)
+            return httpx.Response(504, text="Gateway Timeout")
+
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_504)
+
+        payload, meta = await engine.get_full_text("biblio-1")
+
+        assert route.call_count < http_client.max_retries
+        assert payload["status"] == "error"
+        assert meta.error is True
+        assert meta.error_kind == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()

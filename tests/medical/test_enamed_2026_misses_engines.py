@@ -455,7 +455,7 @@ async def test_fulltext_timeout_maps_to_timeout_kind(tmp_path: Path):
         tmp_path, brazil_fulltext_timeout_s=0.05
     )
     try:
-        async def _slow_lookup(record_id):
+        async def _slow_lookup(record_id, deadline=None):
             await asyncio.sleep(5.0)
             return None, None
 
@@ -541,11 +541,11 @@ async def test_fulltext_pdf_phase_gets_remaining_budget(tmp_path, monkeypatch):
             return_value=httpx.Response(200, json=_bvs_response([doc]))
         )
 
-        async def _slow_lookup(record_id):
+        async def _slow_lookup(record_id, deadline=None):
             await asyncio.sleep(0.3)
             return _build_record(doc), None
 
-        async def _fast_pdf(url):
+        async def _fast_pdf(url, deadline=None):
             return "texto do pdf", None
 
         engine._lookup_record = _slow_lookup  # type: ignore[method-assign]
