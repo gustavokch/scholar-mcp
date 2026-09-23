@@ -97,10 +97,7 @@ async def test_retry_is_refused_when_the_attempt_itself_will_not_fit():
     Here one attempt costs ~0.1 s and the backoff is negligible, against 0.15 s
     of budget: the first attempt fits, a second does not.
     """
-    slept = {"n": 0}
-
     def _slow_503(request: httpx.Request) -> httpx.Response:
-        slept["n"] += 1
         time.sleep(0.1)
         return httpx.Response(503, text="Service Unavailable")
 

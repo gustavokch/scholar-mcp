@@ -625,6 +625,13 @@ class AsyncHttpClient:
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    # Throttled before the deadline gate below, on purpose. The
+                    # bucket is shared by every coroutine on this host and the
+                    # server asked all of them to back off; this caller giving
+                    # up on its own budget is no reason to let the siblings keep
+                    # hammering. The gate reads the throttle back out of the
+                    # limiter, so installing it here also makes the refusal
+                    # correct.
                     if resp.status_code == 429 or shielded_403:
                         wait_time = max(
                             retry_after or 0.0, calc_wait, self.min_429_wait

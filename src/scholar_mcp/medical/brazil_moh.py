@@ -1765,6 +1765,18 @@ class BrazilMoHEngine:
                 ),
             )
 
+        budget_start = time.monotonic()
+        # One deadline for the whole call, shared by both phases and handed
+        # down into the retry ladders. No fraction is reserved for the PDF
+        # phase: cutting a lookup short loses the record, and with it the
+        # abstract fallback -- the slowest measured healthy BVS lookup (27.9 s)
+        # needs nearly the whole ceiling. The ladder being budget-aware is what
+        # leaves time for the PDF in a degraded window.
+        #
+        # Bound before ``_resolve`` is defined below, because ``_resolve``
+        # closes over it.
+        deadline = budget_start + ceiling if ceiling > 0 else None
+
         async def _resolve() -> tuple[
             BrazilGuideline | None, bool, dict[str, Any], CacheMetadata | None
         ]:
@@ -1802,14 +1814,6 @@ class BrazilMoHEngine:
                 )
             return record, False, {}, None
 
-        budget_start = time.monotonic()
-        # One deadline for the whole call, shared by both phases and handed
-        # down into the retry ladders. No fraction is reserved for the PDF
-        # phase: cutting a lookup short loses the record, and with it the
-        # abstract fallback -- the slowest measured healthy BVS lookup (27.9 s)
-        # needs nearly the whole ceiling. The ladder being budget-aware is what
-        # leaves time for the PDF in a degraded window.
-        deadline = budget_start + ceiling if ceiling > 0 else None
         try:
             if ceiling > 0:
                 record, errored, early_payload, early_meta = await asyncio.wait_for(
