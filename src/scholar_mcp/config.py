@@ -80,9 +80,16 @@ class Settings:
     # OR-relaxed) run sequentially, and callers wrap the whole chain in their
     # own hard timeout. The ceiling must clear one real BVS response: the host
     # front end holds the connection ~19-25 s even when Solr answers in under
-    # half a second, so 30 s covers the slowest observed response plus the
-    # retry ladder spent on the transient 5xx that precedes it, and still
+    # half a second (slowest measured success: 27.9 s), so 20 s cancelled
+    # responses that were about to arrive. 30 s clears one such response and
     # keeps one stalled stage from eating the remaining stages' share.
+    #
+    # It does NOT also cover the 5xx retry ladder underneath it. That ladder is
+    # bounded in attempt count, not in elapsed time, so against a host stuck in
+    # a degraded window it costs roughly max_retries x TTFB and this ceiling
+    # fires first -- turning a fast, honest 504 into a timeout with no HTTP
+    # status. Raising this value to cover a full ladder would starve the rest
+    # of the chain; the timeout is the intended outcome there.
     brazil_stage_timeout_s: float = 30.0
     # Whole-chain ceiling for BrazilMoHEngine. Both the HTTP stages and the
     # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,

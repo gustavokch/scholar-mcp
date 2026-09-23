@@ -1568,8 +1568,14 @@ class BrazilMoHEngine:
         Transient 5xx retries inside this call
         (``_BVS_RETRYABLE_STATUSES``): the document host answers per request
         rather than per outage, so the attempt after a 5xx often returns the
-        document. The ladder is bounded by ``AsyncHttpClient.max_retries``,
-        which keeps a host that is genuinely down inside the caller's budget.
+        document. The ladder is bounded in attempt count only
+        (``AsyncHttpClient.max_retries``), never in elapsed time: it does not
+        consult the budget left. Against a host that is genuinely down, the
+        attempts cost roughly ``max_retries x TTFB`` plus backoff, which
+        exceeds ``brazil_fulltext_timeout_s``, so the caller's
+        ``asyncio.wait_for`` is what ends the call and the result is a
+        ``timeout`` rather than a classified ``origin_outage``. That is the
+        accepted cost of recovering the far more common transient 5xx.
         """
         if not _is_allowed_host(document_url):
             return "", None

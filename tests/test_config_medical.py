@@ -68,8 +68,9 @@ def test_brazil_timeout_defaults_leave_room_for_browser_tier():
     assert settings.brazil_stage_timeout_s == 30.0
     assert settings.brazil_chain_timeout_s == 120.0
     assert settings.brazil_browser_timeout_s == 45.0
-    # One BVS stage must outlast the host's slowest observed TTFB plus the
-    # retry ladder spent on the transient 5xx that precedes it.
+    # One BVS stage must outlast the host's slowest measured TTFB (27.9 s).
+    # It is not sized to also cover the 5xx retry ladder underneath it --
+    # that ladder is bounded in attempt count, not in time.
     assert settings.brazil_stage_timeout_s > 25.0
     # Worst case: 3 stages at full ceiling still leaves browser time.
     assert (
