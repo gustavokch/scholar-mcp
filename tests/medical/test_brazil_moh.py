@@ -18,6 +18,7 @@ from scholar_mcp.medical.brazil_moh import (
     _SearchState,
     _as_list,
     _build_query,
+    _topic_filtered,
     _derive_fulltext_id,
     _first,
     _parse_country,
@@ -3251,3 +3252,215 @@ async def test_clean_bvs_result_is_cached_when_only_an_auxiliary_stage_fails(tmp
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+# --- topic-term gate on the PCDT/A-Z fallback -------------------------------
+#
+# Measured 2026-09-23 against the live gov.br engines: the ranker ranks but
+# never drops, and its term coverage weights every query term equally, so a
+# Down-syndrome question came back with growth-hormone, SRAG, myelodysplastic
+# and nephrotic documents (they share the generic tokens "sindrome" and
+# "crescimento"). The scores do not separate the good pool from the bad one --
+# a topically-empty pool scored 0.480 while the bad pool's top hit scored
+# 0.470 -- so the gate keys on topic-term presence, not on score.
+
+
+def _g(title: str, **kw) -> BrazilGuideline:
+    """A minimal fallback candidate; only the matched text fields matter."""
+    return BrazilGuideline(
+        title=title, record_id=kw.pop("record_id", title[:24]), **kw
+    )
+
+
+def test_topic_gate_keeps_only_the_on_topic_dengue_guides():
+    """The generic tokens must not carry a candidate past the gate.
+
+    "manejo" and "clinico" appear across the pool; "dengue" does not. Only
+    the records carrying the discriminating token survive -- which is also
+    the pair the ranker currently sorts *below* two unrelated diseases.
+    """
+    pool = [
+        _g("Guia de manejo clínico: Bronquiolite Viral Aguda"),
+        _g("Guia - Chikungunya: Manejo Clínico - 2º edição"),
+        _g("Dengue - diagnóstico e manejo clínico adulto e criança"),
+        _g("Dengue: diagnóstico e manejo clínico: adulto e criança"),
+    ]
+
+    kept = _topic_filtered(pool, "dengue manejo clinico")
+
+    assert [r.title for r in kept] == [
+        "Dengue - diagnóstico e manejo clínico adulto e criança",
+        "Dengue: diagnóstico e manejo clínico: adulto e criança",
+    ]
+
+
+def test_topic_gate_empties_a_pool_that_misses_the_topic_entirely():
+    """No candidate mentions Down syndrome, so none may be offered.
+
+    This is the Q016 pool verbatim. Returning it lets four unrelated
+    syndromes reach the model as Brazilian evidence and inflates br_hits to
+    5 while br_cited stays false.
+    """
+    pool = [
+        _g("Deficiência do Hormônio de Crescimento - Hipopituitarismo"),
+        _g("Guia de Orientações para Profissionais de Saúde: Síndrome Gripal"),
+        _g("Síndrome Mielodisplásica de Baixo Risco"),
+        _g("Síndrome Nefrótica Primária em Adultos"),
+        _g("Síndrome Nefrótica Primária em Crianças e Adolescentes"),
+    ]
+
+    kept = _topic_filtered(pool, "curvas de crescimento síndrome de Down recém-nascido")
+
+    assert kept == []
+
+
+def test_topic_gate_matches_an_abstract_not_just_a_title():
+    """A record naming the topic only in its body still survives.
+
+    The ranker scores title and abstract together, so the gate reads the same
+    text; keying on the title alone would drop genuinely relevant records.
+    """
+    pool = [
+        _g("Protocolo de tratamento", abstract="Conduta na hanseníase virchowiana."),
+        _g("Protocolo de tratamento da malária"),
+    ]
+
+    kept = _topic_filtered(pool, "hanseniase tratamento")
+
+    assert [r.title for r in kept] == ["Protocolo de tratamento"]
+
+
+def test_topic_gate_keeps_everything_when_no_term_discriminates():
+    """A uniform pool carries no signal to filter on, so nothing is dropped.
+
+    Without this guard every term sits at the median and the gate would wipe
+    a pool it has no evidence against.
+    """
+    pool = [_g("Dengue manejo clínico"), _g("Dengue manejo clínico revisado")]
+
+    kept = _topic_filtered(pool, "dengue manejo")
+
+    assert kept == pool
+
+
+def test_topic_gate_empties_a_pool_matching_no_query_term_at_all():
+    """Zero overlap is noise, not evidence."""
+    pool = [_g("Tratamento da malária"), _g("Cross-linking corneano")]
+
+    kept = _topic_filtered(pool, "hanseniase poliquimioterapia")
+
+    assert kept == []
+
+
+def test_topic_gate_passes_through_an_untokenizable_query():
+    """A query that reduces to nothing cannot discriminate anything."""
+    pool = [_g("Tratamento da malária")]
+
+    assert _topic_filtered(pool, "de a o") == pool
+
+
+@respx.mock
+async def test_off_topic_fallback_is_not_offered_when_bvs_fails(tmp_path):
+    """A BVS outage must not turn the PCDT pool into fake Brazilian evidence.
+
+    This is ENAMED 2025 Q016: BVS times out, PCDT answers a Down-syndrome
+    query with four unrelated syndromes, and the exam pipeline records
+    br_hits=5 with br_cited=false. An honest backend error is the better
+    answer -- the caller already degrades correctly on one.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    try:
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=(
+                [
+                    _g("Deficiência do Hormônio de Crescimento - Hipopituitarismo",
+                       record_id="pcdt-hormonio"),
+                    _g("Síndrome Mielodisplásica de Baixo Risco",
+                       record_id="pcdt-mielodisplasica"),
+                    _g("Síndrome Nefrótica Primária em Adultos",
+                       record_id="pcdt-nefrotica"),
+                ],
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(502, text="502 Bad Gateway")
+        )
+
+        records, meta = await engine.search_guidelines(
+            "curvas de crescimento síndrome de Down recém-nascido", limit=10
+        )
+
+        assert records == []
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_on_topic_fallback_still_serves_a_bvs_outage(tmp_path):
+    """The gate must not cost the fallback its reason to exist."""
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    try:
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=(
+                [
+                    _g("Dengue: diagnóstico e manejo clínico", record_id="pcdt-dengue"),
+                    _g("Guia de manejo clínico: Bronquiolite", record_id="pcdt-bronq"),
+                ],
+                CacheMetadata(cached=False, cache_age=0, error=False),
+            )
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(502, text="502 Bad Gateway")
+        )
+
+        records, meta = await engine.search_guidelines("dengue manejo clinico", limit=10)
+
+        assert [r.record_id for r in records] == ["pcdt-dengue"]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_topic_gate_ignores_solr_boolean_operators():
+    """A query operator is not a topic term.
+
+    "and"/"or"/"not"/"to" appear in no Portuguese record, so leaving them in
+    the term list hands them frequency zero, which makes them the sole
+    discriminating term and empties the pool. Every other query path in this
+    module strips them through ``_usable_tokens``.
+    """
+    pool = [
+        _g("Dengue: diagnóstico e manejo clínico", record_id="d1"),
+        _g("Guia de manejo clínico: Bronquiolite", record_id="b1"),
+    ]
+
+    assert [r.record_id for r in _topic_filtered(pool, "dengue AND manejo")] == ["d1"]
+    # "OR" only; a second disease name would be a real absent topic term and
+    # would empty the pool on the zero-frequency rule, not on the operator.
+    assert [r.record_id for r in _topic_filtered(pool, "dengue OR manejo")] == ["d1"]
+
+
+def test_topic_gate_empties_a_covered_pool_when_one_query_term_is_absent():
+    """The documented cost of the zero-frequency rule, pinned.
+
+    The pool holds two genuine Dengue guides, but "gestantes" appears in none
+    of them, so it takes frequency zero, becomes the sole discriminating term,
+    and empties the pool. This is the conservative direction the gate chooses
+    deliberately -- recorded here so a future change to the discriminating
+    tier cannot move it silently.
+    """
+    pool = [
+        _g("Dengue: diagnóstico e manejo clínico", record_id="d1"),
+        _g("Dengue - diagnóstico e manejo clínico adulto", record_id="d2"),
+        _g("Guia de manejo clínico: Bronquiolite", record_id="b1"),
+    ]
+
+    assert [r.record_id for r in _topic_filtered(pool, "dengue manejo clinico")] == [
+        "d1",
+        "d2",
+    ]
+    assert _topic_filtered(pool, "dengue manejo clinico em gestantes") == []
