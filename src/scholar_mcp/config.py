@@ -90,6 +90,10 @@ class Settings:
     # fires first -- turning a fast, honest 504 into a timeout with no HTTP
     # status. Raising this value to cover a full ladder would starve the rest
     # of the chain; the timeout is the intended outcome there.
+    #
+    # Also capped by ``request_timeout``: AsyncHttpClient builds its
+    # httpx.AsyncClient with that as the per-attempt timeout, so raising this
+    # ceiling past it changes nothing unless request_timeout rises too.
     brazil_stage_timeout_s: float = 30.0
     # Whole-chain ceiling for BrazilMoHEngine. Both the HTTP stages and the
     # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,
