@@ -84,16 +84,18 @@ class Settings:
     # responses that were about to arrive. 30 s clears one such response and
     # keeps one stalled stage from eating the remaining stages' share.
     #
-    # It does NOT also cover the 5xx retry ladder underneath it. That ladder is
-    # bounded in attempt count, not in elapsed time, so against a host stuck in
-    # a degraded window it costs roughly max_retries x TTFB and this ceiling
-    # fires first -- turning a fast, honest 504 into a timeout with no HTTP
-    # status. Raising this value to cover a full ladder would starve the rest
-    # of the chain; the timeout is the intended outcome there.
+    # This ceiling also bounds the 5xx retry ladder underneath it: the stage
+    # passes its own deadline into ``AsyncHttpClient.get``, so the ladder
+    # declines a retry whose backoff plus measured attempt cost would land past
+    # it. In a degraded window that means the stage ends holding the host's real
+    # response, and the caller classifies on the 504 instead of on a
+    # cancellation. The ladder therefore never needs this value raised to fit a
+    # full ``max_retries`` run, which would starve the remaining stages.
     #
-    # Also capped by ``request_timeout``: AsyncHttpClient builds its
-    # httpx.AsyncClient with that as the per-attempt timeout, so raising this
-    # ceiling past it changes nothing unless request_timeout rises too.
+    # Also caps the per-attempt timeout together with ``request_timeout``:
+    # AsyncHttpClient clamps each attempt to min(request_timeout, budget left),
+    # so raising this ceiling past request_timeout changes nothing unless
+    # request_timeout rises too.
     brazil_stage_timeout_s: float = 30.0
     # Whole-chain ceiling for BrazilMoHEngine. Both the HTTP stages and the
     # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,

@@ -155,6 +155,21 @@ _PERMANENT_TRANSPORT_EXCEPTIONS = (
 )
 
 
+def _limiter_spacing(limiter: AsyncRateLimiter) -> float:
+    """Lower bound on what this limiter's next ``acquire`` will cost.
+
+    A retry does not begin at the end of its backoff: it begins when the bucket
+    lets it through. ``_reserve`` consumes a token, so the exact figure cannot
+    be peeked -- but one token interval, or whatever is left of an installed
+    throttle, is knowable from plain reads and is the part a deadline gate
+    would otherwise be blind to. Under-costing it puts the park inside the
+    caller's ceiling, where the cancellation lands mid-``acquire`` and the
+    status the ladder was holding is lost.
+    """
+    interval = 1.0 / limiter.rate_per_sec if limiter.rate_per_sec > 0 else 0.0
+    return max(interval, limiter.throttled_until - time.monotonic())
+
+
 def _is_permanent_transport_error(exc: BaseException) -> bool:
     """True when exc or any chained cause/context is a permanent network failure.
 
@@ -479,10 +494,23 @@ class AsyncHttpClient:
         ok_statuses: frozenset[int] | set[int] | None = None,
         quiet_statuses: frozenset[int] | set[int] | None = None,
         retryable_statuses: frozenset[int] | set[int] | None = None,
+        deadline: float | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
         Non-retryable failures report as ``None``.
+
+        ``deadline`` is an absolute ``time.monotonic()`` value bounding the
+        whole ladder, not one attempt. It makes the retry loop budget-aware:
+        a retry is declined once the backoff plus another attempt -- costed
+        from the previous one -- would land past the deadline, the in-flight
+        attempt is clamped to ``min(request_timeout, time left)``, and a rate
+        limiter that parks the call past the deadline stops it before a request
+        is issued. The point is that the ladder ends itself while the terminal
+        failure still carries the status the host answered with -- a caller's
+        outer ``asyncio.wait_for`` firing mid-attempt replaces that status with
+        a bare cancellation. ``None`` (the default) leaves the loop exactly as
+        it was for every caller that does not opt in.
 
         ``ok_statuses`` lists statuses the caller must inspect itself, so they are
         returned as-is instead (e.g. api.fda.gov uses 404 for "no matches found",
@@ -517,10 +545,56 @@ class AsyncHttpClient:
             logger.info("HTTP GET %s skipped: host %s is marked permanently dead", log_url, host_key)
             return None
 
+        # Cost of the last attempt, used to decide whether the next one fits the
+        # deadline. A budget that fits the backoff but not the request starts an
+        # attempt that gets cut off, and the completed response already in hand
+        # is lost with it. Measured rather than guessed: a host in a degraded
+        # window fails at a consistent speed, so the previous attempt is the
+        # best available predictor of the next.
+        last_attempt_cost = 0.0
+        # Whether *this* call has already written ``last_failure``. The
+        # attribute itself cannot answer that: it is cleared only on success,
+        # and its ContextScoped dict is shared with child tasks, so a stale
+        # FetchFailure outlives the call that made it. The bailout below needs
+        # the intra-call answer -- keep the 503 from the attempt before the
+        # limiter parked us past the deadline -- without inheriting an earlier
+        # call's status for a call that opened no socket.
+        recorded_failure = False
+
         for attempt in range(self.max_retries):
             await limiter.acquire()
+            request_kwargs: dict[str, Any] = {}
+            if deadline is not None:
+                # Recomputed after acquire(), not before: the limiter can park
+                # the call on its own (1 req/s buckets, plus the throttle a 429
+                # or a shielded 403 installs) for longer than the whole budget.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    if not recorded_failure:
+                        self.last_failure = FetchFailure(
+                            "transport", None, "DeadlineExceeded"
+                        )
+                    logger.info(
+                        "HTTP GET %s stopped before attempt %d/%d: budget exhausted",
+                        log_url,
+                        attempt + 1,
+                        self.max_retries,
+                    )
+                    return None
+                # The deadline is a ceiling, never a floor: a request_timeout
+                # shorter than the time left still wins.
+                request_kwargs["timeout"] = min(
+                    float(self.settings.request_timeout), remaining
+                )
+            # Outside the ``try``: the ``except`` below reads it to cost the
+            # attempt, and a statement inserted above it inside the block would
+            # turn a transport error into an UnboundLocalError.
+            attempt_started = time.monotonic()
             try:
-                resp = await self.client.get(target_url, headers=headers)
+                resp = await self.client.get(
+                    target_url, headers=headers, **request_kwargs
+                )
+                last_attempt_cost = time.monotonic() - attempt_started
                 # A bot-shield 403 normally behaves like a 429: throttle the whole
                 # host bucket and retry. The exception is a 403 carrying a JS
                 # challenge page, which no number of plain HTTP retries can pass.
@@ -551,6 +625,13 @@ class AsyncHttpClient:
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    # Throttled before the deadline gate below, on purpose. The
+                    # bucket is shared by every coroutine on this host and the
+                    # server asked all of them to back off; this caller giving
+                    # up on its own budget is no reason to let the siblings keep
+                    # hammering. The gate reads the throttle back out of the
+                    # limiter, so installing it here also makes the refusal
+                    # correct.
                     if resp.status_code == 429 or shielded_403:
                         wait_time = max(
                             retry_after or 0.0, calc_wait, self.min_429_wait
@@ -564,18 +645,41 @@ class AsyncHttpClient:
                     self.last_failure = FetchFailure(
                         "http", resp.status_code, resp.reason_phrase or ""
                     )
+                    recorded_failure = True
 
-                    # Routine on rate-limited hosts; only terminal failure is a warning.
-                    logger.info(
-                        "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",
-                        log_url,
-                        resp.status_code,
-                        attempt + 1,
-                        self.max_retries,
-                        wait_time,
-                    )
-                    await asyncio.sleep(wait_time)
-                    continue
+                    if (
+                        deadline is not None
+                        and time.monotonic()
+                        + wait_time
+                        + _limiter_spacing(limiter)
+                        + last_attempt_cost
+                        >= deadline
+                    ):
+                        # Falling through, not sleeping: the terminal path below
+                        # reports this response with its real status, which is
+                        # what a caller classifying the failure needs. Retrying
+                        # here would only be cancelled by the caller's own
+                        # ceiling, and the status would be lost with it.
+                        logger.info(
+                            "HTTP GET %s stopped after attempt %d/%d on status %d: "
+                            "budget cannot fit another attempt",
+                            log_url,
+                            attempt + 1,
+                            self.max_retries,
+                            resp.status_code,
+                        )
+                    else:
+                        # Routine on rate-limited hosts; only terminal failure is a warning.
+                        logger.info(
+                            "HTTP GET %s returned retryable status %d (attempt %d/%d), retrying in %.2fs",
+                            log_url,
+                            resp.status_code,
+                            attempt + 1,
+                            self.max_retries,
+                            wait_time,
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
                 if ok_statuses and resp.status_code in ok_statuses:
                     if resp.status_code >= 400:
                         _log_expected_status(log_url, resp)
@@ -598,6 +702,7 @@ class AsyncHttpClient:
                 self.last_failure = None
                 return resp
             except (httpx.TransportError, httpx.TimeoutException) as exc:
+                last_attempt_cost = time.monotonic() - attempt_started
                 if _is_permanent_transport_error(exc):
                     self.mark_dead_host(host_key)
                     self.last_failure = FetchFailure("transport", None, type(exc).__name__)
@@ -612,22 +717,38 @@ class AsyncHttpClient:
                     wait_time = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )
+                    if (
+                        deadline is None
+                        or time.monotonic()
+                        + wait_time
+                        + _limiter_spacing(limiter)
+                        + last_attempt_cost
+                        < deadline
+                    ):
+                        logger.info(
+                            "HTTP GET %s raised %s (attempt %d/%d), retrying in %.2fs: %s",
+                            log_url,
+                            type(exc).__name__,
+                            attempt + 1,
+                            self.max_retries,
+                            wait_time,
+                            exc,
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
                     logger.info(
-                        "HTTP GET %s raised %s (attempt %d/%d), retrying in %.2fs: %s",
+                        "HTTP GET %s stopped after attempt %d/%d on %s: "
+                        "budget cannot fit another attempt",
                         log_url,
-                        type(exc).__name__,
                         attempt + 1,
                         self.max_retries,
-                        wait_time,
-                        exc,
+                        type(exc).__name__,
                     )
-                    await asyncio.sleep(wait_time)
-                    continue
                 self.last_failure = FetchFailure("transport", None, type(exc).__name__)
                 logger.warning(
                     "HTTP GET %s failed after %d attempts: %s",
                     log_url,
-                    self.max_retries,
+                    attempt + 1,
                     exc,
                 )
                 return None
