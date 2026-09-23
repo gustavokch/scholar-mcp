@@ -80,7 +80,7 @@ from scholar_mcp.medical.ranking import (
     rank_brazil_guidelines,
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
 
 _BVS_HOST = "pesquisa.bvsalud.org"
@@ -178,11 +178,17 @@ _BVS_OUTAGE_MARKERS = (
 # technical manual while bounding the merged payload.
 ABSTRACT_MAX_CHARS = 2000
 
-# BVS search retries only 429: a 5xx from this host is an origin outage, and
-# retrying it four times with backoff burns the stage budget that the
-# remaining stages (or the browser tier) need. The non-challenge shield-403
-# burst retry still applies inside the HTTP layer even under this override.
-_BVS_RETRYABLE_STATUSES = frozenset({429})
+# BVS returns a transient 5xx per request, not per outage: the same URL
+# alternates 502 and 200 across consecutive requests, and the 502 arrives in
+# well under a second, so the retry ladder recovers it for a fraction of the
+# stage budget. Treating it as a settled outage discarded the stage's whole
+# yield. BVS therefore narrows nothing today and this is an alias, not a copy:
+# ``retryable_statuses`` is a narrowing hook (see ``AsyncHttpClient.get``), and
+# a hand-copied literal would silently fall behind a future widening of the
+# shared default. The name stays so a per-host narrowing is one line. The
+# non-challenge shield-403 burst retry still applies inside the HTTP layer even
+# under this override.
+_BVS_RETRYABLE_STATUSES = RETRYABLE_STATUS_CODES
 
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
@@ -661,11 +667,13 @@ class BrazilMoHEngine:
         sets ``state.bvs_shielded`` so later BVS stages short-circuit;
         truncated JSON or other garbage sets no flag.
 
-        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
-        5xx here is an origin outage, and burning backoff retries on it
-        spends the stage budget the remaining stages need. The failure is
-        classified onto ``state`` (``cdn_challenge`` vs ``origin_outage``
-        vs ``timeout`` vs ``backend_error``) for the §2 contract.
+        Transient 5xx retries inside this call
+        (``_BVS_RETRYABLE_STATUSES``): the host alternates 5xx and 200 across
+        consecutive requests, so the next attempt usually carries the records
+        this one missed, and it arrives fast enough to fit the stage budget.
+        A failure surviving the bounded ladder is classified onto ``state``
+        (``cdn_challenge`` vs ``origin_outage`` vs ``timeout`` vs
+        ``backend_error``) for the §2 contract.
         """
         state.stages_attempted += 1
         state.overfetch_window = max(state.overfetch_window, count)
@@ -1557,10 +1565,17 @@ class BrazilMoHEngine:
         but the response's final URL is re-checked against the allowlist so
         a redirect cannot carry the fetch off-host.
 
-        Only 429 retries inside this call (``_BVS_RETRYABLE_STATUSES``): a
-        5xx from the document host is an origin outage, and retrying it
-        would burn the caller's remaining budget on a fetch that will not
-        succeed.
+        Transient 5xx retries inside this call
+        (``_BVS_RETRYABLE_STATUSES``): the document host answers per request
+        rather than per outage, so the attempt after a 5xx often returns the
+        document. The ladder is bounded in attempt count only
+        (``AsyncHttpClient.max_retries``), never in elapsed time: it does not
+        consult the budget left. Against a host that is genuinely down, the
+        attempts cost roughly ``max_retries x TTFB`` plus backoff, which
+        exceeds ``brazil_fulltext_timeout_s``, so the caller's
+        ``asyncio.wait_for`` is what ends the call and the result is a
+        ``timeout`` rather than a classified ``origin_outage``. That is the
+        accepted cost of recovering the far more common transient 5xx.
         """
         if not _is_allowed_host(document_url):
             return "", None

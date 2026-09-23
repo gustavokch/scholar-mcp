@@ -14,6 +14,7 @@ from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
     CACHE_SCHEMA,
     BrazilMoHEngine,
+    _BVS_RETRYABLE_STATUSES,
     _SearchState,
     _as_list,
     _build_query,
@@ -23,8 +24,21 @@ from scholar_mcp.medical.brazil_moh import (
     _parse_issued,
 )
 from scholar_mcp.medical.models import BrazilGuideline
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
+from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+
+def test_bvs_retryable_statuses_track_the_shared_default():
+    """The BVS override must not silently fall behind the shared default.
+
+    ``AsyncHttpClient.get`` documents ``retryable_statuses`` as a *narrowing*
+    hook, so while BVS narrows nothing the override must BE the shared set
+    rather than a hand-copied snapshot of today's members: widening
+    ``RETRYABLE_STATUS_CODES`` later would otherwise leave BVS behind with
+    nothing to catch it.
+    """
+    assert _BVS_RETRYABLE_STATUSES is RETRYABLE_STATUS_CODES
 
 
 def test_first_returns_first_list_element():
@@ -406,14 +420,34 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
-async def _engine(tmp_path: Path):
+def _pin_fast_limiter(http_client, rate_per_sec: float = 50.0) -> None:
+    """Give ``http_client`` a private, full, fast token bucket.
+
+    The real ``pesquisa.bvsalud.org`` bucket is 1 req/s and the limiter
+    registry is process-global, so a test that walks the retry ladder
+    otherwise pays ~1 s of wall clock per attempt AND inherits whatever debt
+    an earlier test left on the shared bucket. Tests that assert attempt
+    counts or failure classification care about neither: the limiter spacing
+    is incidental to what they prove, and in production it only makes the
+    elapsed cost larger than what they simulate.
+    """
+    limiter = AsyncRateLimiter(rate_per_sec=rate_per_sec)
+    http_client._limiter_for_url = lambda url: limiter
+
+
+async def _engine(tmp_path: Path, backoff_base: float = 0.5):
     # The browser tier is pinned off here: it is not what these tests exercise,
     # and left on it launches a REAL camoufox against the live BVS host as soon
     # as every HTTP stage errors — which silently turns an assertion about an
     # empty result into an assertion about today's network. The dedicated
     # camoufox tests enable it explicitly and install a fake.
+    #
+    # ``backoff_base`` defaults to the production value so existing tests keep
+    # their behaviour; a test that walks the retry ladder wants 0.01 here AND
+    # ``_pin_fast_limiter`` above -- the limiter, at 1 req/s, is the larger of
+    # the two costs.
     settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=backoff_base)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     _stub_pcdt_empty(engine)
@@ -1379,14 +1413,56 @@ async def test_extract_pdf_text_uses_govbr_headers_on_gov_host(tmp_path, monkeyp
 
 
 @respx.mock
-async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
-    """A 5xx from the document host must not burn the retry ladder.
+async def test_extract_pdf_text_retries_transient_5xx(tmp_path, monkeypatch):
+    """A 5xx from the document host is transient, not a settled outage.
 
-    ``_BVS_RETRYABLE_STATUSES`` only retries 429, so a 503 is fatal on the
-    first attempt: one request, and the caller gets ``origin_outage`` back.
+    The host returns 5xx per-request rather than per-outage, so the second
+    attempt sees the document the first one missed. Failing fast on the first
+    5xx discards a full text that one cheap retry recovers.
     """
     settings = Settings()
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh.pdf_bytes_to_text", lambda b: "texto"
+    )
+    route = respx.get("https://docs.bvsalud.org/x").mock(
+        side_effect=[
+            httpx.Response(503, text="Service Unavailable"),
+            httpx.Response(
+                200,
+                content=b"%PDF-1.4",
+                headers={"Content-Type": "application/pdf"},
+            ),
+        ]
+    )
+    try:
+        text, error_kind = await engine._extract_pdf_text(
+            "https://docs.bvsalud.org/x"
+        )
+        assert route.call_count == 2
+        assert error_kind is None
+        assert text == "texto"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_extract_pdf_text_gives_up_after_the_retry_ladder(tmp_path):
+    """Retrying a 5xx is bounded: a host that is genuinely down still ends.
+
+    ``AsyncHttpClient.max_retries`` caps the attempts, so an unbroken run of
+    5xx costs the ladder and no more, and the caller still gets
+    ``origin_outage`` rather than a hang. The cap is on attempts only -- for
+    what the elapsed cost does to a caller's budget, see
+    ``test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout``.
+    """
+    settings = Settings()
+    http_client = AsyncHttpClient(settings, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
     cache = SQLiteCacheManager(db_path=tmp_path / "t.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     route = respx.get("https://docs.bvsalud.org/x").mock(
@@ -1396,9 +1472,89 @@ async def test_extract_pdf_text_fails_fast_on_5xx(tmp_path):
         text, error_kind = await engine._extract_pdf_text(
             "https://docs.bvsalud.org/x"
         )
-        assert route.call_count == 1
+        assert route.call_count == http_client.max_retries
         assert text == ""
         assert error_kind == "origin_outage"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_retries_502_then_succeeds(tmp_path: Path):
+    """A 502 from the BVS search host is transient, not an origin outage.
+
+    Measured against the live host: the same URL alternates 502 and 200 across
+    consecutive requests, and the 502 arrives in well under a second. Treating
+    it as fatal throws away every record the next attempt would have returned,
+    which is the whole yield of the stage.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=[
+                httpx.Response(502, text="Bad Gateway"),
+                httpx.Response(200, json=_bvs_response([_bvs_doc("biblio-1")])),
+            ]
+        )
+        records, meta = await engine.search_guidelines("dengue", limit=10)
+        assert route.call_count == 2
+        assert [r.record_id for r in records] == ["biblio-1"]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout(
+    tmp_path: Path,
+):
+    """Known cost of retrying 5xx: a fast honest 504 becomes a stage timeout.
+
+    In a degraded window the host answers 504 quickly and never recovers. The
+    ladder is bounded in attempt count, not in elapsed time, so it costs
+    ``attempts x (TTFB + limiter spacing)`` and the stage ceiling fires before
+    it ends. The caller loses the ``origin_outage`` classification it used to
+    get on the first 504 and sees ``timeout`` with no HTTP status instead.
+
+    Everything here is scaled down to keep the test fast: the limiter is
+    replaced with a private fast one so the result does not depend on what the
+    process-global BVS bucket owes from an earlier test. In production the
+    spacing is 1 req/s, which only makes the overrun larger.
+
+    This is the trade the retry widening accepts, recorded so that a later
+    budget-aware ladder -- one that stops when the remaining budget cannot fit
+    another attempt -- shows up as a failure here instead of passing unnoticed.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    # A private full bucket: deterministic 0.05 s spacing, no debt inherited
+    # from whichever test touched the shared BVS limiter before this one.
+    _pin_fast_limiter(http_client, rate_per_sec=20.0)
+    # ~0.4 s of stage budget against a 0.1 s TTFB plus 0.05 s spacing: two
+    # attempts fit, the full four-attempt ladder does not.
+    engine.settings.brazil_stage_timeout_s = 0.45
+    engine.settings.enable_browser_fallback = False
+    try:
+
+        async def _slow_504(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.1)
+            return httpx.Response(504, text="Gateway Timeout")
+
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_504)
+        records, meta = await engine.search_guidelines("dengue", limit=10)
+
+        assert records == []
+        assert meta.error is True
+        # The ladder, not a single attempt, is what overran the ceiling. No
+        # upper bound is asserted: the timeout kind below already proves the
+        # ladder was cut short rather than allowed to finish, which would
+        # instead have classified as origin_outage.
+        assert route.call_count >= 2
+        # The honest 504 is gone: no status survives, only the timeout.
+        assert meta.error_kind == "timeout"
+        assert meta.http_status is None
     finally:
         await cache.close()
         await http_client.aclose()
