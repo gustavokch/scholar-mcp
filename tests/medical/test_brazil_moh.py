@@ -25,6 +25,7 @@ from scholar_mcp.medical.brazil_moh import (
 )
 from scholar_mcp.medical.models import BrazilGuideline
 from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
+from scholar_mcp.utils.rate_limit import AsyncRateLimiter
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
@@ -419,14 +420,18 @@ from scholar_mcp.utils.http import AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
 
-async def _engine(tmp_path: Path):
+async def _engine(tmp_path: Path, backoff_base: float = 0.5):
     # The browser tier is pinned off here: it is not what these tests exercise,
     # and left on it launches a REAL camoufox against the live BVS host as soon
     # as every HTTP stage errors — which silently turns an assertion about an
     # empty result into an assertion about today's network. The dedicated
     # camoufox tests enable it explicitly and install a fake.
+    #
+    # ``backoff_base`` defaults to the production value so existing tests keep
+    # their behaviour; any test that actually walks the retry ladder must pass
+    # 0.01, or it pays the real 3.5 s of sleep in wall-clock time.
     settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
-    http_client = AsyncHttpClient(settings)
+    http_client = AsyncHttpClient(settings, backoff_base=backoff_base)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
     engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
     _stub_pcdt_empty(engine)
@@ -1476,6 +1481,60 @@ async def test_search_retries_502_then_succeeds(tmp_path: Path):
         assert route.call_count == 2
         assert [r.record_id for r in records] == ["biblio-1"]
         assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_5xx_ladder_overrunning_the_stage_ceiling_reports_timeout(
+    tmp_path: Path,
+):
+    """Known cost of retrying 5xx: a fast honest 504 becomes a stage timeout.
+
+    In a degraded window the host answers 504 quickly and never recovers. The
+    ladder is bounded in attempt count, not in elapsed time, so it costs
+    ``attempts x (TTFB + limiter spacing)`` and the stage ceiling fires before
+    it ends. The caller loses the ``origin_outage`` classification it used to
+    get on the first 504 and sees ``timeout`` with no HTTP status instead.
+
+    Everything here is scaled down to keep the test fast: the limiter is
+    replaced with a private fast one so the result does not depend on what the
+    process-global BVS bucket owes from an earlier test. In production the
+    spacing is 1 req/s, which only makes the overrun larger.
+
+    This is the trade the retry widening accepts, recorded so that a later
+    budget-aware ladder -- one that stops when the remaining budget cannot fit
+    another attempt -- shows up as a failure here instead of passing unnoticed.
+    """
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    # A private full bucket: deterministic 0.05 s spacing, no debt inherited
+    # from whichever test touched the shared BVS limiter before this one.
+    limiter = AsyncRateLimiter(rate_per_sec=20.0)
+    http_client._limiter_for_url = lambda url: limiter
+    # ~0.4 s of stage budget against a 0.1 s TTFB plus 0.05 s spacing: two
+    # attempts fit, the full four-attempt ladder does not.
+    engine.settings.brazil_stage_timeout_s = 0.45
+    engine.settings.enable_browser_fallback = False
+    try:
+
+        async def _slow_504(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(0.1)
+            return httpx.Response(504, text="Gateway Timeout")
+
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_504)
+        records, meta = await engine.search_guidelines("dengue", limit=10)
+
+        assert records == []
+        assert meta.error is True
+        # The ladder, not a single attempt, is what overran the ceiling. No
+        # upper bound is asserted: the timeout kind below already proves the
+        # ladder was cut short rather than allowed to finish, which would
+        # instead have classified as origin_outage.
+        assert route.call_count >= 2
+        # The honest 504 is gone: no status survives, only the timeout.
+        assert meta.error_kind == "timeout"
+        assert meta.http_status is None
     finally:
         await cache.close()
         await http_client.aclose()
