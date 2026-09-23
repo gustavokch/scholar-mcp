@@ -14,6 +14,7 @@ from scholar_mcp.medical.brazil_moh import (
     BVS_SEARCH_URL,
     CACHE_SCHEMA,
     BrazilMoHEngine,
+    _BVS_RETRYABLE_STATUSES,
     _SearchState,
     _as_list,
     _build_query,
@@ -23,8 +24,20 @@ from scholar_mcp.medical.brazil_moh import (
     _parse_issued,
 )
 from scholar_mcp.medical.models import BrazilGuideline
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+
+
+def test_bvs_retryable_statuses_track_the_shared_default():
+    """The BVS override must not silently fall behind the shared default.
+
+    ``AsyncHttpClient.get`` documents ``retryable_statuses`` as a *narrowing*
+    hook, so while BVS narrows nothing the override must BE the shared set
+    rather than a hand-copied snapshot of today's members: widening
+    ``RETRYABLE_STATUS_CODES`` later would otherwise leave BVS behind with
+    nothing to catch it.
+    """
+    assert _BVS_RETRYABLE_STATUSES is RETRYABLE_STATUS_CODES
 
 
 def test_first_returns_first_list_element():

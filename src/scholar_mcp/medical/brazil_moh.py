@@ -80,7 +80,7 @@ from scholar_mcp.medical.ranking import (
     rank_brazil_guidelines,
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
 
 _BVS_HOST = "pesquisa.bvsalud.org"
@@ -182,10 +182,13 @@ ABSTRACT_MAX_CHARS = 2000
 # alternates 502 and 200 across consecutive requests, and the 502 arrives in
 # well under a second, so the retry ladder recovers it for a fraction of the
 # stage budget. Treating it as a settled outage discarded the stage's whole
-# yield. Members match ``RETRYABLE_STATUS_CODES``; the constant stays named so
-# a future per-host narrowing is one line. The non-challenge shield-403 burst
-# retry still applies inside the HTTP layer even under this override.
-_BVS_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+# yield. BVS therefore narrows nothing today and this is an alias, not a copy:
+# ``retryable_statuses`` is a narrowing hook (see ``AsyncHttpClient.get``), and
+# a hand-copied literal would silently fall behind a future widening of the
+# shared default. The name stays so a per-host narrowing is one line. The
+# non-challenge shield-403 burst retry still applies inside the HTTP layer even
+# under this override.
+_BVS_RETRYABLE_STATUSES = RETRYABLE_STATUS_CODES
 
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
