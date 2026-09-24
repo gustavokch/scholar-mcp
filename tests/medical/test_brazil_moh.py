@@ -1018,13 +1018,13 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
-        # C2: abstract fallback is a success (error=False), cached degraded
-        # (brief TTL) -- but error_kind still carries the real PDF-fetch
-        # failure so machine consumers see the degradation.
+        # The abstract fallback is a success (error=False) whose error_kind
+        # carries the real PDF failure. It is a partial retrieval, so it is
+        # never cached.
         assert meta.error is False
         assert meta.error_kind == "backend_error"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1072,13 +1072,13 @@ async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Pa
         respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
-        # C2: abstract fallback is a success (error=False), cached degraded
-        # (brief TTL) -- but error_kind still carries the real PDF-fetch
-        # failure so machine consumers see the degradation.
+        # The abstract fallback is a success (error=False) whose error_kind
+        # carries the real PDF failure. It is a partial retrieval, so it is
+        # never cached.
         assert meta.error is False
         assert meta.error_kind == "timeout"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3284,9 +3284,9 @@ async def test_get_full_text_exhausted_budget_still_serves_the_abstract(
         assert payload["title"] == "Protocolo"
         assert meta.error is False
         assert meta.error_kind == "timeout"
-        # Cached at the degraded TTL so the next request retries the PDF.
+        # Never cached: the next request retries the PDF.
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()

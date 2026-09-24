@@ -44,10 +44,11 @@ Downstream contract (ENAMED 2026 misses, track B §2): every
 fields, so the caller distinguishes a CDN shield from a sick origin
 instead of reading one ``backend_error``. ``origin_outage`` must never
 count against any caller-side breaker, and a search that ends in one is
-never cached. One document fetch is the exception: an abstract served
-after a failed PDF fetch is held for ``DEGRADED_RESULT_TTL_SECONDS`` and
-carries its ``error_kind`` inside the cached row, so every hit in that
-window reports the same degradation the first caller saw. ``record_id``
+never cached. More generally, a partial retrieval is never cached, in
+memory or on disk: a search with any errored stage and an abstract served
+after a failed PDF fetch are both returned but never written, so the next
+call retries. The gov.br PCDT and A-Z catalogs are the bundled seeds;
+no search crawls gov.br. ``record_id``
 is the stable Solr document id and the fold key for ``med:brmoh:``.
 Published budgets: the search chain (``brazil_chain_timeout_s``,
 per-stage ``brazil_stage_timeout_s``, browser tier
@@ -244,12 +245,6 @@ class _SearchOutcome:
 BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
-
-# How long a merged result is held when BVS answered cleanly but a local
-# gov.br scraper failed. Short enough that the missing rows reappear soon
-# after the scraper recovers, long enough that a burst of queries does not
-# re-run the whole BVS chain each time.
-DEGRADED_RESULT_TTL_SECONDS = 300
 
 # The classified failure that produced a cached full-text payload travels
 # inside the row under this key. Without it, only the first caller in the
@@ -1831,9 +1826,8 @@ class BrazilMoHEngine:
             payload.setdefault(
                 "abstract_fallback", payload.get("content_type") == "abstract"
             )
-            # Replay the kind stored with the row. A degraded payload lives
-            # for DEGRADED_RESULT_TTL_SECONDS, so without this every request
-            # behind the first one in that window reports a clean result.
+            # Replay the kind stored with the row. Only clean results are
+            # written, so this is "ok" for every row this release writes.
             return payload, CacheMetadata(
                 cached=True,
                 cache_age=meta.cache_age,
@@ -2015,17 +2009,11 @@ class BrazilMoHEngine:
             **base, "status": "success", "title": record.title, **result,
             _CACHED_ERROR_KIND_KEY: error_kind or "ok",
         }
+        # A partial retrieval is never cached: an abstract served because the
+        # PDF fetch failed is written nowhere, so the next request retries
+        # the PDF.
         if not errored:
             await self.cache.set(cache_key, payload, source="brazil_moh")
-        else:
-            # A PDF fetch that failed and fell back to the abstract is
-            # still cached -- at the shorter degraded TTL, so the next
-            # request retries the PDF instead of serving a stale fallback
-            # indefinitely.
-            await self.cache.set(
-                cache_key, payload, source="brazil_moh",
-                ttl=DEGRADED_RESULT_TTL_SECONDS,
-            )
         return (
             self._serve_full_text(payload, max_chars, query=query, offset=offset),
             CacheMetadata(
