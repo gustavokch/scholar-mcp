@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **Journal-impact signal is live**: `scimago_sjr.json` now ships the SCImago Journal Rank 2025 table (52,793 ISSNs). It shipped empty before, so the 0.10 `journal_impact` weight contributed nothing. The data is SCImago's, for non-commercial use with citation (see `src/scholar_mcp/data/SOURCES.md`).
 - **`RETRYABLE_STATUS_CODES` is now a `frozenset`**: the shared retry-status default can no longer be mutated in place by an importer (PR #39).
 - **PMC OAI-PMH base URL**: `OAI_PMH_URL` now points at the canonical `https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/`, removing a 301 redirect from every OAI request (PR #39).
 - **Expected-error logging for Europe PMC and PMC OAI**: `fullTextXML` 404/500 and OAI `cannotDisseminateFormat` 400 now log at DEBUG instead of WARNING (PR #39).

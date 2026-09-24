@@ -84,3 +84,10 @@ def test_parse_scimago_csv_basic():
     assert table["issn"]["19326203"] == 0.821
     assert "12345678" not in table["issn"]
     assert "11112222" not in table["issn"]
+
+
+def test_bundled_table_is_populated():
+    """The journal_impact weight (0.10) is inert against an empty table: every
+    candidate's z-score is 0. The package must ship real SJR values."""
+    assert lookup_journal_impact("0028-4793", None) > 0  # NEJM, by ISSN
+    assert lookup_journal_impact(None, "The Lancet") > 0  # by normalized name
