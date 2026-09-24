@@ -251,14 +251,12 @@ BASE_FILTER = 'la:"pt" AND (type:"non-conventional" OR type:"monography")'
 BRISA_FILTER = 'db:"BRISA"'
 VALID_COLLECTIONS = frozenset({"all", "brisa", "pcdt", "az"})
 
-# The classified failure that produced a cached full-text payload travels
-# inside the row under this key. Without it, only the first caller in the
-# 300 s degraded window sees ``error_kind`` (and the ``degraded`` flag
-# server.py derives from it); everyone behind the cache reads a byte-identical
-# payload as clean. Private to the stored row: ``_serve_full_text`` strips it,
-# so it never reaches a caller. Rows written before this key existed read as
-# "" -- the same value they reported before.
-_CACHED_ERROR_KIND_KEY = "_error_kind"
+# Rows written by releases that cached the abstract fallback at a degraded
+# TTL carried the failure kind under this key. Nothing writes it now (only
+# clean results are cached, and a clean result's kind is "ok"), but rows
+# written under the full TTL by those releases can still be live, so
+# ``_serve_full_text`` keeps stripping it.
+_LEGACY_CACHED_ERROR_KIND_KEY = "_error_kind"
 
 BRAZIL_COUNTRY = "Brasil"
 
@@ -1847,13 +1845,13 @@ class BrazilMoHEngine:
             payload.setdefault(
                 "abstract_fallback", payload.get("content_type") == "abstract"
             )
-            # Replay the kind stored with the row. Only clean results are
-            # written, so this is "ok" for every row this release writes.
+            # Only clean results are written, so a hit is "ok" by
+            # construction; a partial retrieval never reaches the cache.
             return payload, CacheMetadata(
                 cached=True,
                 cache_age=meta.cache_age,
                 error=False,
-                error_kind=cached_data.get(_CACHED_ERROR_KIND_KEY, ""),
+                error_kind="ok",
             )
 
         ceiling = float(self.settings.brazil_fulltext_timeout_s)
@@ -2023,13 +2021,7 @@ class BrazilMoHEngine:
             "total_chars": total_chars,
             "abstract_fallback": abstract_fallback,
         }
-        # The kind is written into the row itself so a later cache hit reports
-        # the same degradation this caller sees; _serve_full_text strips it
-        # from what either caller receives.
-        payload = {
-            **base, "status": "success", "title": record.title, **result,
-            _CACHED_ERROR_KIND_KEY: error_kind or "ok",
-        }
+        payload = {**base, "status": "success", "title": record.title, **result}
         # A partial retrieval is never cached: an abstract served because the
         # PDF fetch failed is written nowhere, so the next request retries
         # the PDF.
@@ -2068,7 +2060,8 @@ class BrazilMoHEngine:
         total = payload.get("total_chars", len(stored))
         served = {**payload, **serve_body(stored, total, limit, query=query, offset=offset),
                   "total_chars": total}
-        # The stored error kind is cache bookkeeping, not part of the tool's
-        # response shape.
-        served.pop(_CACHED_ERROR_KIND_KEY, None)
+        # Releases up to the 300 s degraded-TTL design stored the failure
+        # kind inside the row; rows they wrote can still be live under the
+        # full TTL, and the key is bookkeeping, not response shape.
+        served.pop(_LEGACY_CACHED_ERROR_KIND_KEY, None)
         return served
