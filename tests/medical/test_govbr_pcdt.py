@@ -247,6 +247,28 @@ async def test_refresh_shrunken_crawl_is_incomplete(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_refresh_page_cap_is_incomplete(tmp_path, monkeypatch):
+    """An endless pagination chain stops at the cap and is incomplete."""
+    monkeypatch.setattr(govbr_pcdt, "MAX_PAGES_PER_LETTER", 2)
+    fetched: list[str] = []
+
+    async def get(url, **kwargs):
+        fetched.append(url)
+        letter = _letter_of(url)
+        start = int(url.split("=")[-1]) if "b_start" in url else 0
+        nxt = f"https://www.gov.br/saude/pt-br/assuntos/pcdt/{letter}?b_start:int={start + 20}"
+        return _letter_page(letter, f'<a href="{nxt}">next</a>')
+
+    engine, cache = _crawl_engine(tmp_path, get)
+    try:
+        _, complete = await engine.refresh_catalog()
+        assert complete is False
+        assert len(fetched) == 2 * len(govbr_pcdt.PCDT_LETTERS)
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_pcdt_get_guideline_slug_case_insensitive(tmp_path):
     """Slug lookup must be case-insensitive in both directions."""
     settings = Settings()

@@ -37,6 +37,11 @@ PCDT_LETTERS = (
     "m", "n", "o", "p", "r", "s", "t", "u",
 )
 
+# Letter pages paginate 20 items per page; 25 pages is far above anything
+# observed and a hard stop against a pagination chain that never ends. A
+# letter cut off here with pages still queued is an incomplete crawl.
+MAX_PAGES_PER_LETTER = 25
+
 def load_seed_catalog() -> dict[str, dict[str, Any]]:
     """Load the bundled pre-scraped PCDT catalog."""
     seed_path = Path(__file__).resolve().parent.parent / "data" / "govbr_pcdt_catalog.json"
@@ -273,7 +278,7 @@ class GovBrPCDTEngine:
         for letter in PCDT_LETTERS:
             urls_to_visit = [f"{PCDT_BASE_URL}/{letter}"]
             visited: set[str] = set()
-            while urls_to_visit:
+            while urls_to_visit and len(visited) < MAX_PAGES_PER_LETTER:
                 curr_url = urls_to_visit.pop(0)
                 if curr_url in visited:
                     continue
@@ -297,6 +302,14 @@ class GovBrPCDTEngine:
                 for nurl in next_urls:
                     if nurl not in visited and nurl not in urls_to_visit:
                         urls_to_visit.append(nurl)
+            if urls_to_visit:
+                logger.warning(
+                    "PCDT letter %s stopped at the %d-page cap with %d pages queued",
+                    letter,
+                    MAX_PAGES_PER_LETTER,
+                    len(urls_to_visit),
+                )
+                complete = False
 
         size_floor = int(len(incumbent or {}) * MIN_CATALOG_RETENTION)
         if not catalog or len(catalog) < size_floor:
