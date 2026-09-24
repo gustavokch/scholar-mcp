@@ -31,6 +31,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- **gov.br catalogs are offline-seed only**: `GovBrPCDTEngine` and `GovBrAZEngine` serve the bundled seed and never crawl gov.br or copy the seed into SQLite on a search. A missing seed reports `backend_error`.
+- **`scripts/update_govbr_catalogs.py --catalog az|pcdt`** replaces `scripts/update_govbr_az_catalog.py` and refuses to write a partial crawl (any failed page, page-cap truncation, missing alias vocabulary, or a catalog below half the current size).
 - **`RETRYABLE_STATUS_CODES` is now a `frozenset`**: the shared retry-status default can no longer be mutated in place by an importer (PR #39).
 - **PMC OAI-PMH base URL**: `OAI_PMH_URL` now points at the canonical `https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/`, removing a 301 redirect from every OAI request (PR #39).
 - **Expected-error logging for Europe PMC and PMC OAI**: `fullTextXML` 404/500 and OAI `cannotDisseminateFormat` 400 now log at DEBUG instead of WARNING (PR #39).

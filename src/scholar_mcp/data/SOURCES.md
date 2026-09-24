@@ -47,8 +47,22 @@ manuals and guides.
 
 **Regeneration command:**
 ```bash
-python scripts/update_govbr_az_catalog.py
+python scripts/update_govbr_catalogs.py --catalog az
 ```
 This crawls both publication trees, resolves pagination, attaches A-Z aliases,
 and writes the resulting dictionary to `src/scholar_mcp/data/govbr_az_catalog.json`.
+The script exits 1 without writing when the crawl is incomplete (any failed page, a folder cut off at the page cap, a missing alias vocabulary, or fewer than half the rows of the current file).
+
+# govbr_pcdt_catalog.json
+
+Catalog index for the Brazilian Ministry of Health PCDT (Protocolos Clínicos
+e Diretrizes Terapêuticas) letter pages.
+
+**Source:** `https://www.gov.br/saude/pt-br/assuntos/pcdt/<letter>`
+
+**Regeneration command:**
+```bash
+python scripts/update_govbr_catalogs.py --catalog pcdt
+```
+Same refusal rules as the A-Z catalog: an incomplete crawl writes nothing.
 
