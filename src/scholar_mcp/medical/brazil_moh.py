@@ -1213,7 +1213,12 @@ class BrazilMoHEngine:
         # bounds).
         chain_start = time.monotonic()
         state = _SearchState()
-        stage_error_meta = CacheMetadata(cached=False, cache_age=0, error=True)
+        # A gov.br stage that runs out of budget (or is skipped because the
+        # chain budget is spent) is a timeout in the ENAMED §2 taxonomy, not
+        # an unclassified error.
+        stage_error_meta = CacheMetadata(
+            cached=False, cache_age=0, error=True, error_kind="timeout", timeout=True
+        )
         (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
             self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
             self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),

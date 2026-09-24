@@ -3569,3 +3569,40 @@ def test_topic_gate_empties_a_covered_pool_when_one_query_term_is_absent():
         "d2",
     ]
     assert _topic_filtered(pool, "dengue manejo clinico em gestantes") == []
+
+
+@respx.mock
+async def test_govbr_stage_timeout_reports_timeout_kind(tmp_path: Path):
+    """A gov.br stage cut off by its budget is a timeout in the ENAMED §2
+    taxonomy, not an unclassified error."""
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_stage_timeout_s = 0.3
+    try:
+        async def _stalls(*args, **kwargs):
+            await asyncio.sleep(5.0)
+            return [], CacheMetadata(cached=False, cache_age=0)
+
+        engine.pcdt_engine.search = _stalls
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+        seen: dict = {}
+        real_stage = engine._stage
+
+        async def _spy(stage, coro, default, **kwargs):
+            result = await real_stage(stage, coro, default, **kwargs)
+            seen[stage] = result
+            return result
+
+        engine._stage = _spy
+
+        await engine.search_guidelines("dengue", limit=5)
+
+        _records, pcdt_meta = seen["govbr_pcdt"]
+        assert pcdt_meta.error is True
+        assert pcdt_meta.error_kind == "timeout"
+        assert pcdt_meta.timeout is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
