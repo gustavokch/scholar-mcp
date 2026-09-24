@@ -78,6 +78,7 @@ from scholar_mcp.medical.ranking import (
     PORTUGUESE_STOPWORDS,
     normalize_portuguese,
     rank_brazil_guidelines,
+    tokenize_portuguese,
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
@@ -390,6 +391,90 @@ def _usable_tokens(query: str) -> list[str]:
 
 
 MAX_TITLE_RELAXATION_STEPS = 3
+
+
+def _candidate_terms(record: BrazilGuideline) -> set[str]:
+    """The record text the topic gate matches on.
+
+    Deliberately the same fields ``rank_brazil_guidelines`` scores -- both
+    titles, the abstract, and the DeCS descriptors. Keying on the title alone
+    would drop a record that names the topic only in its body.
+    """
+    return set(
+        tokenize_portuguese(
+            " ".join(
+                [
+                    record.title or "",
+                    record.title_en or "",
+                    record.abstract or "",
+                    *(record.mesh_subjects or []),
+                ]
+            )
+        )
+    )
+
+
+def _topic_filtered(
+    records: list[BrazilGuideline], query: str
+) -> list[BrazilGuideline]:
+    """Drop fallback candidates that match no discriminating query term.
+
+    The ranker weights every query term equally (``ScoringEngine.text_coverage``
+    divides by the term count), so a clinically generic token carries as much
+    weight as the topic itself. Measured 2026-09-23: "curvas de crescimento
+    sindrome de Down" returned growth-hormone, SRAG, myelodysplastic and
+    nephrotic documents, all scoring on "sindrome" and "crescimento" alone,
+    and "dengue manejo clinico" ranked Bronquiolite and Chikungunya above the
+    actual dengue guides. The two pools' scores overlap, so a score floor
+    cannot separate them -- topic-term presence can.
+
+    Document frequency is computed over the candidate pool itself rather than
+    a static word list or corpus statistics: a term carried by most of the
+    pool discriminates nothing, whichever term it happens to be. The rarest
+    terms are the topical ones, and a candidate survives by carrying at least
+    one of them.
+
+    Rarest, not "below the median": with frequencies {dengue: 2, manejo: 4,
+    clinico: 4} the median is 4 and every term qualifies, which filters
+    nothing. The minimum isolates "dengue".
+
+    A query term absent from the whole pool has frequency zero, so it becomes
+    the sole discriminating term and cannot be satisfied, which empties the
+    pool. That is the intended reading: the fallback corpus does not cover
+    this topic, and offering its nearest lexical neighbours is worse than
+    offering nothing. It also makes the gate strict on long queries, where a
+    single incidental term that happens to be absent empties the pool -- the
+    conservative direction for a fallback.
+
+    Follow-up: document frequency is taken over the candidate pool only; real
+    IDF over the PCDT catalogue if a ~15-document pool proves too coarse.
+    """
+    # Solr operators are stripped for the same reason ``_usable_tokens``
+    # strips them before a token reaches the index: they are query syntax, not
+    # topic. Left in, they carry frequency zero against any Portuguese record,
+    # become the sole discriminating term, and empty every pool -- "dengue AND
+    # manejo" would drop the dengue guides it names.
+    terms = [t for t in tokenize_portuguese(query) if t not in _SOLR_BOOLEAN_WORDS]
+    if not records or not terms:
+        return records
+
+    per_record = [_candidate_terms(r) for r in records]
+    frequencies = {t: sum(1 for c in per_record if t in c) for t in terms}
+    lowest = min(frequencies.values())
+    highest = max(frequencies.values())
+    if highest == 0:
+        # Zero overlap anywhere: the pool is noise, not evidence.
+        return []
+    if lowest == highest:
+        # Uniform pool: nothing here discriminates, so drop nothing.
+        return records
+
+    discriminating = {t for t, f in frequencies.items() if f == lowest}
+    return [
+        record
+        for record, carried in zip(records, per_record, strict=True)
+        if carried & discriminating
+    ]
 
 
 def _title_token_relaxations(
@@ -1309,12 +1394,18 @@ class BrazilMoHEngine:
             local_records.append(r)
 
         if not records and errored_any:
-            if local_records:
+            # Standing in for a failed BVS, these rows reach the caller without
+            # the relevance-sorted Solr ordering the ranker's position prior
+            # assumes, so a lexical near-miss can top the list. Gate on topic
+            # first: an empty result is a truthful "not covered", while four
+            # unrelated syndromes read as Brazilian evidence downstream.
+            on_topic = _topic_filtered(local_records, query)
+            if on_topic:
                 # Same filter-rank-slice order as every other exit: slicing
                 # first would hand the caller fewer rows than it asked for
                 # whenever `since_year` drops a high-ranked old document.
                 ranked_local, rerank_in_local = self._finalize_records(
-                    local_records, query, since_year, clamped
+                    on_topic, query, since_year, clamped
                 )
                 local_meta = self._finalize_search(
                     _SearchOutcome(
