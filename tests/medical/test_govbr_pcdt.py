@@ -1,9 +1,15 @@
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical import govbr_pcdt
+from scholar_mcp.medical.govbr_common import (
+    CACHE_SCHEMA,
+    SEVEN_DAYS_SECONDS,
+    normalize_text,
+)
 from scholar_mcp.medical.govbr_pcdt import (
     GovBrPCDTEngine,
     load_seed_catalog,
@@ -107,34 +113,6 @@ async def test_pcdt_get_guideline_by_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_pcdt_7_day_cache_refresh(tmp_path):
-    settings = Settings()
-    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
-    mock_http = AsyncMock()
-    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
-
-    try:
-        # Pre-populate cache with an old timestamp (8 days old)
-        old_catalog = {"pcdt-old": {"record_id": "pcdt-old", "slug": "old", "title": "Old"}}
-        await cache.set("govbr_pcdt:catalog", old_catalog, source="govbr_pcdt", ttl=864000)
-
-        # Mock refresh_catalog to return updated catalog
-        fresh_catalog = {"pcdt-fresh": {"record_id": "pcdt-fresh", "slug": "fresh", "title": "Fresh"}}
-        with patch.object(engine, "refresh_catalog", AsyncMock(return_value=fresh_catalog)) as mock_refresh:
-            # Patch cache.get to report cache_age >= 7 days (604,800s)
-            with patch.object(
-                cache,
-                "get",
-                AsyncMock(return_value=(old_catalog, type("Meta", (), {"cached": True, "cache_age": 700000})())),
-            ):
-                catalog = await engine.get_catalog()
-                mock_refresh.assert_called_once()
-                assert "pcdt-fresh" in catalog
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
 async def test_search_reports_error_when_catalog_unavailable(tmp_path):
     """An empty catalog is an outage, not a zero-result search.
 
@@ -160,17 +138,71 @@ async def test_search_reports_error_when_catalog_unavailable(tmp_path):
         await cache.close()
 
 
-@pytest.mark.asyncio
-async def test_refresh_total_crawl_failure_caches_nothing(tmp_path):
-    """All letter pages fail: catalog stays empty and nothing is cached."""
+class _Resp:
+    def __init__(self, text: str = "", status_code: int = 200) -> None:
+        self.text = text
+        self.status_code = status_code
+
+
+def _letter_page(letter: str, extra: str = "") -> _Resp:
+    return _Resp(
+        '<div id="content-core">'
+        f'<a href="https://www.gov.br/saude/pt-br/assuntos/pcdt/{letter}/cond-{letter}/view">'
+        f"Condicao {letter.upper()}</a>{extra}</div>"
+    )
+
+
+def _crawl_engine(tmp_path, get):
     settings = Settings()
     cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
-    mock_http = AsyncMock()
-    mock_http.get.return_value = None
-    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
+    http = AsyncMock()
+    http.get.side_effect = get
+    return GovBrPCDTEngine(http_client=http, cache=cache, settings=settings), cache
+
+
+def _letter_of(url: str) -> str:
+    return url.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+
+
+@pytest.mark.asyncio
+async def test_refresh_total_crawl_failure_is_incomplete(tmp_path):
+    async def get(url, **kwargs):
+        return None
+
+    engine, cache = _crawl_engine(tmp_path, get)
     try:
-        catalog = await engine.refresh_catalog()
+        catalog, complete = await engine.refresh_catalog()
         assert catalog == {}
+        assert complete is False
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_partial_crawl_is_incomplete(tmp_path):
+    async def get(url, **kwargs):
+        return _letter_page("a") if _letter_of(url) == "a" else None
+
+    engine, cache = _crawl_engine(tmp_path, get)
+    try:
+        catalog, complete = await engine.refresh_catalog()
+        assert "pcdt-cond-a" in catalog
+        assert complete is False
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_full_crawl_is_complete_and_keeps_nothing(tmp_path):
+    """Offline-only: even a complete crawl is neither cached nor kept."""
+    async def get(url, **kwargs):
+        return _letter_page(_letter_of(url))
+
+    engine, cache = _crawl_engine(tmp_path, get)
+    try:
+        catalog, complete = await engine.refresh_catalog()
+        assert complete is True
+        assert len(catalog) == len(govbr_pcdt.PCDT_LETTERS)
         _, meta = await cache.get("govbr_pcdt:catalog")
         assert meta.cached is False
         assert engine._memory_catalog is None
@@ -179,34 +211,59 @@ async def test_refresh_total_crawl_failure_caches_nothing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_refresh_partial_crawl_not_cached(tmp_path):
-    """One letter page OK, the rest fail: items returned but NOT cached.
-
-    A partial crawl cached with the full 7-day TTL would pin an incomplete
-    catalog for a week whenever gov.br is flaky.
-    """
-    settings = Settings()
-    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
-    mock_http = AsyncMock()
-    ok_page = (
-        '<div id="content-core">'
-        '<a href="https://www.gov.br/saude/pt-br/assuntos/pcdt/a/acromegalia/view">Acromegalia</a>'
-        "</div>"
-    )
+async def test_refresh_failed_second_page_is_incomplete(tmp_path):
+    """One loaded page is not a loaded letter."""
+    page_two = "https://www.gov.br/saude/pt-br/assuntos/pcdt/a?b_start:int=20"
 
     async def get(url, **kwargs):
-        if "/pcdt/a" in url:
-            return type("R", (), {"status_code": 200, "text": ok_page})()
-        return None
+        if "b_start" in url:
+            return _Resp("", status_code=503)
+        letter = _letter_of(url)
+        extra = f'<a href="{page_two}">2</a>' if letter == "a" else ""
+        return _letter_page(letter, extra)
 
-    mock_http.get.side_effect = get
-    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
+    engine, cache = _crawl_engine(tmp_path, get)
     try:
-        catalog = await engine.refresh_catalog()
-        assert "pcdt-acromegalia" in catalog
-        _, meta = await cache.get("govbr_pcdt:catalog")
-        assert meta.cached is False, "partial crawl must not be cached"
-        assert engine._memory_catalog is None, "partial crawl must not become the in-memory catalog"
+        catalog, complete = await engine.refresh_catalog()
+        assert "pcdt-cond-a" in catalog
+        assert complete is False
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_shrunken_crawl_is_incomplete(tmp_path):
+    async def get(url, **kwargs):
+        return _letter_page(_letter_of(url))
+
+    engine, cache = _crawl_engine(tmp_path, get)
+    try:
+        incumbent = {f"row-{i}": {"record_id": f"row-{i}"} for i in range(100)}
+        catalog, complete = await engine.refresh_catalog(incumbent=incumbent)
+        assert catalog
+        assert complete is False
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_refresh_page_cap_is_incomplete(tmp_path, monkeypatch):
+    """An endless pagination chain stops at the cap and is incomplete."""
+    monkeypatch.setattr(govbr_pcdt, "MAX_PAGES_PER_LETTER", 2)
+    fetched: list[str] = []
+
+    async def get(url, **kwargs):
+        fetched.append(url)
+        letter = _letter_of(url)
+        start = int(url.split("=")[-1]) if "b_start" in url else 0
+        nxt = f"https://www.gov.br/saude/pt-br/assuntos/pcdt/{letter}?b_start:int={start + 20}"
+        return _letter_page(letter, f'<a href="{nxt}">next</a>')
+
+    engine, cache = _crawl_engine(tmp_path, get)
+    try:
+        _, complete = await engine.refresh_catalog()
+        assert complete is False
+        assert len(fetched) == 2 * len(govbr_pcdt.PCDT_LETTERS)
     finally:
         await cache.close()
 
@@ -396,5 +453,66 @@ async def test_pcdt_search_pre_v1_cache_row_is_not_served(tmp_path):
         assert meta.cached is False
         assert results[0].record_id == "pcdt-acromegalia"
         assert results[0].has_full_text is True
+    finally:
+        await cache.close()
+
+
+def _pcdt_engine(tmp_path):
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    return GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings), cache
+
+
+async def test_get_catalog_serves_seed_without_network_or_cache_row(tmp_path):
+    """The bundled seed is the catalog: no crawl and no SQLite copy of it."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert "pcdt-acromegalia" in catalog
+        engine.http_client.get.assert_not_awaited()
+        _, meta = await cache.get("govbr_pcdt:catalog")
+        assert meta.cached is False, "the seed must not be copied into SQLite"
+    finally:
+        await cache.close()
+
+
+async def test_get_catalog_seed_beats_a_leftover_cache_row(tmp_path):
+    """A catalog row written by an older release must not shadow the seed."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        await cache.set(
+            "govbr_pcdt:catalog",
+            {"pcdt-old": {"record_id": "pcdt-old", "slug": "old", "title": "Old"}},
+            source="govbr_pcdt",
+            ttl=SEVEN_DAYS_SECONDS,
+        )
+
+        catalog = await engine.get_catalog()
+
+        assert "pcdt-old" not in catalog
+        assert "pcdt-acromegalia" in catalog
+    finally:
+        await cache.close()
+
+
+async def test_missing_seed_is_an_outage_not_a_partial_catalog(tmp_path, monkeypatch):
+    """Extended rows alone are a partial catalog: report the outage instead."""
+    monkeypatch.setattr(govbr_pcdt, "load_seed_catalog", dict)
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert catalog == {}
+        assert engine._memory_catalog is None
+        engine.http_client.get.assert_not_awaited()
+
+        results, meta = await engine.search("acromegalia", limit=5)
+        assert results == []
+        assert meta.error is True
+        assert meta.error_kind == "backend_error"
+        key = f"govbr_pcdt_search:{CACHE_SCHEMA}:5:{normalize_text('acromegalia')}"
+        _, cache_meta = await cache.get(key)
+        assert cache_meta.cached is False
     finally:
         await cache.close()

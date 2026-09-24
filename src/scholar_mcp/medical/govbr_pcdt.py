@@ -18,8 +18,8 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
     CACHE_SCHEMA,
     GOVBR_HEADERS,
+    MIN_CATALOG_RETENTION,
     PORTUGUESE_STOPWORDS,
-    SEVEN_DAYS_SECONDS,
     derive_item_urls,
     normalize_text,
     score_item,
@@ -36,6 +36,11 @@ PCDT_LETTERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "l",
     "m", "n", "o", "p", "r", "s", "t", "u",
 )
+
+# Letter pages paginate 20 items per page; 25 pages is far above anything
+# observed and a hard stop against a pagination chain that never ends. A
+# letter cut off here with pages still queued is an incomplete crawl.
+MAX_PAGES_PER_LETTER = 25
 
 def load_seed_catalog() -> dict[str, dict[str, Any]]:
     """Load the bundled pre-scraped PCDT catalog."""
@@ -97,9 +102,8 @@ def load_extended_catalog() -> dict[str, dict[str, Any]]:
 def _merge_extended(base: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Return a NEW dict of ``base`` plus the extended corpus rows.
 
-    The cached and in-memory catalogs stay base-only: the merged result is
-    never written back to either, so a crawl refresh cannot pin extended
-    rows into the 7-day SQLite TTL.
+    The in-memory catalog stays base-only: the merged result is never
+    stored, so the seed and the extended corpus stay separate sources.
     """
     return {**base, **load_extended_catalog()}
 
@@ -234,63 +238,48 @@ class GovBrPCDTEngine:
         self._memory_catalog: dict[str, dict[str, Any]] | None = None
 
     async def get_catalog(self) -> dict[str, dict[str, Any]]:
-        """Get PCDT catalog from memory, cache, or seed fallback.
+        """Get the PCDT catalog from memory or the bundled seed.
 
-        Refreshes catalog if cached entry is older than 7 days. Every path
-        returns a NEW merged dict (base plus the extended corpus); the
-        stored base object is never mutated and the merged result is never
-        written to the cache.
+        The seed is the catalog: no search crawls gov.br, and nothing here
+        touches the network or the SQLite cache.
+        ``scripts/update_govbr_catalogs.py --catalog pcdt`` regenerates the
+        seed offline. Every path returns a NEW merged dict (base plus the
+        extended corpus); the stored base is never mutated.
+
+        A missing or empty seed returns ``{}``, without the extended corpus
+        and without being kept: extended rows alone are a partial catalog,
+        and ``search`` must report the outage instead of a success over them.
         """
         if self._memory_catalog:
             return _merge_extended(self._memory_catalog)
 
-        cache_key = "govbr_pcdt:catalog"
-        cached_data, meta = await self.cache.get(cache_key)
-        if meta.cached and isinstance(cached_data, dict) and cached_data:
-            if meta.cache_age < SEVEN_DAYS_SECONDS:
-                self._memory_catalog = cached_data
-                return _merge_extended(cached_data)
-            # Cache entry is older than 7 days. Try refresh.
-            try:
-                refreshed = await self.refresh_catalog()
-                if refreshed:
-                    return _merge_extended(refreshed)
-            except Exception as exc:
-                logger.warning("Failed to refresh PCDT catalog: %s", exc)
-            self._memory_catalog = cached_data
-            return _merge_extended(cached_data)
-
-        # Not cached in SQLite. Use bundled seed catalog on cold start.
         seed = load_seed_catalog()
-        if seed:
-            self._memory_catalog = seed
-            await self.cache.set(
-                cache_key,
-                seed,
-                source="govbr_pcdt",
-                ttl=SEVEN_DAYS_SECONDS,
-            )
-            return _merge_extended(seed)
+        if not seed:
+            logger.error("PCDT seed catalog is missing or empty; reporting an outage")
+            return {}
+        self._memory_catalog = seed
+        return _merge_extended(seed)
 
-        # If no seed, try online crawl.
-        try:
-            crawled = await self.refresh_catalog()
-            if crawled:
-                return _merge_extended(crawled)
-        except Exception as exc:
-            logger.warning("Failed initial crawl of PCDT catalog: %s", exc)
+    async def refresh_catalog(
+        self, incumbent: dict[str, dict[str, Any]] | None = None
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Crawl a fresh catalog from the gov.br portal. Offline use only.
 
-        return _merge_extended({})
+        Returns ``(catalog, complete)``. ``complete`` is True only when every
+        page of every letter loaded and the catalog holds at least
+        ``MIN_CATALOG_RETENTION`` of ``incumbent`` (a crawl that finds a
+        fraction of the known size is a parser break, not a smaller site).
 
-    async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
-        """Crawl fresh catalog from gov.br portal."""
+        Nothing is cached or kept in memory here. The server never crawls:
+        ``scripts/update_govbr_catalogs.py`` writes a complete crawl to the
+        bundled seed and refuses anything else.
+        """
         catalog: dict[str, dict[str, Any]] = {}
-        letters_ok = 0
+        complete = True
         for letter in PCDT_LETTERS:
             urls_to_visit = [f"{PCDT_BASE_URL}/{letter}"]
             visited: set[str] = set()
-            letter_ok = False
-            while urls_to_visit:
+            while urls_to_visit and len(visited) < MAX_PAGES_PER_LETTER:
                 curr_url = urls_to_visit.pop(0)
                 if curr_url in visited:
                     continue
@@ -298,31 +287,41 @@ class GovBrPCDTEngine:
                 try:
                     resp = await self.http_client.get(curr_url, headers=GOVBR_HEADERS)
                     if resp is None or resp.status_code != 200:
+                        logger.warning(
+                            "PCDT page %s answered %s",
+                            curr_url,
+                            getattr(resp, "status_code", None),
+                        )
+                        complete = False
                         continue
-                    letter_ok = True
                     items, next_urls = parse_letter_page(resp.text, letter, curr_url)
-                    catalog.update(items)
-                    for nurl in next_urls:
-                        if nurl not in visited and nurl not in urls_to_visit:
-                            urls_to_visit.append(nurl)
                 except Exception as exc:
                     logger.warning("Error crawling PCDT letter %s at %s: %s", letter, curr_url, exc)
-            if letter_ok:
-                letters_ok += 1
+                    complete = False
+                    continue
+                catalog.update(items)
+                for nurl in next_urls:
+                    if nurl not in visited and nurl not in urls_to_visit:
+                        urls_to_visit.append(nurl)
+            if urls_to_visit:
+                logger.warning(
+                    "PCDT letter %s stopped at the %d-page cap with %d pages queued",
+                    letter,
+                    MAX_PAGES_PER_LETTER,
+                    len(urls_to_visit),
+                )
+                complete = False
 
-        # Cache only a fully-crawled catalog: a partial crawl pinned with
-        # the 7-day TTL would serve an incomplete catalog for a week while
-        # gov.br is flaky. Partial results are returned for this call but
-        # leave the cached and in-memory catalogs untouched.
-        if catalog and letters_ok == len(PCDT_LETTERS):
-            self._memory_catalog = catalog
-            await self.cache.set(
-                "govbr_pcdt:catalog",
-                catalog,
-                source="govbr_pcdt",
-                ttl=SEVEN_DAYS_SECONDS,
+        size_floor = int(len(incumbent or {}) * MIN_CATALOG_RETENTION)
+        if not catalog or len(catalog) < size_floor:
+            logger.warning(
+                "PCDT crawl returned %d rows against %d already held; "
+                "incomplete (suspected parser break)",
+                len(catalog),
+                len(incumbent or {}),
             )
-        return catalog
+            complete = False
+        return catalog, complete
 
     async def search(
         self,
@@ -342,9 +341,9 @@ class GovBrPCDTEngine:
 
         catalog = await self.get_catalog()
         if not catalog:
-            # An empty catalog means the seed and extended corpus are both
-            # missing and every crawl failed: an outage, not a zero-result
-            # search. Caching it would pin a false success for
+            # An empty catalog means the bundled seed is missing or empty
+            # (the extended corpus alone is never served): an outage, not a
+            # zero-result search. Caching it would pin a false success for
             # cache_ttl_brazil_moh and hide the failure from errored_any in
             # brazil_moh.
             logger.warning("PCDT catalog is empty; reporting search error")

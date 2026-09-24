@@ -343,7 +343,16 @@ class AsyncHttpClient:
         # to keep the suite fast.
         self.min_429_wait = min_429_wait
         self.client = httpx.AsyncClient(
-            timeout=float(self.settings.request_timeout),
+            # Per-phase, not scalar: a scalar bounds connect at the full
+            # request budget, so one hopeless connect consumes the whole
+            # ceiling. Read/write/pool legitimately need request_timeout;
+            # connect gets its own (small) bound, client-wide.
+            timeout=httpx.Timeout(
+                connect=float(self.settings.connect_timeout_s),
+                read=float(self.settings.request_timeout),
+                write=float(self.settings.request_timeout),
+                pool=float(self.settings.request_timeout),
+            ),
             follow_redirects=True,
             headers={
                 "User-Agent": f"ScholarMCP/1.0.0 (mailto:{self.settings.pubmed_email or 'scholar-mcp@example.com'})"
@@ -582,9 +591,16 @@ class AsyncHttpClient:
                     )
                     return None
                 # The deadline is a ceiling, never a floor: a request_timeout
-                # shorter than the time left still wins.
-                request_kwargs["timeout"] = min(
-                    float(self.settings.request_timeout), remaining
+                # shorter than the time left still wins. Per-phase, and the
+                # connect bound is preserved rather than re-raised to the
+                # whole remaining budget -- a scalar min(request_timeout,
+                # remaining) here is what let one dead host consume a full
+                # 30 s ceiling in a single connect.
+                request_kwargs["timeout"] = httpx.Timeout(
+                    connect=min(float(self.settings.connect_timeout_s), remaining),
+                    read=min(float(self.settings.request_timeout), remaining),
+                    write=min(float(self.settings.request_timeout), remaining),
+                    pool=min(float(self.settings.request_timeout), remaining),
                 )
             # Outside the ``try``: the ``except`` below reads it to cost the
             # attempt, and a statement inserted above it inside the block would

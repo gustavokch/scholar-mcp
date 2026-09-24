@@ -14,6 +14,11 @@ from bs4 import BeautifulSoup
 
 SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60  # 604,800 seconds
 
+# A crawl that returns less than this fraction of the catalog already in
+# hand is treated as a parser break, not as a smaller site, and is never
+# accepted as complete.
+MIN_CATALOG_RETENTION = 0.5
+
 GOVBR_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

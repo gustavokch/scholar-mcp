@@ -31,6 +31,15 @@ class Settings:
     prefer_scihub_over_unpaywall: bool = False
     scihub_mirrors: list[str] = field(default_factory=lambda: list(DEFAULT_SCIHUB_MIRRORS))
     request_timeout: int = 30
+    # Connect-phase bound, applied client-wide. A connect is a handshake
+    # carrying no payload: measured healthy hosts complete one in 0.01-0.18 s,
+    # so a host that will not accept a socket within seconds is, against a
+    # 30 s budget, equivalent to unreachable -- and the retry ladder can still
+    # retry it, which lowering request_timeout would not allow. Without this,
+    # one hopeless connect consumes the whole request budget (measured: a dead
+    # INCA host burned 30 s of a 30 s full-text ceiling in a single connect).
+    # Read/write/pool keep request_timeout.
+    connect_timeout_s: float = 5.0
     total_budget_seconds: int = 45
     max_concurrency: int = 5
     cache_size: int = 500
@@ -129,6 +138,14 @@ class Settings:
     # different budgets, and the 45 s browser tier must never be served
     # into a 20 s blanket and read as a backend failure.
     brazil_fulltext_timeout_s: float = 30.0
+    # Byte cap on a fetched PDF before it is handed to pypdf. The parse runs
+    # in a thread (see AGENTS.md §1): an abandoned thread keeps burning CPU
+    # until the parser returns, and this cap is the only bound on that cost.
+    # Default measured 2026-09-24 against the bundled catalogs: the largest
+    # real document is 30.5 MB (AZ catalog), PCDT tops out at 8.2 MB. The cap
+    # must admit every document the corpus contains, so it cannot silently
+    # regress a fetch that works today. <= 0 disables.
+    brazil_pdf_max_bytes: int = 40_000_000
     enable_medical_tools: bool = True
 
     @property
@@ -212,6 +229,7 @@ class Settings:
             ),
             scihub_mirrors=mirrors,
             request_timeout=_int_env("SCHOLAR_REQUEST_TIMEOUT", 30),
+            connect_timeout_s=_float_env("CONNECT_TIMEOUT_S", 5.0),
             total_budget_seconds=_int_env("SCHOLAR_TOTAL_BUDGET", 45),
             max_concurrency=_int_env("SCHOLAR_MAX_CONCURRENCY", 5),
             cache_size=_int_env("SCHOLAR_CACHE_SIZE", 500),
@@ -265,6 +283,7 @@ class Settings:
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 45.0),
             brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),
+            brazil_pdf_max_bytes=_int_env("BRAZIL_PDF_MAX_BYTES", 40_000_000),
             enable_browser_fallback=_bool(
                 os.getenv("ENABLE_BROWSER_FALLBACK")
                 or os.getenv("ENABLE_PLAYWRIGHT_FALLBACK"),

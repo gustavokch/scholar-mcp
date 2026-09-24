@@ -590,12 +590,11 @@ async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path:
         # error_kind still carries the real PDF-fetch failure so machine
         # consumers see the degradation, even though error itself is False.
         assert meta.error_kind == "backend_error"
-        # Degraded but reachable: cached briefly, never for the 30-day TTL.
+        # A partial retrieval is never cached: the second call re-fetches and
+        # reports the same degradation from its own attempt.
         payload2, meta2 = await engine.get_full_text("biblio-pdf-fail")
-        assert meta2.cached is True
+        assert meta2.cached is False
         assert payload2["content_type"] == "abstract"
-        # The degradation travels with the cached row, so the second caller
-        # reads the same kind as the first (see the cache-hit test below).
         assert meta2.error_kind == "backend_error"
     finally:
         await cache.close()
@@ -603,13 +602,11 @@ async def test_fulltext_pdf_failure_with_abstract_is_success_not_error(tmp_path:
 
 
 @respx.mock
-async def test_fulltext_cache_hit_keeps_degraded_error_kind(tmp_path: Path):
-    """A hit inside the degraded TTL reports the kind the first caller saw.
+async def test_fulltext_degraded_result_is_refetched_not_cached(tmp_path: Path):
+    """An abstract served after a failed PDF fetch is a partial retrieval.
 
-    The degraded payload is held for 300 s. If the kind does not travel with
-    the row, only the first request in that window reports ``degraded``, and a
-    machine consumer polling behind it cannot tell "not degraded" from
-    "degraded, but you asked second".
+    Nothing is written, so a second request tries the PDF again and reports
+    the kind its own attempt saw.
     """
     engine, cache, http_client = await _engine(tmp_path)
     try:
@@ -617,20 +614,20 @@ async def test_fulltext_cache_hit_keeps_degraded_error_kind(tmp_path: Path):
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(200, json=_bvs_response([doc]))
         )
-        respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
+        pdf_route = respx.get(url__startswith="https://fi-admin.bvsalud.org").mock(
             return_value=httpx.Response(503, text="Erro 503 - Service Unavailable")
         )
         payload, meta = await engine.get_full_text("biblio-outage-abs")
         assert payload["content_type"] == "abstract"
         assert meta.cached is False
         assert meta.error_kind == "origin_outage"
+        attempts_after_first = pdf_route.call_count
 
         payload2, meta2 = await engine.get_full_text("biblio-outage-abs")
-        assert meta2.cached is True
+        assert meta2.cached is False
         assert payload2["content_type"] == "abstract"
         assert meta2.error_kind == "origin_outage"
-        # The stored kind is an internal field of the cached row, never a key
-        # the tool hands back.
+        assert pdf_route.call_count > attempts_after_first, "the PDF was not retried"
         assert "_error_kind" not in payload
         assert "_error_kind" not in payload2
     finally:
