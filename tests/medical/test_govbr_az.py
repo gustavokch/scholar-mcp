@@ -135,6 +135,17 @@ SVSA = "/saude/pt-br/centrais-de-conteudo/publicacoes/svsa"
 GUIAS = "/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais"
 
 
+async def _prime(engine):
+    """Install a crawled fixture catalog as the in-memory catalog.
+
+    refresh_catalog is offline-only and never sets it; search tests need a
+    catalog built from the fixture pages, not the bundled seed.
+    """
+    catalog, complete = await engine.refresh_catalog()
+    assert complete
+    engine._memory_catalog = catalog
+
+
 @pytest.fixture
 def responses():
     return {
@@ -165,8 +176,9 @@ def responses():
 async def test_refresh_catalog_indexes_both_trees(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        catalog = await engine.refresh_catalog()
+        catalog, complete = await engine.refresh_catalog()
 
+        assert complete is True
         assert "govbr-svsa-dengue-dengue-manejo-clinico" in catalog
         assert "govbr-svsa-tuberculose-manual-tuberculose" in catalog
         assert "govbr-guias-2024-guia-vigilancia" in catalog
@@ -181,39 +193,40 @@ async def test_refresh_catalog_indexes_both_trees(tmp_path, responses):
         await engine.cache.close()
 
 
-async def test_refresh_catalog_caches_full_crawl(tmp_path, responses):
+async def test_refresh_catalog_caches_and_keeps_nothing(tmp_path, responses):
+    """Offline-only: even a complete crawl is neither cached nor kept."""
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
-        cached, meta = await engine.cache.get("govbr_az:catalog")
-        assert meta.cached is True
-        assert "govbr-svsa-dengue-dengue-manejo-clinico" in cached
+        _, complete = await engine.refresh_catalog()
+
+        assert complete is True
+        _, meta = await engine.cache.get("govbr_az:catalog")
+        assert meta.cached is False
+        assert engine._memory_catalog is None
     finally:
         await engine.cache.close()
 
 
-async def test_refresh_catalog_does_not_cache_partial_crawl(tmp_path, responses):
+async def test_refresh_catalog_failed_folder_is_incomplete(tmp_path, responses):
     responses[f"https://www.gov.br{SVSA}/tuberculose"] = FakeResponse("", status_code=503)
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        catalog = await engine.refresh_catalog()
+        catalog, complete = await engine.refresh_catalog()
 
         assert "govbr-svsa-dengue-dengue-manejo-clinico" in catalog
-        _, meta = await engine.cache.get("govbr_az:catalog")
-        assert meta.cached is False
+        assert complete is False
     finally:
         await engine.cache.close()
 
 
-async def test_refresh_catalog_skips_login_gated_folders(tmp_path, responses):
+async def test_refresh_catalog_login_gated_folder_is_incomplete(tmp_path, responses):
     responses[f"https://www.gov.br{SVSA}/tuberculose"] = FakeResponse(LOGIN_GATE)
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        catalog = await engine.refresh_catalog()
+        catalog, complete = await engine.refresh_catalog()
 
         assert not any(key.startswith("govbr-svsa-tuberculose") for key in catalog)
-        _, meta = await engine.cache.get("govbr_az:catalog")
-        assert meta.cached is False
+        assert complete is False
     finally:
         await engine.cache.close()
 
@@ -228,8 +241,9 @@ async def test_refresh_catalog_follows_pagination_once_per_url(tmp_path, respons
     )
     engine, http = _make_engine(tmp_path, responses)
     try:
-        catalog = await engine.refresh_catalog()
+        catalog, complete = await engine.refresh_catalog()
 
+        assert complete is True
         assert "govbr-svsa-dengue-dengue-boletim" in catalog
         urls = [call.args[0] for call in http.get.await_args_list]
         assert len(urls) == len(set(urls))
@@ -240,7 +254,7 @@ async def test_refresh_catalog_follows_pagination_once_per_url(tmp_path, respons
 async def test_search_ranks_exact_topic_match_first(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         results, meta = await engine.search("tuberculose", limit=5)
 
         assert meta.error is False
@@ -259,7 +273,7 @@ async def test_search_ranks_exact_topic_match_first(tmp_path, responses):
 async def test_search_returns_empty_for_blank_query(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         results, meta = await engine.search("   ", limit=5)
         assert results == []
         assert meta.error is False
@@ -270,7 +284,7 @@ async def test_search_returns_empty_for_blank_query(tmp_path, responses):
 async def test_search_respects_limit(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         results, _ = await engine.search("dengue", limit=1)
         assert len(results) == 1
     finally:
@@ -280,7 +294,7 @@ async def test_search_respects_limit(tmp_path, responses):
 async def test_search_uses_cache_on_second_call(tmp_path, responses):
     engine, http = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         await engine.search("dengue", limit=5)
         calls_after_first = http.get.await_count
         results, meta = await engine.search("dengue", limit=5)
@@ -294,7 +308,7 @@ async def test_search_uses_cache_on_second_call(tmp_path, responses):
 async def test_get_guideline_by_record_id(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         record = await engine.get_guideline("govbr-svsa-dengue-dengue-manejo-clinico")
         assert record is not None
         assert record.title.startswith("Dengue")
@@ -305,7 +319,7 @@ async def test_get_guideline_by_record_id(tmp_path, responses):
 async def test_get_guideline_by_slug(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         record = await engine.get_guideline("dengue-manejo-clinico")
         assert record is not None
         assert record.record_id == "govbr-svsa-dengue-dengue-manejo-clinico"
@@ -316,7 +330,7 @@ async def test_get_guideline_by_slug(tmp_path, responses):
 async def test_get_guideline_unknown_returns_none(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         assert await engine.get_guideline("nao-existe") is None
     finally:
         await engine.cache.close()
@@ -325,7 +339,7 @@ async def test_get_guideline_unknown_returns_none(tmp_path, responses):
 async def test_guias_records_carry_year(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         record = await engine.get_guideline("govbr-guias-2024-guia-vigilancia")
         assert record is not None
         assert record.year == "2024"
@@ -388,35 +402,29 @@ async def test_search_reports_error_when_catalog_unavailable(tmp_path, responses
         await engine.cache.close()
 
 
-async def test_refresh_catalog_refuses_to_pin_a_shrunken_crawl(tmp_path, responses):
-    """A parser break must not overwrite a good catalog for seven days.
-
-    Every folder answers 200, so folders_ok == folders_total and the old
-    guard would have pinned the result; only the row count reveals that the
-    listing parser stopped matching.
-    """
+async def test_refresh_catalog_refuses_a_shrunken_crawl(tmp_path, responses):
+    """A parser break is not a smaller site: a crawl below the retention
+    floor of the incumbent is incomplete even when every page answered."""
     engine, _ = _make_engine(tmp_path, responses)
     try:
         incumbent = {f"row-{i}": {"record_id": f"row-{i}"} for i in range(100)}
 
-        catalog = await engine.refresh_catalog(incumbent=incumbent)
+        catalog, complete = await engine.refresh_catalog(incumbent=incumbent)
 
-        assert catalog, "the crawl is still returned to this caller"
-        _, meta = await engine.cache.get("govbr_az:catalog")
-        assert meta.cached is False
+        assert catalog, "the crawl is still returned to the caller"
+        assert complete is False
     finally:
         await engine.cache.close()
 
 
-async def test_refresh_catalog_pins_a_crawl_that_holds_its_size(tmp_path, responses):
+async def test_refresh_catalog_accepts_a_crawl_that_holds_its_size(tmp_path, responses):
     engine, _ = _make_engine(tmp_path, responses)
     try:
         incumbent = {"row-0": {"record_id": "row-0"}, "row-1": {"record_id": "row-1"}}
 
-        await engine.refresh_catalog(incumbent=incumbent)
+        _, complete = await engine.refresh_catalog(incumbent=incumbent)
 
-        _, meta = await engine.cache.get("govbr_az:catalog")
-        assert meta.cached is True
+        assert complete is True
     finally:
         await engine.cache.close()
 
@@ -463,7 +471,7 @@ async def test_az_search_pre_v1_cache_row_is_not_served(tmp_path, responses):
     ``has_full_text`` and must not be served as current."""
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        await engine.refresh_catalog()
+        await _prime(engine)
         stale_row = [
             {
                 "title": "Manual Tuberculose",
@@ -535,5 +543,71 @@ async def test_missing_seed_is_an_outage_and_is_not_kept(tmp_path, responses, mo
         key = f"govbr_az_search:{CACHE_SCHEMA}:5:dengue"
         _, cache_meta = await engine.cache.get(key)
         assert cache_meta.cached is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_failed_second_page_is_incomplete(tmp_path, responses):
+    """One loaded page is not a loaded folder."""
+    folder = f"https://www.gov.br{SVSA}/dengue"
+    responses[f"{folder}?b_start:int=20"] = FakeResponse("", status_code=503)
+    responses[folder] = FakeResponse(
+        _listing("dengue-manejo-clinico", "Dengue: manejo", f"{SVSA}/dengue")
+        + f'<a href="{folder}?b_start:int=20">2</a>'
+    )
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        catalog, complete = await engine.refresh_catalog()
+
+        assert "govbr-svsa-dengue-dengue-manejo-clinico" in catalog
+        assert complete is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_page_cap_is_incomplete(tmp_path, responses, monkeypatch):
+    """A folder cut off by MAX_PAGES_PER_FOLDER with pages still queued is
+    a truncated folder, not a complete one."""
+    monkeypatch.setattr(govbr_az, "MAX_PAGES_PER_FOLDER", 2)
+    folder = f"https://www.gov.br{SVSA}/dengue"
+    pages = [folder] + [f"{folder}?b_start:int={20 * i}" for i in range(1, 4)]
+    for i, url in enumerate(pages[:-1]):
+        responses[url] = FakeResponse(
+            _listing(f"dengue-{i}", f"Dengue parte {i}", f"{SVSA}/dengue")
+            + f'<a href="{pages[i + 1]}">{i + 2}</a>'
+        )
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        _, complete = await engine.refresh_catalog()
+
+        assert complete is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_failed_alias_index_is_incomplete(tmp_path, responses):
+    """Rows crawled without the alias vocabulary lose their alias text."""
+    responses["https://www.gov.br/saude/pt-br/assuntos/saude-de-a-a-z"] = FakeResponse(
+        "", status_code=503
+    )
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        catalog, complete = await engine.refresh_catalog()
+
+        assert catalog
+        assert complete is False
+    finally:
+        await engine.cache.close()
+
+
+async def test_refresh_catalog_failed_alias_letter_is_incomplete(tmp_path, responses):
+    responses["https://www.gov.br/saude/pt-br/assuntos/saude-de-a-a-z/t"] = FakeResponse(
+        "", status_code=503
+    )
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        _, complete = await engine.refresh_catalog()
+
+        assert complete is False
     finally:
         await engine.cache.close()

@@ -22,7 +22,7 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (
     CACHE_SCHEMA,
     GOVBR_HEADERS,
-    SEVEN_DAYS_SECONDS,
+    MIN_CATALOG_RETENTION,
     is_login_redirect,
     normalize_text,
     parse_folder_index,
@@ -44,18 +44,11 @@ SVSA_PATH = "/saude/pt-br/centrais-de-conteudo/publicacoes/svsa"
 GUIAS_PATH = "/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais"
 SVSA_URL = f"{GOVBR_ROOT}{SVSA_PATH}"
 GUIAS_URL = f"{GOVBR_ROOT}{GUIAS_PATH}"
-CATALOG_CACHE_KEY = "govbr_az:catalog"
 
 # Folders paginate 20 items per page. 25 pages is ~500 documents per
 # folder: far above anything observed, and a hard stop against a
 # pagination loop pointing back into itself.
 MAX_PAGES_PER_FOLDER = 25
-
-# A refreshed crawl that returns less than this fraction of the catalog
-# already in hand is treated as a parser break, not as a smaller site, and
-# is never pinned for the 7-day TTL. scripts/update_govbr_az_catalog.py
-# applies the same idea with an absolute floor for the bundled seed.
-MIN_CATALOG_RETENTION = 0.5
 
 _TREES = (("svsa", SVSA_URL, SVSA_PATH), ("guias", GUIAS_URL, GUIAS_PATH))
 
@@ -232,18 +225,27 @@ class GovBrAZEngine:
             return None
         return resp.text
 
-    async def _load_aliases(self) -> dict[str, str]:
-        """Build the disease alias vocabulary from the A-Z index."""
+    async def _load_aliases(self) -> tuple[dict[str, str], bool]:
+        """Build the disease alias vocabulary from the A-Z index.
+
+        Returns ``(aliases, ok)``. ``ok`` is False when the index or any
+        letter page failed, or the index listed no letters: rows crawled
+        without the full vocabulary lose alias text, which is a partial
+        catalog.
+        """
         index_html = await self._fetch_html(AZ_INDEX_URL)
         if not index_html:
-            return {}
+            return {}, False
+        letter_urls = parse_az_index(index_html)
+        ok = bool(letter_urls)
         aliases: dict[str, str] = {}
-        for letter_url in parse_az_index(index_html):
+        for letter_url in letter_urls:
             letter_html = await self._fetch_html(letter_url)
             if not letter_html:
+                ok = False
                 continue
             aliases.update(parse_az_letter_page(letter_html))
-        return aliases
+        return aliases, ok
 
     async def _crawl_folder(
         self,
@@ -251,12 +253,16 @@ class GovBrAZEngine:
         folder_url: str,
         patterns: list[tuple[str, re.Pattern[str], str, re.Pattern[str] | None]],
     ) -> tuple[dict[str, dict[str, Any]], bool]:
-        """Crawl one folder with pagination. Returns (rows, ok)."""
+        """Crawl one folder with pagination. Returns (rows, ok).
+
+        ``ok`` means every visited page loaded and no page was left queued
+        at the page cap. One loaded page is not a loaded folder.
+        """
         topic = folder_url.rstrip("/").rsplit("/", 1)[-1]
         rows: dict[str, dict[str, Any]] = {}
         queue = [folder_url]
         visited: set[str] = set()
-        ok = False
+        failed = False
 
         while queue and len(visited) < MAX_PAGES_PER_FOLDER:
             url = queue.pop(0)
@@ -265,8 +271,8 @@ class GovBrAZEngine:
             visited.add(url)
             html = await self._fetch_html(url)
             if html is None:
+                failed = True
                 continue
-            ok = True
             items, next_urls = parse_listing_page(html, url)
             for item in items:
                 record_id = f"govbr-{tree}-{topic}-{item['slug']}"
@@ -288,67 +294,62 @@ class GovBrAZEngine:
                 if nurl not in visited and nurl not in queue:
                     queue.append(nurl)
 
-        return rows, ok
+        if queue:
+            logger.warning(
+                "gov.br A-Z folder %s stopped at the %d-page cap with %d pages queued",
+                folder_url,
+                MAX_PAGES_PER_FOLDER,
+                len(queue),
+            )
+        return rows, not failed and not queue
 
     async def refresh_catalog(
         self, incumbent: dict[str, dict[str, Any]] | None = None
-    ) -> dict[str, dict[str, Any]]:
-        """Crawl both publication trees from gov.br.
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Crawl both publication trees from gov.br. Offline use only.
 
-        ``incumbent`` is the catalog already in hand, if any. It is used only
-        as a size reference: a crawl that returns a fraction of it is a
-        parser break rather than a smaller site, and must not be pinned.
+        Returns ``(catalog, complete)``. ``complete`` is True only when the
+        alias vocabulary, both tree indexes, and every page of every folder
+        loaded, no folder stopped at the page cap, and the catalog holds at
+        least ``MIN_CATALOG_RETENTION`` of ``incumbent`` (a crawl that finds
+        a fraction of the known size is a parser break, not a smaller site).
+
+        Nothing is cached or kept in memory here. The server never crawls:
+        ``scripts/update_govbr_catalogs.py`` writes a complete crawl to the
+        bundled seed and refuses anything else.
         """
+        aliases, complete = await self._load_aliases()
+        if not complete:
+            logger.warning("gov.br A-Z alias vocabulary is incomplete")
         # Compiled once here and reused for every item in every folder.
-        patterns = compile_alias_patterns(await self._load_aliases())
+        patterns = compile_alias_patterns(aliases)
         catalog: dict[str, dict[str, Any]] = {}
-        folders_total = 0
-        folders_ok = 0
 
         for tree, tree_url, tree_path in _TREES:
             index_html = await self._fetch_html(tree_url)
             if index_html is None:
                 logger.warning("gov.br A-Z tree index unavailable: %s", tree_url)
-                folders_total += 1  # a missing index is a failed unit of work
+                complete = False
                 continue
             folder_urls = parse_folder_index(index_html, tree_url, tree_path)
+            if not folder_urls:
+                logger.warning("gov.br A-Z tree index lists no folders: %s", tree_url)
+                complete = False
             for folder_url in folder_urls:
-                folders_total += 1
                 rows, ok = await self._crawl_folder(tree, folder_url, patterns)
                 catalog.update(rows)
-                if ok:
-                    folders_ok += 1
+                complete = complete and ok
 
-        # Cache only a fully-crawled catalog: a partial crawl pinned with
-        # the 7-day TTL would serve an incomplete catalog for a week while
-        # gov.br is flaky. Partial results are returned for this call but
-        # leave the cached and in-memory catalogs untouched.
-        #
-        # Folder-level success is not enough on its own: a DOM change makes
-        # every folder answer 200 while the listing parser matches nothing,
-        # which would otherwise pin a near-empty catalog over a good one.
         size_floor = int(len(incumbent or {}) * MIN_CATALOG_RETENTION)
-        if (
-            catalog
-            and len(catalog) >= size_floor
-            and folders_total > 0
-            and folders_ok == folders_total
-        ):
-            self._memory_catalog = catalog
-            await self.cache.set(
-                CATALOG_CACHE_KEY,
-                catalog,
-                source="govbr_az",
-                ttl=SEVEN_DAYS_SECONDS,
-            )
-        elif catalog and len(catalog) < size_floor:
+        if not catalog or len(catalog) < size_floor:
             logger.warning(
                 "gov.br A-Z crawl returned %d rows against %d already held; "
-                "not caching (suspected parser break)",
+                "incomplete (suspected parser break)",
                 len(catalog),
                 len(incumbent or {}),
             )
-        return catalog
+            complete = False
+        return catalog, complete
 
     async def get_catalog(self) -> dict[str, dict[str, Any]]:
         """Get the catalog from memory or the bundled seed.
