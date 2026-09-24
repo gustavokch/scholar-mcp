@@ -281,3 +281,64 @@ async def test_no_request_is_issued_when_the_limiter_parks_past_the_deadline():
     finally:
         await client.aclose()
         AsyncHttpClient.reset_dead_hosts()
+
+
+async def test_client_default_timeout_bounds_connect_not_read():
+    """D9 client-wide: connect gets ``connect_timeout_s``; the phases that
+    legitimately need the full ``request_timeout`` -- read, write, pool --
+    keep it. A 30 s connect is never the desired behaviour anywhere; the
+    read phase is untouched either way."""
+    client = AsyncHttpClient(settings=Settings(request_timeout=30))
+    try:
+        timeout = client.client.timeout
+        assert timeout.connect == 5.0  # settings.connect_timeout_s default
+        assert timeout.read == 30.0
+        assert timeout.write == 30.0
+        assert timeout.pool == 30.0
+    finally:
+        await client.aclose()
+
+
+async def test_deadline_clamp_preserves_the_connect_bound():
+    """The clamp must not re-raise connect to ``min(request_timeout, remaining)``.
+
+    A scalar per-attempt timeout bounds connect at the whole remaining budget,
+    so one hopeless connect consumes the entire ceiling -- the exact failure
+    D9 exists to stop (a dead INCA host burned 30 s of a 30 s budget in one
+    connect). Read keeps the budget-clamped value; connect keeps its own bound.
+    """
+    client, calls = _client(_always_503, request_timeout=30, max_retries=1)
+    try:
+        await client.get(
+            "https://example.org/degraded", deadline=time.monotonic() + 20.0
+        )
+        installed = calls["timeouts"][0]
+        assert installed["connect"] <= 5.0
+        assert 19.0 < installed["read"] <= 20.0
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()
+
+
+async def test_ladder_retries_after_a_connect_failure():
+    """The point of bounding connect rather than lowering the ceiling: a
+    transient connect failure is still retried when the budget allows."""
+    attempts = {"count": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise httpx.ConnectTimeout("Connection timed out")
+        return httpx.Response(200, text="ok")
+
+    client, calls = _client(flaky, max_retries=4, backoff_base=0.01)
+    try:
+        resp = await client.get(
+            "https://example.org/flaky", deadline=time.monotonic() + 30.0
+        )
+        assert resp is not None
+        assert resp.status_code == 200
+        assert calls["count"] == 3
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()

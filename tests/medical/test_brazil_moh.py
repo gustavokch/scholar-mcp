@@ -1074,9 +1074,10 @@ async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Pa
         assert payload["content_type"] == "abstract"
         # The abstract fallback is a success (error=False) whose error_kind
         # carries the real PDF failure. It is a partial retrieval, so it is
-        # never cached.
+        # never cached. D9b: a connect failure means the origin is not
+        # serving -- an outage, not a timeout.
         assert meta.error is False
-        assert meta.error_kind == "timeout"
+        assert meta.error_kind == "origin_outage"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
         assert cache_meta.cached is False
     finally:

@@ -697,6 +697,12 @@ if settings.enable_medical_tools:
                 passages within max_chars, with their offsets in `passages`.
             offset: Character offset for paging through a long body
                 (body[offset:offset+max_chars]); ignored when query is given.
+
+        The payload also carries two attribution fields: `abstract_fallback`
+        (True when the abstract was served because the PDF could not be
+        retrieved) and `timeout_phase` ("lookup" or "fetch" when the call
+        failed, naming the phase the failure is attributed to; None on a
+        clean result).
         """
         try:
             payload, meta = await brazil_moh_engine.get_full_text(

@@ -170,9 +170,15 @@ _BVS_OUTAGE_MARKERS = (
 # were returned; "successful_empty" means the endpoint answered cleanly and
 # there is genuinely nothing matching (not a failure). "cdn_challenge" is a
 # Bunny/CDN shield 403 or block-HTML page (retryable once via the browser
-# path); "origin_outage" is a 5xx or origin error page (no retry, no breaker
-# count, never cached); "timeout" is a stage/chain/transport timeout;
-# "backend_error" is anything else.
+# path); "origin_outage" is a 5xx, an origin error page, or an unreachable
+# host -- connect failures included (the origin is not serving; no retry, no
+# breaker count, never cached); "timeout" is a stage/chain/transport
+# timeout; "backend_error" is anything else.
+
+# ``FetchFailure.detail`` values that mean the connect phase failed. A
+# ``ReadTimeout`` is a slow origin; a ``ConnectTimeout``/``ConnectError`` is
+# an origin that is not there -- classified as ``origin_outage`` above.
+_CONNECT_FAILURE_DETAILS = frozenset({"ConnectTimeout", "ConnectError"})
 
 # Raised abstract cap (S2.1): shaped hits must carry a decidable body, and
 # the old downstream previews truncated well below what the source provides.
@@ -707,8 +713,16 @@ def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _classify_failure(failure: Any) -> BvsErrorKind:
     """Map an ``AsyncHttpClient`` failure onto a ``BvsErrorKind``.
 
-    403 -> cdn_challenge, 5xx -> origin_outage, transport-kind failures ->
-    timeout, anything else -> backend_error.
+    403 -> cdn_challenge, 5xx -> origin_outage, connect-phase transport
+    failures -> origin_outage, other transport-kind failures -> timeout,
+    anything else -> backend_error.
+
+    Connect failures are outages, not timeouts: the origin is not serving,
+    which is the taxonomy's own meaning of ``origin_outage`` and what the
+    search stages already do with 5xx. Concretely, ``origin_outage`` is the
+    one kind exempted from breaker counting, so a dead third-party document
+    host stops being charged against the BVS breaker. The distinction is
+    free: ``FetchFailure.detail`` already names the exception class.
     """
     status = getattr(failure, "status", None)
     if status == 403:
@@ -716,8 +730,20 @@ def _classify_failure(failure: Any) -> BvsErrorKind:
     if status is not None and 500 <= status < 600:
         return "origin_outage"
     if getattr(failure, "kind", "") == "transport":
+        if getattr(failure, "detail", "") in _CONNECT_FAILURE_DETAILS:
+            return "origin_outage"
         return "timeout"
     return "backend_error"
+
+
+def _failure_detail(http_client: Any) -> str | None:
+    """Exception class name from the client's last failure, when one exists.
+
+    ``None`` means the call opened no socket (e.g. the budget was already
+    spent), which is itself the useful fact in a timeout log line.
+    """
+    failure = getattr(http_client, "last_failure", None)
+    return getattr(failure, "detail", None)
 
 
 class BrazilMoHEngine:
@@ -1504,6 +1530,19 @@ class BrazilMoHEngine:
                 [record.to_dict() for record in merged_records],
                 source="brazil_moh",
             )
+            # Per-id record rows for the full-text open path. A cold
+            # ``get_full_text`` otherwise re-pays a live Solr ``id:"..."``
+            # lookup -- cheap on a healthy host (0.2 s measured) but up to
+            # nearly the whole stage ceiling inside a degraded BVS window.
+            # Each row is individually complete, so it gets the standard TTL
+            # rather than the degraded short TTL the search row may carry.
+            for record in merged_records:
+                if record.record_id:
+                    await self.cache.set(
+                        f"brazil_moh_record:{CACHE_SCHEMA}:{record.record_id}",
+                        record.to_dict(),
+                        source="brazil_moh",
+                    )
         done_meta = self._finalize_search(
             _SearchOutcome(
                 cached=False,
@@ -1732,10 +1771,27 @@ class BrazilMoHEngine:
                 "brazil_moh full text is not a PDF (content-type=%r)", content_type
             )
             return "", "backend_error"
+        # Byte cap before the parser: the parse runs in a thread, so a caller
+        # that gives up on the deadline cannot stop it -- an abandoned thread
+        # keeps burning CPU until pypdf returns. The cap is the only bound on
+        # that cost. Measured default admits every document in the bundled
+        # corpora (largest real document: 30.5 MB, AZ catalog).
+        max_bytes = int(self.settings.brazil_pdf_max_bytes)
+        if max_bytes > 0 and len(resp.content) > max_bytes:
+            logger.info(
+                "brazil_moh full text PDF exceeds the byte cap (%d > %d bytes)",
+                len(resp.content),
+                max_bytes,
+            )
+            return "", "backend_error"
         try:
             # Unbounded here: the ceiling is applied at cache/serve time so
-            # the pre-truncation length survives as ``total_chars``.
-            return pdf_bytes_to_text(resp.content), None
+            # the pre-truncation length survives as ``total_chars``. In a
+            # thread because pypdf is synchronous CPU-bound work: inline it
+            # stalls every in-flight call on the loop, and the caller's
+            # ``wait_for`` ceiling cannot interrupt it (AGENTS.md §1).
+            text = await asyncio.to_thread(pdf_bytes_to_text, resp.content)
+            return text, None
         except Exception as exc:
             logger.warning("brazil_moh PDF extraction failed: %s", exc)
             return "", "backend_error"
@@ -1820,13 +1876,25 @@ class BrazilMoHEngine:
         ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
         explicit flag, never a silent substitution (S2.4) -- exactly as a
         failed PDF fetch is.
+
+        Every payload carries ``timeout_phase``: ``"lookup"`` or ``"fetch"``
+        naming the phase the failure is attributed to -- whether the ceiling
+        landed there or the phase failed fast with a classified error --
+        and ``None`` on a clean result. Additive attribution, not a taxonomy
+        value: ``error_kind`` still classifies the failure itself.
         """
         normalized = (record_id or "").strip()
+        # ``timeout_phase`` is additive attribution, never a new taxonomy
+        # value: "lookup" or "fetch" naming the phase a failure is attributed
+        # to, None on every clean exit. Mutated on ``base`` below so every
+        # exit path that spreads it carries the phase without threading a
+        # local through each return.
         base = {
             "source": "brazil-moh",
             "record_id": normalized,
             "document_url": "",
             "truncated": False,
+            "timeout_phase": None,
         }
         if not normalized:
             return (
@@ -1845,6 +1913,9 @@ class BrazilMoHEngine:
             payload.setdefault(
                 "abstract_fallback", payload.get("content_type") == "abstract"
             )
+            # Rows written before ``timeout_phase`` existed lack the key;
+            # only clean results are cached, so a hit is None by construction.
+            payload.setdefault("timeout_phase", None)
             # Only clean results are written, so a hit is "ok" by
             # construction; a partial retrieval never reaches the cache.
             return payload, CacheMetadata(
@@ -1887,6 +1958,15 @@ class BrazilMoHEngine:
                 record = await self.az_engine.get_guideline(normalized)
             if record is not None:
                 return record, False, {}, None
+            # A record row written at search time answers the open without a
+            # live Solr id:"..." query. No CACHE_SCHEMA bump: this is a new
+            # key prefix, and from_dict fills absent fields, so rows written
+            # by any release revive cleanly.
+            cached_record, record_meta = await self.cache.get(
+                f"brazil_moh_record:{CACHE_SCHEMA}:{normalized}"
+            )
+            if record_meta.cached and cached_record is not None:
+                return BrazilGuideline.from_dict(cached_record), False, {}, None
             record, error_kind = await self._lookup_record(
                 normalized, deadline=deadline
             )
@@ -1896,7 +1976,7 @@ class BrazilMoHEngine:
                     True,
                     {**base, "status": "error", "error": "bvs request failed",
                      "title": "", "content_type": "none", "content": "",
-                     "abstract_fallback": False},
+                     "abstract_fallback": False, "timeout_phase": "lookup"},
                     CacheMetadata(
                         cached=False, cache_age=0, error=True,
                         error_kind=error_kind or "backend_error",
@@ -1924,14 +2004,20 @@ class BrazilMoHEngine:
             else:
                 record, errored, early_payload, early_meta = await _resolve()
         except (asyncio.TimeoutError, TimeoutError):
+            base["timeout_phase"] = "lookup"
             logger.warning(
-                "brazil_moh full text lookup for %r exceeded its %.1fs budget",
+                "brazil_moh full text lookup for %r exceeded its %.1fs budget "
+                "(phase=lookup, elapsed=%.1fs, detail=%s)",
                 normalized,
                 ceiling,
+                time.monotonic() - budget_start,
+                _failure_detail(self.http_client),
             )
             return _timeout_result("")
         if early_meta is not None:
             return early_payload, early_meta
+
+        lookup_elapsed = time.monotonic() - budget_start
 
         base["document_url"] = record.document_url
         if record.document_url.startswith("local:"):
@@ -1949,10 +2035,15 @@ class BrazilMoHEngine:
             # lookup succeeded, so the abstract below is already in memory and
             # costs no network. Returning a bare timeout here would discard
             # the one answer the caller can still be given.
+            base["timeout_phase"] = "fetch"
             logger.warning(
-                "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                "brazil_moh full text fetch for %r exceeded its %.1fs budget "
+                "(phase=fetch, lookup=%.1fs, elapsed=%.1fs, detail=%s)",
                 normalized,
                 ceiling,
+                lookup_elapsed,
+                time.monotonic() - budget_start,
+                _failure_detail(self.http_client),
             )
             error_kind = "timeout"
         else:
@@ -1973,13 +2064,23 @@ class BrazilMoHEngine:
                 # than return. The deadline handed to the ladder should make
                 # this the rare case -- a single attempt still in flight when
                 # the ceiling lands -- not the common one.
+                base["timeout_phase"] = "fetch"
                 logger.warning(
-                    "brazil_moh full text fetch for %r exceeded its %.1fs budget",
+                    "brazil_moh full text fetch for %r exceeded its %.1fs budget "
+                    "(phase=fetch, lookup=%.1fs, elapsed=%.1fs, detail=%s)",
                     normalized,
                     ceiling,
+                    lookup_elapsed,
+                    time.monotonic() - budget_start,
+                    _failure_detail(self.http_client),
                 )
                 error_kind = "timeout"
         errored = error_kind is not None
+        if errored:
+            # The fetch phase is where this call failed -- a ceiling landing
+            # (timeout) or a classified fast failure (origin_outage,
+            # backend_error). Either way the attribution is "fetch".
+            base["timeout_phase"] = "fetch"
 
         if pdf_text:
             source_text = pdf_text
