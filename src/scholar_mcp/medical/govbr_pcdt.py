@@ -18,8 +18,8 @@ from scholar_mcp.config import Settings
 from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
     CACHE_SCHEMA,
     GOVBR_HEADERS,
+    MIN_CATALOG_RETENTION,
     PORTUGUESE_STOPWORDS,
-    SEVEN_DAYS_SECONDS,
     derive_item_urls,
     normalize_text,
     score_item,
@@ -254,14 +254,25 @@ class GovBrPCDTEngine:
         self._memory_catalog = seed
         return _merge_extended(seed)
 
-    async def refresh_catalog(self) -> dict[str, dict[str, Any]]:
-        """Crawl fresh catalog from gov.br portal."""
+    async def refresh_catalog(
+        self, incumbent: dict[str, dict[str, Any]] | None = None
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Crawl a fresh catalog from the gov.br portal. Offline use only.
+
+        Returns ``(catalog, complete)``. ``complete`` is True only when every
+        page of every letter loaded and the catalog holds at least
+        ``MIN_CATALOG_RETENTION`` of ``incumbent`` (a crawl that finds a
+        fraction of the known size is a parser break, not a smaller site).
+
+        Nothing is cached or kept in memory here. The server never crawls:
+        ``scripts/update_govbr_catalogs.py`` writes a complete crawl to the
+        bundled seed and refuses anything else.
+        """
         catalog: dict[str, dict[str, Any]] = {}
-        letters_ok = 0
+        complete = True
         for letter in PCDT_LETTERS:
             urls_to_visit = [f"{PCDT_BASE_URL}/{letter}"]
             visited: set[str] = set()
-            letter_ok = False
             while urls_to_visit:
                 curr_url = urls_to_visit.pop(0)
                 if curr_url in visited:
@@ -270,31 +281,33 @@ class GovBrPCDTEngine:
                 try:
                     resp = await self.http_client.get(curr_url, headers=GOVBR_HEADERS)
                     if resp is None or resp.status_code != 200:
+                        logger.warning(
+                            "PCDT page %s answered %s",
+                            curr_url,
+                            getattr(resp, "status_code", None),
+                        )
+                        complete = False
                         continue
-                    letter_ok = True
                     items, next_urls = parse_letter_page(resp.text, letter, curr_url)
-                    catalog.update(items)
-                    for nurl in next_urls:
-                        if nurl not in visited and nurl not in urls_to_visit:
-                            urls_to_visit.append(nurl)
                 except Exception as exc:
                     logger.warning("Error crawling PCDT letter %s at %s: %s", letter, curr_url, exc)
-            if letter_ok:
-                letters_ok += 1
+                    complete = False
+                    continue
+                catalog.update(items)
+                for nurl in next_urls:
+                    if nurl not in visited and nurl not in urls_to_visit:
+                        urls_to_visit.append(nurl)
 
-        # Cache only a fully-crawled catalog: a partial crawl pinned with
-        # the 7-day TTL would serve an incomplete catalog for a week while
-        # gov.br is flaky. Partial results are returned for this call but
-        # leave the cached and in-memory catalogs untouched.
-        if catalog and letters_ok == len(PCDT_LETTERS):
-            self._memory_catalog = catalog
-            await self.cache.set(
-                "govbr_pcdt:catalog",
-                catalog,
-                source="govbr_pcdt",
-                ttl=SEVEN_DAYS_SECONDS,
+        size_floor = int(len(incumbent or {}) * MIN_CATALOG_RETENTION)
+        if not catalog or len(catalog) < size_floor:
+            logger.warning(
+                "PCDT crawl returned %d rows against %d already held; "
+                "incomplete (suspected parser break)",
+                len(catalog),
+                len(incumbent or {}),
             )
-        return catalog
+            complete = False
+        return catalog, complete
 
     async def search(
         self,
