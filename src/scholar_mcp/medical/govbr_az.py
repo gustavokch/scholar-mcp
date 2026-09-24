@@ -400,10 +400,10 @@ class GovBrAZEngine:
 
         catalog = await self.get_catalog()
         if not catalog:
-            # An empty catalog means the seed is missing and every crawl
-            # failed: an outage, not a zero-result search. Caching it would
-            # pin a false success for cache_ttl_brazil_moh and hide the
-            # failure from errored_any in brazil_moh.
+            # An empty catalog means the bundled seed is missing or empty:
+            # an outage, not a zero-result search. Caching it would pin a
+            # false success for cache_ttl_brazil_moh and hide the failure
+            # from errored_any in brazil_moh.
             logger.warning("gov.br A-Z catalog is empty; reporting search error")
             return [], CacheMetadata(
                 cached=False, cache_age=0, error=True, error_kind="backend_error"

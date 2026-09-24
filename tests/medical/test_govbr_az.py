@@ -194,7 +194,7 @@ async def test_refresh_catalog_indexes_both_trees(tmp_path, responses):
         await engine.cache.close()
 
 
-async def test_refresh_catalog_caches_and_keeps_nothing(tmp_path, responses):
+async def test_refresh_catalog_neither_caches_nor_keeps(tmp_path, responses):
     """Offline-only: even a complete crawl is neither cached nor kept."""
     engine, _ = _make_engine(tmp_path, responses)
     try:
@@ -543,7 +543,7 @@ async def test_get_catalog_seed_beats_a_leftover_cache_row(tmp_path, responses):
 
 
 async def test_missing_seed_is_an_outage_and_is_not_kept(tmp_path, responses, monkeypatch):
-    monkeypatch.setattr(govbr_az, "load_seed_catalog", lambda: {})
+    monkeypatch.setattr(govbr_az, "load_seed_catalog", dict)
     engine, http = _make_engine(tmp_path, responses)
     try:
         catalog = await engine.get_catalog()

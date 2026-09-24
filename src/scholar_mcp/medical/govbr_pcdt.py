@@ -327,9 +327,9 @@ class GovBrPCDTEngine:
 
         catalog = await self.get_catalog()
         if not catalog:
-            # An empty catalog means the seed and extended corpus are both
-            # missing and every crawl failed: an outage, not a zero-result
-            # search. Caching it would pin a false success for
+            # An empty catalog means the bundled seed is missing or empty
+            # (the extended corpus alone is never served): an outage, not a
+            # zero-result search. Caching it would pin a false success for
             # cache_ttl_brazil_moh and hide the failure from errored_any in
             # brazil_moh.
             logger.warning("PCDT catalog is empty; reporting search error")

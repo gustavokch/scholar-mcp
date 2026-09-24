@@ -9,7 +9,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "update_govbr_catalogs.py"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def script():
     spec = importlib.util.spec_from_file_location("update_govbr_catalogs", SCRIPT)
     module = importlib.util.module_from_spec(spec)

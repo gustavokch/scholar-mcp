@@ -476,7 +476,7 @@ async def test_get_catalog_seed_beats_a_leftover_cache_row(tmp_path):
 
 async def test_missing_seed_is_an_outage_not_a_partial_catalog(tmp_path, monkeypatch):
     """Extended rows alone are a partial catalog: report the outage instead."""
-    monkeypatch.setattr(govbr_pcdt, "load_seed_catalog", lambda: {})
+    monkeypatch.setattr(govbr_pcdt, "load_seed_catalog", dict)
     engine, cache = _pcdt_engine(tmp_path)
     try:
         catalog = await engine.get_catalog()
