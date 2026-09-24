@@ -1018,13 +1018,13 @@ async def test_get_full_text_rejects_redirect_off_allowlisted_hosts(tmp_path: Pa
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
         assert payload["content"] == "Resumo."
-        # C2: abstract fallback is a success (error=False), cached degraded
-        # (brief TTL) -- but error_kind still carries the real PDF-fetch
-        # failure so machine consumers see the degradation.
+        # The abstract fallback is a success (error=False) whose error_kind
+        # carries the real PDF failure. It is a partial retrieval, so it is
+        # never cached.
         assert meta.error is False
         assert meta.error_kind == "backend_error"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -1072,13 +1072,14 @@ async def test_get_full_text_pdf_failure_degrades_and_is_not_cached(tmp_path: Pa
         respx.get(FI_ADMIN_URL).mock(side_effect=httpx.ConnectError("blocked"))
         payload, meta = await engine.get_full_text("biblio-1")
         assert payload["content_type"] == "abstract"
-        # C2: abstract fallback is a success (error=False), cached degraded
-        # (brief TTL) -- but error_kind still carries the real PDF-fetch
-        # failure so machine consumers see the degradation.
+        # The abstract fallback is a success (error=False) whose error_kind
+        # carries the real PDF failure. It is a partial retrieval, so it is
+        # never cached. D9b: a connect failure means the origin is not
+        # serving -- an outage, not a timeout.
         assert meta.error is False
-        assert meta.error_kind == "timeout"
+        assert meta.error_kind == "origin_outage"
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3221,13 +3222,8 @@ async def test_full_text_resolves_az_record(tmp_path):
         await http_client.aclose()
 
 @respx.mock
-async def test_clean_bvs_result_is_cached_when_only_an_auxiliary_stage_fails(tmp_path: Path):
-    """A healthy BVS answer must not be re-fetched on every call while a
-    local gov.br scraper is down.
-
-    The merge is incomplete (the AZ rows are missing), so it is cached
-    briefly rather than pinned for the full 30-day TTL.
-    """
+async def test_clean_bvs_result_is_not_cached_when_a_govbr_stage_fails(tmp_path: Path):
+    """The merge is missing the AZ rows: a partial retrieval, never cached."""
     engine, cache, http_client = await _engine(tmp_path)
     try:
         async def _az_down(*args, **kwargs):
@@ -3238,13 +3234,18 @@ async def test_clean_bvs_result_is_cached_when_only_an_auxiliary_stage_fails(tmp
             return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
         )
 
-        first, _first_meta = await engine.search_guidelines("dengue", limit=5)
+        first, first_meta = await engine.search_guidelines("dengue", limit=5)
         second, second_meta = await engine.search_guidelines("dengue", limit=5)
 
         assert first, "BVS returned a record"
-        assert route.call_count == 1, "the BVS chain re-ran while AZ was down"
-        assert second_meta.cached is True
-        assert [r.record_id for r in second] == [r.record_id for r in first]
+        # The caller is told the merge is partial: success, classified.
+        assert first_meta.error is False
+        assert first_meta.error_kind == "backend_error"
+        assert second_meta.cached is False
+        assert route.call_count == 2, "the second call must re-run the chain"
+        composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
+        _, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:5:{composed}")
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3287,9 +3288,9 @@ async def test_get_full_text_exhausted_budget_still_serves_the_abstract(
         assert payload["title"] == "Protocolo"
         assert meta.error is False
         assert meta.error_kind == "timeout"
-        # Cached at the degraded TTL so the next request retries the PDF.
+        # Never cached: the next request retries the PDF.
         _, cache_meta = await cache.get(f"brazil_moh_fulltext:{CACHE_SCHEMA}:biblio-1")
-        assert cache_meta.cached is True
+        assert cache_meta.cached is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3569,3 +3570,116 @@ def test_topic_gate_empties_a_covered_pool_when_one_query_term_is_absent():
         "d2",
     ]
     assert _topic_filtered(pool, "dengue manejo clinico em gestantes") == []
+
+
+@respx.mock
+async def test_govbr_stage_timeout_reports_timeout_kind(tmp_path: Path):
+    """A gov.br stage cut off by its budget is a timeout in the ENAMED §2
+    taxonomy, not an unclassified error -- and the caller sees it: the
+    merge is missing that stage's rows, so the meta reports the kind (and
+    ``server._with_degraded`` flags the response) while ``error`` stays
+    False because BVS answered."""
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_stage_timeout_s = 0.3
+    try:
+        async def _stalls(*args, **kwargs):
+            await asyncio.sleep(5.0)
+            return [], CacheMetadata(cached=False, cache_age=0)
+
+        engine.pcdt_engine.search = _stalls
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+
+        records, meta = await engine.search_guidelines("dengue", limit=5)
+
+        assert records, "BVS still answered"
+        assert meta.error is False
+        assert meta.error_kind == "timeout"
+        assert meta.timeout is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_govbr_stage_timeout_is_not_cached(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_stage_timeout_s = 0.3
+    try:
+        async def _stalls(*args, **kwargs):
+            await asyncio.sleep(5.0)
+            return [], CacheMetadata(cached=False, cache_age=0)
+
+        engine.pcdt_engine.search = _stalls
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
+        )
+
+        records, _meta = await engine.search_guidelines("dengue", limit=5)
+
+        assert records, "BVS still answered"
+        composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
+        _, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:5:{composed}")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_browser_success_does_not_cache_when_a_govbr_stage_errored(
+    tmp_path, monkeypatch
+):
+    """The browser tier answers the BVS errors only. A gov.br stage that
+    also failed leaves the merge partial, so nothing is written."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    monkeypatch.setattr(
+        engine.pcdt_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+    )
+    monkeypatch.setattr(
+        engine.az_engine,
+        "search",
+        AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=True))),
+    )
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "1", "ti": "Manejo da dengue",
+                         "pais_publicacao": "^eBrasil", "da": "202401",
+                         "ur": ["https://bvsms.saude.gov.br/x.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, json.dumps(payload)
+    )
+    try:
+        with respx.mock:
+            respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+            records, _meta = await engine.search_guidelines("dengue", limit=10)
+        assert [r.title for r in records] == ["Manejo da dengue"]
+        assert attempts == [True]
+        composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
+        _, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:10:{composed}")
+        assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
