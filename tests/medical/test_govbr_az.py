@@ -66,6 +66,7 @@ def test_build_alias_text_word_boundary():
     assert "doencas de transmissao hidrica e alimentar" in build_alias_text("manual de dtha no brasil", aliases)
 
 
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -207,26 +208,40 @@ async def test_refresh_catalog_caches_and_keeps_nothing(tmp_path, responses):
         await engine.cache.close()
 
 
-async def test_refresh_catalog_failed_folder_is_incomplete(tmp_path, responses):
-    responses[f"https://www.gov.br{SVSA}/tuberculose"] = FakeResponse("", status_code=503)
+def _warned_about(caplog, url: str) -> bool:
+    """The seed writer exits with "see the warnings above": every page the
+    crawl loses must be named at WARNING, not silently dropped."""
+    return any(
+        r.levelno >= logging.WARNING and url in r.getMessage() for r in caplog.records
+    )
+
+
+async def test_refresh_catalog_failed_folder_is_incomplete(tmp_path, responses, caplog):
+    folder = f"https://www.gov.br{SVSA}/tuberculose"
+    responses[folder] = FakeResponse("", status_code=503)
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        catalog, complete = await engine.refresh_catalog()
+        with caplog.at_level(logging.WARNING, logger="scholar_mcp.medical.govbr_az"):
+            catalog, complete = await engine.refresh_catalog()
 
         assert "govbr-svsa-dengue-dengue-manejo-clinico" in catalog
         assert complete is False
+        assert _warned_about(caplog, folder)
     finally:
         await engine.cache.close()
 
 
-async def test_refresh_catalog_login_gated_folder_is_incomplete(tmp_path, responses):
-    responses[f"https://www.gov.br{SVSA}/tuberculose"] = FakeResponse(LOGIN_GATE)
+async def test_refresh_catalog_login_gated_folder_is_incomplete(tmp_path, responses, caplog):
+    folder = f"https://www.gov.br{SVSA}/tuberculose"
+    responses[folder] = FakeResponse(LOGIN_GATE)
     engine, _ = _make_engine(tmp_path, responses)
     try:
-        catalog, complete = await engine.refresh_catalog()
+        with caplog.at_level(logging.WARNING, logger="scholar_mcp.medical.govbr_az"):
+            catalog, complete = await engine.refresh_catalog()
 
         assert not any(key.startswith("govbr-svsa-tuberculose") for key in catalog)
         assert complete is False
+        assert _warned_about(caplog, folder)
     finally:
         await engine.cache.close()
 

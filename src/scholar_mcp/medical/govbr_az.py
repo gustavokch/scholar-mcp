@@ -212,16 +212,26 @@ class GovBrAZEngine:
         self._memory_catalog: dict[str, dict[str, Any]] | None = None
 
     async def _fetch_html(self, url: str) -> str | None:
-        """GET ``url`` and return HTML, or None for errors and login gates."""
+        """GET ``url`` and return HTML, or None for errors and login gates.
+
+        Every lost page is logged at WARNING: the seed writer refuses an
+        incomplete crawl with "see the warnings above", so a silent miss
+        would leave the operator nothing to act on.
+        """
         try:
             resp = await self.http_client.get(url, headers=GOVBR_HEADERS)
         except Exception as exc:
             logger.warning("gov.br A-Z fetch failed for %s: %s", url, exc)
             return None
         if resp is None or resp.status_code != 200:
+            logger.warning(
+                "gov.br A-Z page %s answered %s",
+                url,
+                getattr(resp, "status_code", None),
+            )
             return None
         if is_login_redirect(resp.text):
-            logger.info("gov.br A-Z folder is login-gated, skipping: %s", url)
+            logger.warning("gov.br A-Z folder is login-gated, skipping: %s", url)
             return None
         return resp.text
 
