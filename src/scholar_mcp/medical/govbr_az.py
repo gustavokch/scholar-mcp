@@ -351,52 +351,25 @@ class GovBrAZEngine:
         return catalog
 
     async def get_catalog(self) -> dict[str, dict[str, Any]]:
-        """Get the catalog from memory, cache, or the bundled seed."""
+        """Get the catalog from memory or the bundled seed.
+
+        The seed is the catalog: no search crawls gov.br, and nothing here
+        touches the network or the SQLite cache.
+        ``scripts/update_govbr_catalogs.py --catalog az`` regenerates the
+        seed offline. A missing or empty seed returns ``{}`` and is not
+        kept, so ``search`` reports the outage.
+        """
         if self._memory_catalog:
             return self._memory_catalog
 
-        cached_data, meta = await self.cache.get(CATALOG_CACHE_KEY)
-        if meta.cached and isinstance(cached_data, dict) and cached_data:
-            if meta.cache_age < SEVEN_DAYS_SECONDS:
-                self._memory_catalog = cached_data
-                return self._memory_catalog
-            try:
-                refreshed = await self.refresh_catalog(incumbent=cached_data)
-                if refreshed:
-                    # refresh_catalog only writes the cache for a complete
-                    # crawl. A partial crawl must still be memoized here, or
-                    # every subsequent search re-crawls both publication trees
-                    # for as long as gov.br is degraded.
-                    self._memory_catalog = refreshed
-                    return refreshed
-            except Exception as exc:
-                logger.warning("Failed to refresh gov.br A-Z catalog: %s", exc)
-            self._memory_catalog = cached_data
-            return self._memory_catalog
-
         seed = load_seed_catalog()
-        if seed:
-            self._memory_catalog = seed
-            await self.cache.set(
-                CATALOG_CACHE_KEY,
-                seed,
-                source="govbr_az",
-                ttl=SEVEN_DAYS_SECONDS,
+        if not seed:
+            logger.error(
+                "gov.br A-Z seed catalog is missing or empty; reporting an outage"
             )
-            return self._memory_catalog
-
-        try:
-            crawled = await self.refresh_catalog()
-            if crawled:
-                # Same reasoning as the stale-cache path: memoize even a
-                # partial crawl so a degraded gov.br is not re-crawled once
-                # per search.
-                self._memory_catalog = crawled
-                return crawled
-        except Exception as exc:
-            logger.warning("Failed initial crawl of gov.br A-Z catalog: %s", exc)
-
-        return {}
+            return {}
+        self._memory_catalog = seed
+        return seed
 
     async def search(
         self,

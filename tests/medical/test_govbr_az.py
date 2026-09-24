@@ -71,9 +71,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical import govbr_az
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
-from scholar_mcp.medical.govbr_common import SEVEN_DAYS_SECONDS
-from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
+from scholar_mcp.medical.govbr_common import CACHE_SCHEMA, SEVEN_DAYS_SECONDS
+from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
 
 class FakeResponse:
@@ -353,40 +354,6 @@ def test_seed_catalog_contains_dengue_and_tuberculosis_manuals():
     assert any("tuberculose" in title for title in titles)
 
 
-async def test_get_catalog_memoizes_partial_refresh(tmp_path, responses):
-    """A partial crawl must not re-crawl gov.br on the next get_catalog call.
-
-    refresh_catalog only writes the cache for a complete crawl, so a partial
-    result that is returned without being memoized makes every subsequent
-    search re-crawl both publication trees for as long as gov.br is degraded.
-    """
-    engine, _ = _make_engine(tmp_path, responses)
-    try:
-        engine.cache.get = AsyncMock(
-            return_value=(
-                {"old": {"record_id": "old"}},
-                CacheMetadata(
-                    cached=True, cache_age=SEVEN_DAYS_SECONDS + 1, error=False
-                ),
-            )
-        )
-        calls: list[int] = []
-
-        async def _partial_refresh(incumbent=None):
-            calls.append(1)
-            return {"new": {"record_id": "new"}}
-
-        engine.refresh_catalog = _partial_refresh
-
-        first = await engine.get_catalog()
-        second = await engine.get_catalog()
-
-        assert first == second == {"new": {"record_id": "new"}}
-        assert len(calls) == 1, "partial crawl re-ran on the second get_catalog call"
-    finally:
-        await engine.cache.close()
-
-
 def test_build_alias_text_matches_portuguese_plural():
     """Titles pluralize the disease name; the alias must still apply."""
     aliases = {"hepatite": "Hepatite"}
@@ -515,5 +482,58 @@ async def test_az_search_pre_v1_cache_row_is_not_served(tmp_path, responses):
         assert meta.cached is False
         assert results[0].record_id == "govbr-svsa-tuberculose-manual-tuberculose"
         assert results[0].has_full_text is True
+    finally:
+        await engine.cache.close()
+
+
+async def test_get_catalog_serves_seed_without_network_or_cache_row(tmp_path, responses):
+    """The bundled seed is the catalog: no crawl and no SQLite copy of it."""
+    engine, http = _make_engine(tmp_path, responses)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert catalog == load_seed_catalog()
+        http.get.assert_not_awaited()
+        _, meta = await engine.cache.get("govbr_az:catalog")
+        assert meta.cached is False, "the seed must not be copied into SQLite"
+    finally:
+        await engine.cache.close()
+
+
+async def test_get_catalog_seed_beats_a_leftover_cache_row(tmp_path, responses):
+    """A catalog row written by an older release must not shadow the seed."""
+    engine, _ = _make_engine(tmp_path, responses)
+    try:
+        await engine.cache.set(
+            "govbr_az:catalog",
+            {"old": {"record_id": "old"}},
+            source="govbr_az",
+            ttl=SEVEN_DAYS_SECONDS,
+        )
+
+        catalog = await engine.get_catalog()
+
+        assert "old" not in catalog
+        assert catalog == load_seed_catalog()
+    finally:
+        await engine.cache.close()
+
+
+async def test_missing_seed_is_an_outage_and_is_not_kept(tmp_path, responses, monkeypatch):
+    monkeypatch.setattr(govbr_az, "load_seed_catalog", lambda: {})
+    engine, http = _make_engine(tmp_path, responses)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert catalog == {}
+        assert engine._memory_catalog is None
+        http.get.assert_not_awaited()
+
+        results, meta = await engine.search("dengue", limit=5)
+        assert results == []
+        assert meta.error_kind == "backend_error"
+        key = f"govbr_az_search:{CACHE_SCHEMA}:5:dengue"
+        _, cache_meta = await engine.cache.get(key)
+        assert cache_meta.cached is False
     finally:
         await engine.cache.close()
