@@ -1,9 +1,15 @@
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical import govbr_pcdt
+from scholar_mcp.medical.govbr_common import (
+    CACHE_SCHEMA,
+    SEVEN_DAYS_SECONDS,
+    normalize_text,
+)
 from scholar_mcp.medical.govbr_pcdt import (
     GovBrPCDTEngine,
     load_seed_catalog,
@@ -102,34 +108,6 @@ async def test_pcdt_get_guideline_by_id(tmp_path):
         # Non-existent
         item3 = await engine.get_guideline("non-existent-condition")
         assert item3 is None
-    finally:
-        await cache.close()
-
-
-@pytest.mark.asyncio
-async def test_pcdt_7_day_cache_refresh(tmp_path):
-    settings = Settings()
-    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
-    mock_http = AsyncMock()
-    engine = GovBrPCDTEngine(http_client=mock_http, cache=cache, settings=settings)
-
-    try:
-        # Pre-populate cache with an old timestamp (8 days old)
-        old_catalog = {"pcdt-old": {"record_id": "pcdt-old", "slug": "old", "title": "Old"}}
-        await cache.set("govbr_pcdt:catalog", old_catalog, source="govbr_pcdt", ttl=864000)
-
-        # Mock refresh_catalog to return updated catalog
-        fresh_catalog = {"pcdt-fresh": {"record_id": "pcdt-fresh", "slug": "fresh", "title": "Fresh"}}
-        with patch.object(engine, "refresh_catalog", AsyncMock(return_value=fresh_catalog)) as mock_refresh:
-            # Patch cache.get to report cache_age >= 7 days (604,800s)
-            with patch.object(
-                cache,
-                "get",
-                AsyncMock(return_value=(old_catalog, type("Meta", (), {"cached": True, "cache_age": 700000})())),
-            ):
-                catalog = await engine.get_catalog()
-                mock_refresh.assert_called_once()
-                assert "pcdt-fresh" in catalog
     finally:
         await cache.close()
 
@@ -396,5 +374,66 @@ async def test_pcdt_search_pre_v1_cache_row_is_not_served(tmp_path):
         assert meta.cached is False
         assert results[0].record_id == "pcdt-acromegalia"
         assert results[0].has_full_text is True
+    finally:
+        await cache.close()
+
+
+def _pcdt_engine(tmp_path):
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    return GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings), cache
+
+
+async def test_get_catalog_serves_seed_without_network_or_cache_row(tmp_path):
+    """The bundled seed is the catalog: no crawl and no SQLite copy of it."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert "pcdt-acromegalia" in catalog
+        engine.http_client.get.assert_not_awaited()
+        _, meta = await cache.get("govbr_pcdt:catalog")
+        assert meta.cached is False, "the seed must not be copied into SQLite"
+    finally:
+        await cache.close()
+
+
+async def test_get_catalog_seed_beats_a_leftover_cache_row(tmp_path):
+    """A catalog row written by an older release must not shadow the seed."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        await cache.set(
+            "govbr_pcdt:catalog",
+            {"pcdt-old": {"record_id": "pcdt-old", "slug": "old", "title": "Old"}},
+            source="govbr_pcdt",
+            ttl=SEVEN_DAYS_SECONDS,
+        )
+
+        catalog = await engine.get_catalog()
+
+        assert "pcdt-old" not in catalog
+        assert "pcdt-acromegalia" in catalog
+    finally:
+        await cache.close()
+
+
+async def test_missing_seed_is_an_outage_not_a_partial_catalog(tmp_path, monkeypatch):
+    """Extended rows alone are a partial catalog: report the outage instead."""
+    monkeypatch.setattr(govbr_pcdt, "load_seed_catalog", lambda: {})
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        catalog = await engine.get_catalog()
+
+        assert catalog == {}
+        assert engine._memory_catalog is None
+        engine.http_client.get.assert_not_awaited()
+
+        results, meta = await engine.search("acromegalia", limit=5)
+        assert results == []
+        assert meta.error is True
+        assert meta.error_kind == "backend_error"
+        key = f"govbr_pcdt_search:{CACHE_SCHEMA}:5:{normalize_text('acromegalia')}"
+        _, cache_meta = await cache.get(key)
+        assert cache_meta.cached is False
     finally:
         await cache.close()
