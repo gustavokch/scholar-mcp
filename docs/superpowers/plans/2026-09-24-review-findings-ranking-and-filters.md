@@ -1612,4 +1612,82 @@ watch-listed rows in a top 5: 8; errored queries: 0
 
 ### After Task 4
 
-_Paste `/tmp/brazil-probe-after.txt` here, with the exit code and the Step 5 decision._
+Run 2026-09-24 against live BVS with a fresh cache, worktree with Task 4 applied. Every query answered `error=False`.
+
+Exit status: **1** (3 watch-listed rows remain in a top 5, down from 8). Per the Step 5 decision rule, the hard body tier is **not** changed here; the remaining rows are recorded below as follow-up evidence.
+
+```text
+'citologia oncótica LSIL lesão intraepitelial'  error=False error_kind=ok
+  1. biblio-1024362                                                         origin=bvs           body=True  score=0.381
+  2. biblio-1023380                                                         origin=bvs           body=True  score=0.309
+
+'retenção de placenta conduta 30 minutos'  error=False error_kind=ok
+  1. sms-10896                                                              origin=bvs           body=True  score=0.255
+  2. biblio-935791                                                          origin=bvs           body=True  score=0.222
+  3. govbr-svsa-vacinacao-imunizacao-pni-besvs-pni-v46-n30.pdf              origin=govbr_catalog body=True  score=0.160
+  4. govbr-svsa-vacinacao-imunizacao-pni-comunicado-de-ampliacao-acwy-e-hpv origin=govbr_catalog body=True  score=0.160
+  5. govbr-svsa-vacinacao-imunizacao-pni-oficio-circular-no-197-2022-svs-ms origin=govbr_catalog body=True  score=0.160
+
+'dengue grupo B manejo hidratação parenteral'  error=False error_kind=ok
+  1. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=govbr_catalog body=True  score=0.621
+  2. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=govbr_catalog body=True  score=0.551
+  3. biblio-1571516                                                         origin=bvs           body=True  score=0.460
+  4. biblio-927206                                                          origin=bvs           body=True  score=0.429
+  5. govbr-svsa-dengue-dengue_classificacao_risco_manejo_paciente.pdf       origin=govbr_catalog body=True  score=0.411
+
+'tuberculose retomada tratamento abandono'  error=False error_kind=ok
+  1. govbr-svsa-tuberculose-registro-de-pessoas-com-tuberculose-e-acompanha origin=govbr_catalog body=True  score=0.550
+  2. govbr-svsa-tuberculose-tratamento-da-tuberculose-em-adolescentes-e-adu origin=govbr_catalog body=True  score=0.550
+  3. sms-6389                                                               origin=bvs           body=True  score=0.388
+  4. biblio-1241081                                                         origin=bvs           body=True  score=0.379
+  5. ms-manual-tuberculose-2019                                             origin=govbr_catalog body=True  score=0.375
+
+'curvas de crescimento síndrome de Down'  error=False error_kind=ok
+  1. sms-9877                                                               origin=bvs           body=True  score=0.502
+  2. biblio-1254730                                                         origin=bvs           body=True  score=0.495
+  3. govbr-guias-2025-guia-de-orientacoes-para-profissionais-de-saude-srag. origin=govbr_catalog body=True  score=0.447
+  4. pcdt-deficiencia-do-hormonio-de-crescimento-hipopituitarismo           origin=govbr_catalog body=True  score=0.435   <-- watch-listed
+  5. pcdt-sindrome-mielodisplasica-de-baixo-risco                           origin=govbr_catalog body=True  score=0.435   <-- watch-listed
+
+'curvas crescimento síndrome Down recém-nascido puericultura'  error=False error_kind=ok
+  1. govbr-guias-2025-guia-de-orientacoes-para-profissionais-de-saude-srag. origin=govbr_catalog body=True  score=0.372
+  2. biblio-935668                                                          origin=bvs           body=True  score=0.312
+  3. biblio-1074449                                                         origin=bvs           body=True  score=0.289
+  4. sms-4759                                                               origin=bvs           body=True  score=0.285
+  5. govbr-guias-2021-manual_obito_09_2021.pdf                              origin=govbr_catalog body=True  score=0.283
+
+'dengue grupo B manejo hidratação parenteral antígeno NS1 leito de observação'  error=False error_kind=ok
+  1. psa-119143                                                             origin=bvs           body=True  score=0.414
+  2. biblio-1571516                                                         origin=bvs           body=True  score=0.396
+  3. biblio-1436564                                                         origin=bvs           body=True  score=0.346
+  4. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=govbr_catalog body=True  score=0.345
+  5. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=govbr_catalog body=True  score=0.306
+
+'dengue sinais de alerta grupo B manejo hidratação'  error=False error_kind=ok
+  1. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=govbr_catalog body=True  score=0.531
+  2. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=govbr_catalog body=True  score=0.472
+  3. biblio-1571516                                                         origin=bvs           body=True  score=0.421
+  4. sms-8445                                                               origin=bvs           body=True  score=0.389
+  5. biblio-1620533                                                         origin=bvs           body=True  score=0.372
+
+'terceiro estágio trabalho de parto conduta placenta retida'  error=False error_kind=ok
+  1. phr2-53135                                                             origin=bvs           body=True  score=0.410
+  2. govbr-guias-2025-manual-de-orientacao-tecnica-do-peadts.pdf            origin=govbr_catalog body=True  score=0.372
+  3. sms-11534                                                              origin=bvs           body=True  score=0.341
+  4. sms-12671                                                              origin=bvs           body=True  score=0.337
+  5. biblio-1095677                                                         origin=bvs           body=True  score=0.308
+
+'lesão intraepitelial de baixo grau conduta colposcopia'  error=False error_kind=ok
+  1. pcdt-sindrome-mielodisplasica-de-baixo-risco                           origin=govbr_catalog body=True  score=0.286   <-- watch-listed
+  2. biblio-1086633                                                         origin=bvs           body=False score=0.330
+
+watch-listed rows in a top 5: 3; errored queries: 0
+exit=1
+```
+
+**Remaining watch-listed rows (Step 5 evidence for the follow-up that revisits the tier):**
+
+- `curvas de crescimento síndrome de Down`, ranks 4–5 (`pcdt-deficiencia-do-hormonio-de-crescimento-hipopituitarismo`, `pcdt-sindrome-mielodisplasica-de-baixo-risco`, both body-carrying catalog rows at 0.435): every record ranked above them carries a body (two BVS records at 0.50+ and one catalog row at 0.447), so the position-prior and neutral-recency fixes did not push them up; they land here on one-token lexical matches inside the all-body tier. No body-less BVS card is visible above or below them in the top 5.
+- `lesão intraepitelial de baixo grau conduta colposcopia`, rank 1 (`pcdt-sindrome-mielodisplasica-de-baixo-risco`, body=True, 0.286) **sits above an on-topic body-less BVS card**: `biblio-1086633` — title "Lesão Intraepitelial de baixo grau" (verified live, an exact topic match), `body=False`, damped score 0.330. The hard body tier pins the off-topic catalog row at rank 1 despite the lower score. This is the clearest remaining tier casualty.
+
+Net: Task 4 removed 5 of 8 watch-listed top-5 appearances. The 3 that remain are all explained inside the kept body tier (2 by one-token lexical ties among body-carrying records, 1 by the tier itself overriding a higher-scoring on-topic body-less record).

@@ -125,7 +125,8 @@ MAX_FULL_TEXT_CHARS = 600_000
 # body already cut to the old 50k ceiling with no total_chars. TTL here is
 # 30 days (config.cache_ttl_brazil_moh), so an un-bumped key is a month of
 # wrong answers. v2: has_full_text (B4) + 600k bodies with total_chars (B3).
-CACHE_SCHEMA = "v2"
+# v3: origin (position prior scoped to BVS records).
+CACHE_SCHEMA = "v3"
 
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
@@ -628,6 +629,7 @@ def _build_record(doc: dict[str, Any]) -> BrazilGuideline:
         record_id=_first(doc.get("id")),
         document_url=document_url,
         fulltext_id=fulltext_id,
+        origin="bvs",
         # Body-less catalog cards (no `ur`, no `ab`) are shaped here too;
         # the flag lets ranking damp them instead of citing them as
         # evidence (ENAMED misses plan B4). One shared rule with the gov.br
@@ -1394,11 +1396,11 @@ class BrazilMoHEngine:
             local_records.append(r)
 
         if not records and errored_any:
-            # Standing in for a failed BVS, these rows reach the caller without
-            # the relevance-sorted Solr ordering the ranker's position prior
-            # assumes, so a lexical near-miss can top the list. Gate on topic
-            # first: an empty result is a truthful "not covered", while four
-            # unrelated syndromes read as Brazilian evidence downstream.
+            # Standing in for a failed BVS, these rows carry no relevance
+            # order of their own, so a lexical near-miss can top the list.
+            # Gate on topic first: an empty result is a truthful "not
+            # covered", while four unrelated syndromes read as Brazilian
+            # evidence downstream.
             on_topic = _topic_filtered(local_records, query)
             if on_topic:
                 # Same filter-rank-slice order as every other exit: slicing
@@ -1441,7 +1443,8 @@ class BrazilMoHEngine:
             return [], fail_meta
 
         # Merge local gov.br records (first) and BVS records, deduplicating
-        # by record_id.
+        # by record_id. List order does not score: rank_brazil_guidelines
+        # applies its position prior by each record's rank among BVS rows.
         seen_ids: set[str] = set(seen_local)
         merged_records: list[BrazilGuideline] = list(local_records)
         for r in records:

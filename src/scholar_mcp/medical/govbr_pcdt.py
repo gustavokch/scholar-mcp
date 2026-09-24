@@ -208,6 +208,7 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
             url_trusted=True,
         ),
         source="brazil-moh",
+        origin="govbr_catalog",
         abstract=item.get("description", ""),
         country="Brasil",
         languages=["pt"],

@@ -74,6 +74,7 @@ def _rank_records(
     position_weight: float,
     current_year: int | None = None,
     score_factor: Callable[[R], float] | None = None,
+    source_rank: Callable[[R], int | None] | None = None,
 ) -> list[R]:
     """Score and order records by lexical coverage, source position, and recency.
 
@@ -83,10 +84,13 @@ def _rank_records(
     caller widen either side -- the Brazilian path unions the Portuguese and
     English titles, and the abstract with the DeCS descriptors.
 
-    ``position_weight`` blends the source's own ordering into relevance using
-    the ``1/sqrt(rank + 1)`` prior. Pass non-zero only when the input is
-    already relevance-ordered by a single source. Leave it at 0.0 for merged
-    multi-source pools, where list position reflects task order.
+    ``position_weight`` blends a relevance-ordered source's own ranking into
+    relevance using the ``1/sqrt(rank + 1)`` prior. ``source_rank`` names
+    that rank per record: omitted, the input index is every record's rank,
+    which holds only for a single relevance-sorted source. A merged pool
+    passes ``source_rank`` and returns ``None`` for records from a source
+    with no relevance order; those score on lexical coverage alone, exactly
+    as a ``position_weight`` of 0.0 would score them.
 
     ``score_factor``, when given, multiplies each record's score as it is
     assigned -- a call re-scores every record from its raw fields each time,
@@ -99,8 +103,10 @@ def _rank_records(
     tokenizes to nothing leaves ``score`` untouched.
 
     Scoring contract: ``RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recency``
-    (0.7 / 0.3), with a 7-year recency half-life and a 10-year default age for
-    a missing or unparseable year.
+    (0.7 / 0.3), with a 7-year recency half-life. A record whose year is
+    missing or unparseable takes the mean recency of the dated records in the
+    same call: absent metadata is not evidence of age. The 10-year default
+    age applies only when no record in the call carries a year.
     """
     if not records:
         return []
@@ -112,6 +118,18 @@ def _rank_records(
     now_year = current_year if current_year is not None else datetime.datetime.now().year
     lexical_weight = 1.0 - position_weight
 
+    recencies = [
+        ScoringEngine.calculate_recency_feature(
+            record.year,
+            current_year=now_year,
+            half_life_years=RECENCY_HALF_LIFE_YEARS,
+            default_age=DEFAULT_AGE_YEARS,
+        )
+        for record in records
+    ]
+    dated = [value for value, year in recencies if year is not None]
+    undated_recency = sum(dated) / len(dated) if dated else None
+
     scored: list[tuple[float, int, R]] = []
     for idx, record in enumerate(records):
         title_text, abstract_text = text_fields(record)
@@ -119,18 +137,16 @@ def _rank_records(
             terms, title_text, abstract_text, tokenizer=tokenizer
         )
 
-        if position_weight:
-            position = ScoringEngine.calculate_relevance(idx)
+        rank = idx if source_rank is None else source_rank(record)
+        if position_weight and rank is not None:
+            position = ScoringEngine.calculate_relevance(rank)
             relevance = lexical_weight * lexical + position_weight * position
         else:
             relevance = lexical
 
-        recency, _ = ScoringEngine.calculate_recency_feature(
-            record.year,
-            current_year=now_year,
-            half_life_years=RECENCY_HALF_LIFE_YEARS,
-            default_age=DEFAULT_AGE_YEARS,
-        )
+        recency, year = recencies[idx]
+        if year is None and undated_recency is not None:
+            recency = undated_recency
 
         final_score = RELEVANCE_WEIGHT * relevance + RECENCY_WEIGHT * recency
         if score_factor is not None:
@@ -186,8 +202,11 @@ def rank_brazil_guidelines(
       record gets a larger secondary token set than a sparse one; it is
       bounded by the coverage cap and outweighed by the recall it buys.
 
-    ``position_weight`` is non-zero because BVS returns a single
-    relevance-sorted list, which is the condition that prior is meant for.
+    The position prior applies to BVS records only, ranked by their order
+    among the BVS records in the input: BVS returns a single relevance-sorted
+    list, which is the condition that prior is meant for. Gov.br catalog rows
+    (``origin != "bvs"``) are prepended to that list by the merge and carry
+    no relevance order, so they score on lexical coverage alone.
 
     Records with no retrievable body (``has_full_text`` false) keep their
     title signal but score halved, and then sort into a second tier behind
@@ -195,6 +214,9 @@ def rank_brazil_guidelines(
     the halving is a score annotation only. Cards never disappear from the
     result set.
     """
+    bvs_rank = {
+        id(g): rank for rank, g in enumerate(g for g in guidelines if g.origin == "bvs")
+    }
     ranked = _rank_records(
         guidelines,
         query,
@@ -206,6 +228,7 @@ def rank_brazil_guidelines(
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,
         score_factor=lambda g: 1.0 if g.has_full_text else NO_FULL_TEXT_SCORE_FACTOR,
+        source_rank=lambda g: bvs_rank.get(id(g)),
     )
     if any(g.score is not None and not g.has_full_text for g in ranked):
         # Tier by construction: a multiplicative factor cannot sink a
