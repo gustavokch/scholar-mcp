@@ -1538,7 +1538,77 @@ Expected: PubMed hits carry non-empty `abstract_snippet`s. `Settings()` defaults
 
 ### Baseline (Task 3, before Task 4)
 
-_Paste `/tmp/brazil-probe-before.txt` here._
+Run 2026-09-24 against live BVS with a fresh cache, from a detached checkout of `7ce0df3e` (Tasks 1, 2 and 5 applied, no Task 4 ranker change). An earlier run the same day exited 2 (5 of 10 queries hit BVS timeouts / a 504 origin outage) and is not recorded, per Step 2.
+
+Exit status: **1** (watch-listed rows present, no errored query).
+
+```text
+'citologia oncótica LSIL lesão intraepitelial'  error=False error_kind=ok
+  1. biblio-1024362                                                         origin=-             body=True  score=0.381
+  2. biblio-1023380                                                         origin=-             body=True  score=0.309
+
+'retenção de placenta conduta 30 minutos'  error=False error_kind=ok
+  1. pcdt-disturbio-mineral-osseo-na-doenca-renal-cronica                   origin=-             body=True  score=0.402   <-- watch-listed
+  2. biblio-1399187                                                         origin=-             body=True  score=0.369
+  3. biblio-1399188                                                         origin=-             body=True  score=0.367
+  4. pcdt-doenca-de-paget                                                   origin=-             body=True  score=0.330
+  5. biblio-1714762                                                         origin=-             body=True  score=0.329
+
+'dengue grupo B manejo hidratação parenteral'  error=False error_kind=ok
+  1. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=-             body=True  score=0.557
+  2. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=-             body=True  score=0.517
+  3. biblio-1620107                                                         origin=-             body=True  score=0.433
+  4. govbr-svsa-dengue-dengue_classificacao_risco_manejo_paciente.pdf       origin=-             body=True  score=0.432
+  5. biblio-1571516                                                         origin=-             body=True  score=0.431
+
+'tuberculose retomada tratamento abandono'  error=False error_kind=ok
+  1. ms-manual-tuberculose-2019                                             origin=-             body=True  score=0.584
+  2. govbr-svsa-tuberculose-registro-de-pessoas-com-tuberculose-e-acompanha origin=-             body=True  score=0.521
+  3. govbr-svsa-tuberculose-tratamento-da-tuberculose-em-adolescentes-e-adu origin=-             body=True  score=0.516
+  4. govbr-svsa-tuberculose-o-tratamento-da-infeccao-latente-pelo-mycobacte origin=-             body=True  score=0.413
+  5. pcdt-cross-linking-corneano-no-tratamento-do-ceratone                  origin=-             body=True  score=0.405
+
+'curvas de crescimento síndrome de Down'  error=False error_kind=ok
+  1. pcdt-deficiencia-do-hormonio-de-crescimento-hipopituitarismo           origin=-             body=True  score=0.527   <-- watch-listed
+  2. govbr-guias-2025-guia-de-orientacoes-para-profissionais-de-saude-srag. origin=-             body=True  score=0.467
+  3. pcdt-sindrome-mielodisplasica-de-baixo-risco                           origin=-             body=True  score=0.455   <-- watch-listed
+  4. pcdt-sindrome-nefrotica-primaria-em-adultos                            origin=-             body=True  score=0.424
+  5. pcdt-sindrome-nefrotica-primaria-em-criancas-e-adolescentes            origin=-             body=True  score=0.405
+
+'curvas crescimento síndrome Down recém-nascido puericultura'  error=False error_kind=ok
+  1. pcdt-deficiencia-do-hormonio-de-crescimento-hipopituitarismo           origin=-             body=True  score=0.454   <-- watch-listed
+  2. govbr-guias-2025-guia-de-orientacoes-para-profissionais-de-saude-srag. origin=-             body=True  score=0.414
+  3. pcdt-sindrome-mielodisplasica-de-baixo-risco                           origin=-             body=True  score=0.382   <-- watch-listed
+  4. pcdt-sindrome-nefrotica-primaria-em-adultos                            origin=-             body=True  score=0.350
+  5. pcdt-sindrome-nefrotica-primaria-em-criancas-e-adolescentes            origin=-             body=True  score=0.331
+
+'dengue grupo B manejo hidratação parenteral antígeno NS1 leito de observação'  error=False error_kind=ok
+  1. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=-             body=True  score=0.395
+  2. pcdt-acidentes-ofidicos                                                origin=-             body=True  score=0.382   <-- watch-listed
+  3. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=-             body=True  score=0.375
+  4. biblio-1571516                                                         origin=-             body=True  score=0.369
+  5. pcdt-manejo-da-infeccao-pelo-hiv-em-adultos-modulo-1                   origin=-             body=True  score=0.361
+
+'dengue sinais de alerta grupo B manejo hidratação'  error=False error_kind=ok
+  1. govbr-svsa-dengue-dengue-diagnostico-e-manejo-clinico-adulto-e-crianca origin=-             body=True  score=0.496
+  2. govbr-svsa-dengue-dengue-manejo-adulto-crianca-5d-1.pdf                origin=-             body=True  score=0.463
+  3. biblio-1571516                                                         origin=-             body=True  score=0.403
+  4. pcdt-manejo-da-infeccao-pelo-hiv-em-adultos-modulo-1                   origin=-             body=True  score=0.398
+  5. pcdt-acidentes-ofidicos                                                origin=-             body=True  score=0.394   <-- watch-listed
+
+'terceiro estágio trabalho de parto conduta placenta retida'  error=False error_kind=ok
+  1. pcdt-assistencia-ao-parto-normal-diretriz-nacional                     origin=-             body=True  score=0.454
+  2. govbr-guias-2025-manual-de-orientacao-tecnica-do-peadts.pdf            origin=-             body=True  score=0.446
+  3. phr2-53135                                                             origin=-             body=True  score=0.391
+  4. govbr-svsa-saude-do-trabalhador-atlas-do-cancer-relacionado-ao-trabalh origin=-             body=True  score=0.382
+  5. sms-11534                                                              origin=-             body=True  score=0.339
+
+'lesão intraepitelial de baixo grau conduta colposcopia'  error=False error_kind=ok
+  1. pcdt-sindrome-mielodisplasica-de-baixo-risco                           origin=-             body=True  score=0.470   <-- watch-listed
+  2. biblio-1086633                                                         origin=-             body=False score=0.294
+
+watch-listed rows in a top 5: 8; errored queries: 0
+```
 
 ### After Task 4
 
