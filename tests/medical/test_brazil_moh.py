@@ -3233,10 +3233,13 @@ async def test_clean_bvs_result_is_not_cached_when_a_govbr_stage_fails(tmp_path:
             return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
         )
 
-        first, _first_meta = await engine.search_guidelines("dengue", limit=5)
+        first, first_meta = await engine.search_guidelines("dengue", limit=5)
         second, second_meta = await engine.search_guidelines("dengue", limit=5)
 
         assert first, "BVS returned a record"
+        # The caller is told the merge is partial: success, classified.
+        assert first_meta.error is False
+        assert first_meta.error_kind == "backend_error"
         assert second_meta.cached is False
         assert route.call_count == 2, "the second call must re-run the chain"
         composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
@@ -3571,7 +3574,10 @@ def test_topic_gate_empties_a_covered_pool_when_one_query_term_is_absent():
 @respx.mock
 async def test_govbr_stage_timeout_reports_timeout_kind(tmp_path: Path):
     """A gov.br stage cut off by its budget is a timeout in the ENAMED §2
-    taxonomy, not an unclassified error."""
+    taxonomy, not an unclassified error -- and the caller sees it: the
+    merge is missing that stage's rows, so the meta reports the kind (and
+    ``server._with_degraded`` flags the response) while ``error`` stays
+    False because BVS answered."""
     engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
     _pin_fast_limiter(http_client)
     engine.settings.brazil_stage_timeout_s = 0.3
@@ -3584,22 +3590,13 @@ async def test_govbr_stage_timeout_reports_timeout_kind(tmp_path: Path):
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(200, json=_bvs_response([_bvs_doc()]))
         )
-        seen: dict = {}
-        real_stage = engine._stage
 
-        async def _spy(stage, coro, default, **kwargs):
-            result = await real_stage(stage, coro, default, **kwargs)
-            seen[stage] = result
-            return result
+        records, meta = await engine.search_guidelines("dengue", limit=5)
 
-        engine._stage = _spy
-
-        await engine.search_guidelines("dengue", limit=5)
-
-        _records, pcdt_meta = seen["govbr_pcdt"]
-        assert pcdt_meta.error is True
-        assert pcdt_meta.error_kind == "timeout"
-        assert pcdt_meta.timeout is True
+        assert records, "BVS still answered"
+        assert meta.error is False
+        assert meta.error_kind == "timeout"
+        assert meta.timeout is True
     finally:
         await cache.close()
         await http_client.aclose()

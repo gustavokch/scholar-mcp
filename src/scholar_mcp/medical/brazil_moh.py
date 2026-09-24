@@ -212,6 +212,9 @@ class _SearchState:
     a cascade. ``http_status``/``challenge_hit``/``error_kind`` feed the §2
     diagnostics contract; ``stages_attempted`` and ``overfetch_window`` are
     observed per call for the S0.1 error-taxonomy table.
+    ``local_error_kind``/``local_timed_out`` carry a failed gov.br stage
+    (PCDT or A-Z): the merge is missing that stage's rows, and the caller
+    must be told even when BVS answered cleanly.
     """
 
     bvs_shielded: bool = False
@@ -220,6 +223,8 @@ class _SearchState:
     http_status: int | None = None
     challenge_hit: bool = False
     error_kind: BvsErrorKind | Literal[""] = ""
+    local_error_kind: BvsErrorKind | Literal[""] = ""
+    local_timed_out: bool = False
     stages_attempted: int = 0
     overfetch_window: int = 0
 
@@ -1005,8 +1010,16 @@ class BrazilMoHEngine:
         state: _SearchState,
         records: list[BrazilGuideline],
     ) -> CacheMetadata:
-        """Build the §2 diagnostics-bearing CacheMetadata for a search call."""
-        if not error and records:
+        """Build the §2 diagnostics-bearing CacheMetadata for a search call.
+
+        A failed gov.br stage with a healthy BVS is a success that is
+        missing rows: ``error`` stays False, ``error_kind`` carries the
+        stage's kind so ``server._with_degraded`` flags the response -- the
+        same shape the abstract fallback uses after a failed PDF fetch.
+        """
+        if not error and state.local_error_kind:
+            kind = state.local_error_kind
+        elif not error and records:
             kind = "ok"
         elif not error:
             kind = state.error_kind or "successful_empty"
@@ -1027,7 +1040,7 @@ class BrazilMoHEngine:
             error_kind=kind,
             http_status=state.http_status,
             challenge_hit=state.challenge_hit,
-            timeout=state.bvs_timed_out,
+            timeout=state.bvs_timed_out or state.local_timed_out,
         )
 
     def _log_diagnostics(
@@ -1222,6 +1235,14 @@ class BrazilMoHEngine:
         # Kept apart from errored_any: a browser-tier success clears the BVS
         # errors it answered, never a gov.br stage that also failed.
         local_errored = errored_any
+        # The failed stage's kind reaches the caller through _search_meta;
+        # a merge missing its rows must not read as a clean "ok".
+        for stage_meta in (pcdt_meta, az_meta):
+            if stage_meta.error:
+                state.local_error_kind = state.local_error_kind or (
+                    stage_meta.error_kind or "backend_error"
+                )
+                state.local_timed_out = state.local_timed_out or stage_meta.timeout
         # The browser tier answers BVS failures (the CDN shield 403s plain
         # HTTP clients); a PCDT outage with a healthy BVS must not launch a
         # real browser. Track BVS errors on their own flag.
