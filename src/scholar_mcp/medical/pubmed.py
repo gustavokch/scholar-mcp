@@ -163,11 +163,27 @@ class MedicalPubMedClient:
         query: str,
         max_results: int = 10,
         relax: bool = True,
+        filters: str | None = None,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
+        """Search PubMed for ``query``, optionally restricted by ``filters``.
+
+        ``filters`` is a PubMed clause (e.g. ``"NEJM"[Journal] OR ...``)
+        ANDed onto the topic on every esearch, the relaxed rungs included:
+        the ladder only ever shortens ``query``. Composing the clause into
+        ``query`` instead would hand it to ``relax_ladder``, which strips the
+        quotes, parentheses and ``OR`` and turns the filter into free-text
+        words or drops it. Results are ranked against ``query`` alone.
+        """
         # The cache key stays the original query: a relaxed hit is still the
         # answer to what the caller asked, and the key must not fan out per
         # ladder step.
         cache_key = f"pubmed:search:{query}:{max_results}"
+        if filters:
+            cache_key = f"{cache_key}:filters={filters}"
+
+        def _term(topic: str) -> str:
+            return f"({topic}) AND ({filters})" if filters else topic
+
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             # Row shape carries the ladder's relaxed_query (finding 4): a
@@ -187,7 +203,7 @@ class MedicalPubMedClient:
                 dataclasses.replace(meta, relaxed_query=cached_relaxed_query),
             )
 
-        idlist, errored = await self._esearch(query, max_results)
+        idlist, errored = await self._esearch(_term(query), max_results)
         if errored:
             # A fetch failure is not a zero-hit: relaxing further would
             # mistake a transport error for an over-constrained query.
@@ -202,7 +218,7 @@ class MedicalPubMedClient:
             for variant in relax_ladder(query)[1 : 1 + MAX_RELAX_EXTRA_CALLS]:
                 if variant == query:
                     continue
-                idlist, errored = await self._esearch(variant, max_results)
+                idlist, errored = await self._esearch(_term(variant), max_results)
                 if errored:
                     break
                 if idlist:

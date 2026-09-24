@@ -520,14 +520,17 @@ class PediatricsEngine:
         query: str,
         max_results: int = 10,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"pediatric_journals:{query}:{max_results}"
+        # v2: rows written before the journal filter survived relaxation hold
+        # unfiltered PubMed results.
+        cache_key = f"pediatric_journals:v2:{query}:{max_results}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta
 
         journal_filters = " OR ".join(f'"{j}"[Journal]' for j in PEDIATRIC_JOURNALS)
-        term = f"({query}) AND ({journal_filters})"
-        articles, pubmed_meta = await self.pubmed.search_articles(term, max_results=max_results)
+        articles, pubmed_meta = await self.pubmed.search_articles(
+            query, max_results=max_results, filters=journal_filters
+        )
 
         if pubmed_meta.error and not articles:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)

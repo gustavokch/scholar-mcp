@@ -440,22 +440,72 @@ async def test_search_medical_journals_propagates_pubmed_error(tmp_path: Path):
     await http_client.aclose()
 
 
-@respx.mock
-async def test_search_medical_journals_composes_query(tmp_path: Path):
-    engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
-    mock_pubmed.search_articles.return_value = (
-        [MedicalArticle(title="NEJM diabetes study", journal="NEJM")],
-        CacheMetadata(cached=False, cache_age=0),
-    )
+_LONG_TOPIC = (
+    "Epstein-Barr virus infectious mononucleosis exudative tonsillitis "
+    "posterior cervical lymphadenopathy rash adolescent"
+)
 
-    articles, meta = await engine.search_medical_journals("diabetes")
-    term = mock_pubmed.search_articles.await_args.args[0]
-    assert "New England Journal of Medicine" in term
-    assert "Nature Medicine" in term
-    assert "diabetes" in term
-    assert len(articles) == 1
-    await cache.close()
-    await http_client.aclose()
+
+@respx.mock
+async def test_pubmed_client_filters_survive_every_relaxed_rung(tmp_path: Path):
+    """A filter composed into the query was fed to relax_ladder, which strips
+    quotes, parentheses and OR: the relaxed rungs lost the [Journal] clause or
+    turned it into free-text words. ``filters`` is ANDed onto every rung."""
+    from scholar_mcp.query_relax import relax_ladder
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    ladder = relax_ladder(_LONG_TOPIC)
+    clause = '"Lancet"[Journal] OR "BMJ"[Journal]'
+    try:
+        def _router(request: httpx.Request) -> httpx.Response:
+            # Only the 4-token rung answers.
+            hit = request.url.params.get("term", "").startswith(f"({ladder[2]}) AND")
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["888"] if hit else []}})
+
+        respx.get(EU_SEARCH_URL).mock(side_effect=_router)
+        respx.get(EU_FETCH_URL).respond(content=_EFETCH_ARTICLE)
+
+        articles, meta = await client.search_articles(_LONG_TOPIC, max_results=5, filters=clause)
+
+        assert _esearch_terms() == [
+            f"({_LONG_TOPIC}) AND ({clause})",
+            f"({ladder[1]}) AND ({clause})",
+            f"({ladder[2]}) AND ({clause})",
+        ]
+        assert len(articles) == 1
+        assert meta.relaxed_query == ladder[2]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_medical_journals_keeps_journal_filter_when_relaxing(tmp_path: Path):
+    from scholar_mcp.medical.clinical_trials import ClinicalTrialsClient
+
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = MedicalDatabasesEngine(
+        pubmed=MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings),
+        clinical_trials=ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings),
+        http_client=http_client,
+        cache=cache,
+        settings=settings,
+        jitter_range=None,
+    )
+    try:
+        respx.get(EU_SEARCH_URL).respond(json={"esearchresult": {"idlist": []}})
+        await engine.search_medical_journals(_LONG_TOPIC)
+        terms = _esearch_terms()
+        assert len(terms) == 4  # initial + 3 relaxed rungs
+        assert all('"New England Journal of Medicine"[Journal]' in t for t in terms)
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 async def test_search_medical_journals_ranks_on_user_query_before_truncation(tmp_path: Path):
