@@ -1224,6 +1224,9 @@ class BrazilMoHEngine:
             self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
         )
         errored_any = pcdt_meta.error or az_meta.error
+        # Kept apart from errored_any: a browser-tier success clears the BVS
+        # errors it answered, never a gov.br stage that also failed.
+        local_errored = errored_any
         # The browser tier answers BVS failures (the CDN shield 403s plain
         # HTTP clients); a PCDT outage with a healthy BVS must not launch a
         # real browser. Track BVS errors on their own flag.
@@ -1362,7 +1365,8 @@ class BrazilMoHEngine:
         # Every BVS HTTP stage errored (the CDN shield 403s every request) and
         # the PCDT engine alone cannot cover the non-conventional index. One
         # rendered browser fetch carries the fingerprint the shield accepts;
-        # success clears errored_any so the merged result is cached.
+        # success clears the BVS errors, so the merge is cached unless a
+        # gov.br stage also errored.
         if (
             not records
             and bvs_errored
@@ -1387,7 +1391,7 @@ class BrazilMoHEngine:
                 # cache an empty list under the 30-day TTL.
                 if browser_records:
                     records = browser_records
-                    errored_any = False
+                    errored_any = local_errored
 
         local_records: list[BrazilGuideline] = []
         seen_local: set[str] = set()
@@ -1468,11 +1472,12 @@ class BrazilMoHEngine:
             merged_records, query, since_year, clamped
         )
 
-        # A chain with a stalled stage returns partial results; caching them
-        # under the 30-day TTL would make a transient stall permanent. An
-        # origin outage is never cached at all: it is not evidence about
-        # the corpus, and pinning it would both poison the TTL and count a
-        # sick origin against the caller's breaker on replay.
+        # A partial retrieval is never cached. A chain with any errored stage
+        # -- a failed or stalled BVS stage, or a gov.br stage that timed out
+        # or errored -- returns partial results, and caching them would make
+        # a transient failure permanent. An origin outage is not evidence
+        # about the corpus either, and pinning it would count a sick origin
+        # against the caller's breaker on replay.
         #
         # The row cached is the unfiltered merge, not the sliced `records`
         # returned to this caller: `since_year` is not part of `cache_key`,
@@ -1484,18 +1489,6 @@ class BrazilMoHEngine:
                 cache_key,
                 [record.to_dict() for record in merged_records],
                 source="brazil_moh",
-            )
-        elif not bvs_errored:
-            # BVS answered cleanly and only a local gov.br scraper failed, so
-            # the merge is complete except for that scraper's rows. Pinning it
-            # for the full TTL would freeze the gap, but re-running the entire
-            # BVS chain on every call for as long as the scraper is down is
-            # its own cost. Hold the degraded merge briefly instead.
-            await self.cache.set(
-                cache_key,
-                [record.to_dict() for record in merged_records],
-                source="brazil_moh",
-                ttl=DEGRADED_RESULT_TTL_SECONDS,
             )
         done_meta = self._finalize_search(
             _SearchOutcome(
