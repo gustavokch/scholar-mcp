@@ -58,3 +58,16 @@ def test_complete_crawl_is_written(script, monkeypatch, tmp_path, name):
 def test_each_catalog_defaults_to_its_own_seed(script):
     assert script.CATALOGS["az"][2].name == "govbr_az_catalog.json"
     assert script.CATALOGS["pcdt"][2].name == "govbr_pcdt_catalog.json"
+
+
+def test_failed_write_keeps_the_existing_seed(script, monkeypatch, tmp_path):
+    rows = _rows(script.MIN_EXPECTED_ROWS)
+    rows["zz-bad"] = {"value": object()}  # sorts last: dump fails mid-write
+    _stub(script, monkeypatch, rows, complete=True)
+    out = tmp_path / "seed.json"
+    out.write_text('{"old": {}}\n', encoding="utf-8")
+
+    with pytest.raises(TypeError):
+        script.main(["--catalog", "az", "--output", str(out)])
+    assert out.read_text(encoding="utf-8") == '{"old": {}}\n'
+    assert [p.name for p in tmp_path.iterdir()] == ["seed.json"]

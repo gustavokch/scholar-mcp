@@ -19,6 +19,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -87,10 +88,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Write beside the seed and swap it in: an interrupted dump must never
+    # truncate the seed, which the server would read as an outage.
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as f:
-        json.dump(catalog, f, ensure_ascii=False, indent=2, sort_keys=True)
-        f.write("\n")
+    tmp = output.with_name(f"{output.name}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(catalog, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, output)
+    finally:
+        tmp.unlink(missing_ok=True)
     print(f"wrote {len(catalog)} records to {output}")
     return 0
 
