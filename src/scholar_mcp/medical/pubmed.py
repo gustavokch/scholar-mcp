@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import logging
 import re
 from bs4 import BeautifulSoup
@@ -179,7 +180,8 @@ class MedicalPubMedClient:
         # ladder step.
         cache_key = f"pubmed:search:{query}:{max_results}"
         if filters:
-            cache_key = f"{cache_key}:filters={filters}"
+            filt_hash = hashlib.sha1(filters.encode()).hexdigest()[:12]
+            cache_key = f"{cache_key}:f={filt_hash}"
 
         def _term(topic: str) -> str:
             return f"({topic}) AND ({filters})" if filters else topic

@@ -483,6 +483,34 @@ async def test_pubmed_client_filters_survive_every_relaxed_rung(tmp_path: Path):
 
 
 @respx.mock
+async def test_pubmed_client_cache_key_hashes_filters(tmp_path: Path, monkeypatch):
+    """The raw journal clause (~40 names for TOP_JOURNALS) must not land in
+    the SQLite key."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    # Long clause (~150 chars) so un-hashed key (>180 chars) exceeds the 120 limit
+    clause = " OR ".join(f'"{j}"[Journal]' for j in ["Lancet", "BMJ", "NEJM", "JAMA", "Pediatrics", "Nature Medicine"])
+    seen_keys: list[str] = []
+    real_get = cache.get
+
+    async def spy_get(key, *a, **kw):
+        seen_keys.append(key)
+        return await real_get(key, *a, **kw)
+
+    monkeypatch.setattr(cache, "get", spy_get)
+    try:
+        respx.get(EU_SEARCH_URL).respond(json={"esearchresult": {"idlist": []}})
+        await client.search_articles("bronchiolitis", max_results=5, filters=clause)
+        assert seen_keys, "cache.get was not called"
+        assert all(len(k) <= 120 for k in seen_keys)
+        assert all(clause not in k for k in seen_keys)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+@respx.mock
 async def test_search_medical_journals_keeps_journal_filter_when_relaxing(tmp_path: Path):
     from scholar_mcp.medical.clinical_trials import ClinicalTrialsClient
 
