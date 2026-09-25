@@ -185,7 +185,7 @@ Verdict thresholds: `coverage >= 0.5` → `SUPPORTED`; `>= 0.15` → `WEAK`; els
 | `citations` | 0.20 | OpenAlex batch, Europe PMC, CrossRef fallback | `0` if unresolved |
 | `recency` | 0.15 | exponential half-life decay, 7-year half-life | default age 10y if year missing |
 | `evidence_grade` | 0.20 | Oxford CEBM-style ladder from PubMed `PublicationType` (1a/1b/2b/3b/4/5) | `0` if not a PubMed hit or no grade matches |
-| `journal_impact` | 0.10 | Scimago SJR lookup by ISSN / normalized name | neutral `0.0` until `scimago_sjr.json` is populated |
+| `journal_impact` | 0.10 | Scimago SJR lookup by ISSN / normalized name | neutral `0.0` when neither ISSN nor name is in the bundled SJR 2025 table |
 | `author_authority` | 0.05 | last-author h-index via OpenAlex batch | `0` if author not resolved |
 
 Position prior (`RANKING_POSITION_WEIGHT`, default `0.25`) blends the source ordering into the relevance component — useful for single-source pools (e.g. NCBI Best Match); leave at 0 for merged multi-source pools.
@@ -205,7 +205,7 @@ Mapped from PubMed `PublicationType` via `classify_evidence_grade`. When a paper
 
 ### Journal impact data (Scimago SJR)
 
-The `journal_impact` signal requires `src/scholar_mcp/data/scimago_sjr.json` to be populated. The file ships **empty** (`{"issn": {}, "name": {}}`); until it is populated, every paper receives a neutral `0.0` for that signal. Procedure: see [`src/scholar_mcp/data/SOURCES.md`](src/scholar_mcp/data/SOURCES.md).
+The `journal_impact` signal reads `src/scholar_mcp/data/scimago_sjr.json`, generated from the SCImago Journal Rank 2025 CSV. That file is SCImago's data, licensed for non-commercial use with citation, not under this repository's MIT license. Provenance, citation and refresh steps: [`src/scholar_mcp/data/SOURCES.md`](src/scholar_mcp/data/SOURCES.md).
 
 ---
 
@@ -291,7 +291,7 @@ All options are configured via environment variables:
 | `RANKING_WEIGHT_CITATIONS` | `0.20` | Weight of the log-scaled citation-count signal. |
 | `RANKING_WEIGHT_RECENCY` | `0.15` | Weight of the half-life decayed recency signal. |
 | `RANKING_WEIGHT_EVIDENCE_GRADE` | `0.20` | Weight of the Oxford CEBM-style evidence-grade signal. |
-| `RANKING_WEIGHT_JOURNAL_IMPACT` | `0.10` | Weight of the Scimago SJR journal-impact signal (neutral `0.0` until `scimago_sjr.json` is populated). |
+| `RANKING_WEIGHT_JOURNAL_IMPACT` | `0.10` | Weight of the Scimago SJR journal-impact signal (neutral `0.0` for journals missing from the bundled table). |
 | `RANKING_WEIGHT_AUTHOR_AUTHORITY` | `0.05` | Weight of the last-author h-index authority signal. |
 | `RANKING_POSITION_WEIGHT` | `0.25` | Blend of the source `1/sqrt(rank + 1)` position prior into the relevance component. |
 | `RANKING_RECENCY_HALF_LIFE_YEARS` | `7.0` | Half-life (years) for the recency decay. |

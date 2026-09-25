@@ -15,7 +15,7 @@ from scholar_mcp.providers.scihub import SciHubProvider, _extract_pdf_url
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 CROSSREF = "https://api.crossref.org/works"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
@@ -25,6 +25,71 @@ async def client():
     c = AsyncHttpClient(settings=Settings(), max_retries=1, backoff_base=0.01)
     yield c
     await c.aclose()
+
+
+def _pubmed_article(
+    pmid: str,
+    title: str = "A PubMed Paper.",
+    abstract: str = "",
+    journal: str = "Nature",
+    year: str = "2020",
+    issn: str = "",
+    pubtypes: tuple[str, ...] = ("Journal Article",),
+    doi: str = "",
+) -> str:
+    """One EFetch PubmedArticle.
+
+    DateCompleted precedes PubDate on purpose: a parser that takes the first
+    <Year> in the record reads the indexing year, not the publication year.
+    """
+    abstract_xml = (
+        f"<Abstract><AbstractText>{abstract}</AbstractText></Abstract>" if abstract else ""
+    )
+    issn_xml = f'<ISSN IssnType="Print">{issn}</ISSN>' if issn else ""
+    types = "".join(f"<PublicationType>{t}</PublicationType>" for t in pubtypes)
+    doi_xml = f'<ArticleId IdType="doi">{doi}</ArticleId>' if doi else ""
+    return f"""
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>{pmid}</PMID>
+      <DateCompleted><Year>2001</Year></DateCompleted>
+      <Article>
+        <Journal>{issn_xml}<JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>
+          <Title>{journal}</Title></Journal>
+        <ArticleTitle>{title}</ArticleTitle>
+        {abstract_xml}
+        <AuthorList><Author><LastName>Doudna</LastName><ForeName>Jennifer</ForeName></Author></AuthorList>
+        <PublicationTypeList>{types}</PublicationTypeList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData><ArticleIdList><ArticleId IdType="pubmed">{pmid}</ArticleId>{doi_xml}</ArticleIdList></PubmedData>
+  </PubmedArticle>"""
+
+
+# NCBI Bookshelf chapter (StatPearls): Book lists editors before the chapter's
+# authors, and the record has no Journal.
+_STATPEARLS_RECORD = """
+  <PubmedBookArticle>
+    <BookDocument>
+      <PMID Version="1">28613625</PMID>
+      <ArticleIdList><ArticleId IdType="bookaccession">NBK430732</ArticleId></ArticleIdList>
+      <Book>
+        <Publisher><PublisherName>StatPearls Publishing</PublisherName></Publisher>
+        <BookTitle book="statpearls">StatPearls</BookTitle>
+        <PubDate><Year>2025</Year><Month>01</Month></PubDate>
+        <AuthorList Type="editors"><Author><LastName>Editor</LastName><ForeName>Ed</ForeName></Author></AuthorList>
+      </Book>
+      <ArticleTitle book="statpearls" part="article-20379">Dengue Fever</ArticleTitle>
+      <AuthorList Type="authors"><Author><LastName>Schaefer</LastName><ForeName>Thomas J</ForeName></Author></AuthorList>
+      <PublicationType UI="D016454">Review</PublicationType>
+      <Abstract><AbstractText>Dengue is a mosquito-borne viral infection.</AbstractText></Abstract>
+    </BookDocument>
+    <PubmedBookData><ArticleIdList><ArticleId IdType="pubmed">28613625</ArticleId></ArticleIdList></PubmedBookData>
+  </PubmedBookArticle>"""
+
+
+def _efetch_set(*records: str) -> str:
+    return f'<?xml version="1.0"?><PubmedArticleSet>{"".join(records)}</PubmedArticleSet>'
 
 
 def test_pubmed_query_builder_applies_filters():
@@ -50,22 +115,7 @@ async def test_pubmed_search_surfaces_relaxed_variant(client):
             httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}}),
         ]
     )
-    respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "result": {
-                    "uids": ["32000000"],
-                    "32000000": {
-                        "title": "A Relaxed Paper",
-                        "authors": [{"name": "Doudna J"}],
-                        "pubdate": "2020 Mar",
-                        "fulljournalname": "Nature",
-                    },
-                }
-            },
-        )
-    )
+    _mock_efetch(_efetch_set(_pubmed_article("32000000", title="A Relaxed Paper")))
     provider = PubMedProvider(client, Settings())
     results = await provider.search(
         "novel therapeutic approaches for treating diabetes mellitus type",
@@ -77,35 +127,29 @@ async def test_pubmed_search_surfaces_relaxed_variant(client):
 
 
 @respx.mock
-async def test_pubmed_search_returns_metadata(client):
+async def test_pubmed_search_returns_abstract_and_metadata(client):
+    """ESummary carries no abstract: every scholar-path PubMed hit used to be
+    scored on its title alone and reached the agent with an empty snippet."""
     esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
     )
-    respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "result": {
-                    "uids": ["32000000"],
-                    "32000000": {
-                        "title": "A PubMed Paper",
-                        "authors": [{"name": "Doudna J"}],
-                        "pubdate": "2020 Mar",
-                        "fulljournalname": "Nature",
-                        "elocationid": "doi: 10.1038/nature123",
-                    },
-                }
-            },
+    _mock_efetch(
+        _efetch_set(
+            _pubmed_article("32000000", abstract="Cas9 edits genomes.", doi="10.1038/nature123")
         )
     )
     results = await PubMedProvider(client, Settings()).search("crispr", num_results=5, sort="relevance")
     assert len(results) == 1
-    assert results[0].title == "A PubMed Paper"
-    assert results[0].pmid == "32000000"
-    assert results[0].doi == "10.1038/nature123"
-    # Verify relevance sort is requested from NCBI (default esearch order is date, not relevance)
-    request = esearch_route.calls.last.request
-    assert request.url.params.get("sort") == "relevance"
+    paper = results[0]
+    assert paper.abstract == "Cas9 edits genomes."
+    assert paper.title == "A PubMed Paper"
+    assert paper.pmid == "32000000"
+    assert paper.doi == "10.1038/nature123"
+    assert paper.year == "2020"  # PubDate, not DateCompleted
+    assert paper.venue == "Nature"
+    assert paper.source == "pubmed"
+    # NCBI's default esearch order is date, not relevance.
+    assert esearch_route.calls.last.request.url.params.get("sort") == "relevance"
 
 
 @respx.mock
@@ -113,23 +157,7 @@ async def test_pubmed_search_sort_date(client):
     esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
     )
-    respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "result": {
-                    "uids": ["32000000"],
-                    "32000000": {
-                        "title": "A PubMed Paper",
-                        "authors": [{"name": "Doudna J"}],
-                        "pubdate": "2020 Mar",
-                        "fulljournalname": "Nature",
-                        "elocationid": "doi: 10.1038/nature123",
-                    },
-                }
-            },
-        )
-    )
+    _mock_efetch(_efetch_set(_pubmed_article("32000000")))
     results = await PubMedProvider(client, Settings()).search("crispr", num_results=5, sort="pub_date")
     assert len(results) == 1
     request = esearch_route.calls.last.request
@@ -141,28 +169,19 @@ async def test_pubmed_search_captures_pubtype_and_issn(client):
     respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["111"]}})
     )
-    respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "result": {
-                    "uids": ["111"],
-                    "111": {
-                        "title": "A Randomized Trial of X.",
-                        "authors": [{"name": "Doe J"}],
-                        "pubdate": "2024",
-                        "fulljournalname": "New England Journal of Medicine",
-                        "pubtype": ["Journal Article", "Randomized Controlled Trial"],
-                        "issn": "0028-4793",
-                        "essn": "1533-4406",
-                    },
-                }
-            },
+    _mock_efetch(
+        _efetch_set(
+            _pubmed_article(
+                "111",
+                title="A Randomized Trial of X.",
+                journal="New England Journal of Medicine",
+                year="2024",
+                issn="0028-4793",
+                pubtypes=("Journal Article", "Randomized Controlled Trial"),
+            )
         )
     )
-
     results = await PubMedProvider(client, Settings()).search("x trial", num_results=5)
-
     assert len(results) == 1
     assert results[0].study_type == "Journal Article; Randomized Controlled Trial"
     assert results[0].evidence_grade == "1b"
@@ -1003,34 +1022,20 @@ async def test_mirror_penalty_is_capped(client, monkeypatch):
     assert provider._mirror_penalties["https://m1.example"] == MAX_MIRROR_PENALTY
 
 
-_ESUMMARY_RECORD = {
-    "result": {
-        "uids": ["32000000"],
-        "32000000": {
-            "title": "A Relaxed PubMed Paper",
-            "authors": [{"name": "Doudna J"}],
-            "pubdate": "2020 Mar",
-            "fulljournalname": "Nature",
-            "elocationid": "doi: 10.1038/relaxed",
-        },
-    }
-}
-
-
 @respx.mock
 async def test_pubmed_search_sends_ncbi_credentials(client):
-    """The provider was missing api_key/email/tool entirely (2.8 req/s
-    instead of 9 with a key). Both esearch and esummary must carry them."""
+    """Both E-utility calls of a search must carry api_key/email/tool
+    (2.8 req/s without a key, 9 with one)."""
     esearch_route = respx.get(url__startswith=ESEARCH).mock(
         return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
     )
-    esummary_route = respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(200, json=_ESUMMARY_RECORD)
+    efetch_route = respx.get(url__startswith=EFETCH).mock(
+        return_value=httpx.Response(200, text=_efetch_set(_pubmed_article("32000000")))
     )
     settings = Settings(pubmed_api_key="KEY123", pubmed_email="a@b.c", pubmed_tool="T")
     results = await PubMedProvider(client, settings).search("crispr", num_results=5)
     assert len(results) == 1
-    for route in (esearch_route, esummary_route):
+    for route in (esearch_route, efetch_route):
         params = route.calls.last.request.url.params
         assert params.get("api_key") == "KEY123"
         assert params.get("email") == "a@b.c"
@@ -1048,9 +1053,7 @@ async def test_pubmed_search_relaxes_long_query_preserving_filters(client):
         return httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
 
     esearch_route = respx.get(url__startswith=ESEARCH).mock(side_effect=_router)
-    respx.get(url__startswith=ESUMMARY).mock(
-        return_value=httpx.Response(200, json=_ESUMMARY_RECORD)
-    )
+    _mock_efetch(_efetch_set(_pubmed_article("32000000")))
     results = await PubMedProvider(client, Settings()).search(
         "alpha beta gamma delta epsilon zeta eta theta", author="Doudna J"
     )
@@ -1075,3 +1078,70 @@ async def test_pubmed_search_does_not_relax_on_esearch_error(client):
     assert results == []
     assert provider.last_error is not None
     assert len(esearch_route.calls) == 1
+
+
+@respx.mock
+async def test_pubmed_search_parses_bookshelf_records(client):
+    """StatPearls and other Bookshelf chapters are frequent Best Match hits;
+    EFetch returns them as PubmedBookArticle, not PubmedArticle."""
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["28613625"]}})
+    )
+    _mock_efetch(_efetch_set(_STATPEARLS_RECORD))
+    results = await PubMedProvider(client, Settings()).search("dengue", num_results=5)
+    assert len(results) == 1
+    book = results[0]
+    assert book.title == "Dengue Fever"
+    assert book.venue == "StatPearls"
+    assert book.year == "2025"
+    assert book.abstract == "Dengue is a mosquito-borne viral infection."
+    assert book.authors == ["Thomas J Schaefer"]  # chapter authors, not book editors
+    assert book.study_type == "Review"
+
+
+@respx.mock
+async def test_pubmed_search_keeps_esearch_relevance_order(client):
+    """esearch's order is NCBI's relevance ranking; EFetch does not promise it."""
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["2", "1"]}})
+    )
+    _mock_efetch(_efetch_set(_pubmed_article("1"), _pubmed_article("2")))
+    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5)
+    assert [p.pmid for p in results] == ["2", "1"]
+
+
+@respx.mock
+async def test_pubmed_search_efetch_failure_reports_error(client):
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+    )
+    respx.get(url__startswith=EFETCH).mock(return_value=httpx.Response(500))
+    provider = PubMedProvider(client, Settings())
+    assert await provider.search("crispr", num_results=5) == []
+    assert provider.last_error is not None
+
+
+@respx.mock
+async def test_pubmed_fetch_abstract_reads_bookshelf_record(client):
+    _mock_efetch(_efetch_set(_STATPEARLS_RECORD))
+    meta = await PubMedProvider(client, Settings()).fetch_abstract(IdentifierMap(pmid="28613625"))
+    assert meta is not None
+    assert meta.abstract == "Dengue is a mosquito-borne viral infection."
+
+
+@respx.mock
+async def test_pubmed_search_reads_own_pmid_not_comments_corrections(client):
+    """A CommentsCorrections entry also carries a PMID (the notice's target).
+    The record's own PMID lives in MedlineCitation."""
+    record = _pubmed_article("32000000").replace(
+        "</MedlineCitation>",
+        "<CommentsCorrectionsList><CommentsCorrections RefType=\"RetractionIn\">"
+        "<PMID>99999999</PMID></CommentsCorrections></CommentsCorrectionsList>"
+        "</MedlineCitation>",
+    )
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+    )
+    _mock_efetch(_efetch_set(record))
+    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5)
+    assert [p.pmid for p in results] == ["32000000"]

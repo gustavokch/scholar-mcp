@@ -300,20 +300,67 @@ def test_rank_brazil_guidelines_empty_returns_empty():
     assert rank_brazil_guidelines([], "dengue") == []
 
 
-def test_rank_brazil_guidelines_missing_year_uses_default_age():
-    # An unparseable or absent year must not raise; it falls back to the
-    # 10-year default age, so it scores below an otherwise identical record
-    # that carries a recent year.
+def test_rank_brazil_guidelines_undated_record_takes_pool_mean_recency():
+    # The PCDT catalog carries no year at all. A missing year is absent
+    # metadata, not evidence of age: the record scores as an average-aged
+    # member of its pool instead of a 10-year-old one.
     guidelines = [
-        _guideline("Manejo da dengue", year=""),
-        _guideline("Manejo da dengue", year="2026"),
+        _guideline("Manejo da dengue", record_id="undated", year=""),
+        _guideline("Manejo da dengue", record_id="y2022", year="2022"),
+        _guideline("Manejo da dengue", record_id="y2024", year="2024"),
     ]
     ranked = rank_brazil_guidelines(guidelines, "dengue", current_year=2026)
-    assert ranked[0].year == "2026"
-    assert all(g.score is not None for g in ranked)
+    assert [g.record_id for g in ranked] == ["y2024", "undated", "y2022"]
 
+    # No dated record in the pool: the default age still yields a score.
     garbage = [_guideline("Manejo da dengue", year="n/a")]
     assert rank_brazil_guidelines(garbage, "dengue", current_year=2026)[0].score is not None
+
+
+def test_rank_brazil_guidelines_catalog_row_does_not_inherit_bvs_head_position():
+    # The merge prepends gov.br catalog rows to the BVS list; the Solr
+    # position prior belongs to the first BVS record, not to list index 0.
+    catalog = _guideline(
+        "Manejo da dengue", record_id="catalog", origin="govbr_catalog",
+        has_full_text=True, year="2020",
+    )
+    bvs = _guideline(
+        "Manejo da dengue", record_id="bvs", origin="bvs",
+        has_full_text=True, year="2020",
+    )
+    ranked = rank_brazil_guidelines([catalog, bvs], "manejo dengue grave", current_year=2026)
+    assert [g.record_id for g in ranked] == ["bvs", "catalog"]
+
+
+def test_rank_brazil_guidelines_single_token_catalog_match_below_on_topic_bvs():
+    # Q026 shape (zimqa handoff §3.4): the snakebite PCDT matches the dengue
+    # query on "manejo" alone, sits at merged index 0, and used to outrank an
+    # on-topic BVS record five places down.
+    ofidicos = _guideline(
+        "Acidentes Ofídicos",
+        record_id="pcdt-acidentes-ofidicos",
+        origin="govbr_catalog",
+        has_full_text=True,
+        abstract=(
+            "Orienta diagnóstico, classificação e tratamento de picadas de serpentes "
+            "no SUS, definindo uso racional de soros, monitoramento clínico e manejo "
+            "de complicações."
+        ),
+    )
+    fillers = [
+        _guideline(f"Boletim epidemiológico {i}", record_id=f"bvs-{i}", origin="bvs",
+                   has_full_text=True, year="2020")
+        for i in range(4)
+    ]
+    target = _guideline("Dengue: diagnóstico e manejo clínico", record_id="bvs-dengue",
+                        origin="bvs", has_full_text=True, year="2016")
+    ranked = rank_brazil_guidelines(
+        [ofidicos, *fillers, target],
+        "dengue grupo B manejo hidratação parenteral",
+        current_year=2026,
+    )
+    ids = [g.record_id for g in ranked]
+    assert ids.index("bvs-dengue") < ids.index("pcdt-acidentes-ofidicos")
 
 
 def test_rank_brazil_guidelines_none_text_does_not_raise():

@@ -244,24 +244,31 @@ async def test_search_aap_guidelines_combines_and_dedups(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_pediatric_literature_composes_journal_query(tmp_path: Path):
-    from unittest.mock import AsyncMock
-
-    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+async def test_search_pediatric_literature_keeps_journal_filter_when_relaxing(tmp_path: Path):
+    from scholar_mcp.medical.pubmed import MedicalPubMedClient
 
     engine, cache, http_client = await _engine(tmp_path)
-    mock_pubmed = AsyncMock()
-    mock_pubmed.search_articles.return_value = ([], CacheMetadata(cached=False, cache_age=0))
-    engine.pubmed = mock_pubmed
-
-    await engine.search_pediatric_literature("asthma", max_results=5)
-    term = mock_pubmed.search_articles.await_args.args[0]
-    assert "asthma" in term
-    assert '"Pediatrics"[Journal]' in term
-    assert '"JAMA Pediatrics"[Journal]' in term
-    assert "European Journal of Pediatrics" in term
-    await cache.close()
-    await http_client.aclose()
+    engine.pubmed = MedicalPubMedClient(
+        http_client=http_client, cache=cache, settings=engine.settings
+    )
+    esearch = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    try:
+        respx.get(esearch).respond(json={"esearchresult": {"idlist": []}})
+        await engine.search_pediatric_literature(
+            "Epstein-Barr virus infectious mononucleosis exudative tonsillitis "
+            "posterior cervical lymphadenopathy rash adolescent",
+            max_results=5,
+        )
+        terms = [
+            c.request.url.params.get("term", "")
+            for c in respx.calls
+            if str(c.request.url).startswith(esearch)
+        ]
+        assert len(terms) == 4  # initial + 3 relaxed rungs
+        assert all('"JAMA Pediatrics"[Journal]' in t for t in terms)
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock

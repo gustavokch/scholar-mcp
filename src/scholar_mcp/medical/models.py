@@ -262,6 +262,11 @@ class BrazilGuideline:
     ``abstract_synthetic`` marks a body fabricated from DeCS descriptors or
     ``ti_en`` (see ``_coerce_abstract``): it is a search snippet, never a
     full-text abstract fallback.
+    ``origin`` names the list a record came from: ``"bvs"`` for a BVS/iAHx
+    Solr hit (relevance-ordered, so ``rank_brazil_guidelines`` applies its
+    position prior), ``"govbr_catalog"`` for a gov.br PCDT/A-Z/extended
+    catalog row (no relevance order). Empty on rows cached before the field
+    existed; the search caches' ``CACHE_SCHEMA`` bump keeps those unread.
     """
 
     title: str = ""
@@ -270,6 +275,7 @@ class BrazilGuideline:
     document_url: str = ""
     fulltext_id: str = ""
     has_full_text: bool = False
+    origin: str = ""
     source: str = "brazil-moh"
     abstract: str = ""
     abstract_synthetic: bool = False

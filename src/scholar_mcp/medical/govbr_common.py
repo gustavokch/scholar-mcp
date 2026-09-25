@@ -241,5 +241,5 @@ def parse_folder_index(html: str, base_url: str, parent_path: str) -> list[str]:
 # has_full_text silently False, for the full cache_ttl_brazil_moh (30 days).
 # Declared here rather than reused from brazil_moh.CACHE_SCHEMA because
 # brazil_moh imports both engines; the reverse import would be a cycle.
-# v2: has_full_text (ENAMED misses plan B4).
-CACHE_SCHEMA = "v2"
+# v2: has_full_text (ENAMED misses plan B4). v3: origin.
+CACHE_SCHEMA = "v3"

@@ -195,20 +195,20 @@ class MedicalDatabasesEngine:
         self,
         query: str,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"medical_journals:{query}"
+        # v2: rows written before the journal filter survived relaxation hold
+        # unfiltered PubMed results.
+        cache_key = f"medical_journals:v2:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta
 
         journal_filters = " OR ".join(f'"{j}"[Journal]' for j in TOP_JOURNALS)
-        term = f"({query}) AND ({journal_filters})"
-        articles, pubmed_meta = await self.pubmed.search_articles(term, max_results=15)
+        articles, pubmed_meta = await self.pubmed.search_articles(
+            query, max_results=15, filters=journal_filters
+        )
 
         deduped, _ = deduplicate_papers([a.to_dict() for a in articles])
-        # Rank on the raw user query, not `term`: the journal filters would
-        # otherwise contribute their own tokens ("medicine", "lancet") as query
-        # terms. Rank before slicing so the cap keeps the best 15, not the
-        # first 15.
+        # Rank before slicing so the cap keeps the best 15, not the first 15.
         ranked = rank_medical_articles(
             [MedicalArticle.from_dict(p) for p in deduped], query
         )
