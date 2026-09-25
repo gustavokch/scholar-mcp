@@ -32,7 +32,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Changed
 
 - **Journal-impact signal is live**: `scimago_sjr.json` now ships the SCImago Journal Rank 2025 table (52,793 ISSNs). It shipped empty before, so the 0.10 `journal_impact` weight contributed nothing. The data is SCImago's, for non-commercial use with citation (see `src/scholar_mcp/data/SOURCES.md`).
-=======
 - **gov.br catalogs are offline-seed only**: `GovBrPCDTEngine` and `GovBrAZEngine` serve the bundled seed and never crawl gov.br or copy the seed into SQLite on a search. A missing seed reports `backend_error`.
 - **`scripts/update_govbr_catalogs.py --catalog az|pcdt`** replaces `scripts/update_govbr_az_catalog.py` and refuses to write a partial crawl (any failed page, page-cap truncation, missing alias vocabulary, or a catalog below half the current size).
 - **`RETRYABLE_STATUS_CODES` is now a `frozenset`**: the shared retry-status default can no longer be mutated in place by an importer (PR #39).
