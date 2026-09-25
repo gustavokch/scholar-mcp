@@ -30,7 +30,9 @@ COMMON_DRUG_WORDS = {
 
 # Whole words only: a substring test let "child" match "childbearing"
 # ("females of childbearing potential") and every OTC Drug Facts label.
-_PEDIATRIC_RE = re.compile(r"\b(?:pediatric|child(?:ren|hood)?|infants?|neonat(?:e|es|al))\b")
+_PEDIATRIC_RE = re.compile(
+    r"\b(?:pediatric|child(?:ren|hood)?|infants?|neonat(?:e|es|al)|adolescen(?:t|ts|ce))\b"
+)
 
 # The OTC Drug Facts child-safety line ("Keep out of reach of children"),
 # printed on nearly every OTC label. A storage instruction, not pediatric use.

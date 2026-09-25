@@ -683,8 +683,13 @@ async def test_search_pediatric_drugs_rejects_non_pediatric_mentions(tmp_path: P
             "dosage_and_administration": ["children under 12 years: ask a doctor"],
         },
         {"boxed_warning": ["WARNING: Suicidal thoughts in children and adolescents."]},
+        {
+            "use_in_specific_populations": [
+                "Safety and effectiveness in adolescents have been established."
+            ]
+        },
     ],
-    ids=["otc-child-directions", "pediatric-boxed-warning"],
+    ids=["otc-child-directions", "pediatric-boxed-warning", "adolescents-only"],
 )
 @respx.mock
 async def test_search_pediatric_drugs_keeps_pediatric_labels(tmp_path: Path, sections):
