@@ -656,8 +656,16 @@ async def _pediatric_hits(tmp_path: Path, payload):
         {"warnings": ["Keep out of reach of children. In case of overdose, get medical help."]},
         {"use_in_specific_populations": ["Females of childbearing potential should use contraception."]},
         {"boxed_warning": ["WARNING: Risk of serious cardiovascular thrombotic events."]},
+        {"warnings": ["Keep this and all medicines out of the reach of young children."]},
+        {"warnings": ["Keep out of reach and sight of children."]},
     ],
-    ids=["otc-out-of-reach", "childbearing", "adult-boxed-warning"],
+    ids=[
+        "otc-out-of-reach",
+        "childbearing",
+        "adult-boxed-warning",
+        "otc-young-children",
+        "otc-reach-and-sight",
+    ],
 )
 @respx.mock
 async def test_search_pediatric_drugs_rejects_non_pediatric_mentions(tmp_path: Path, sections):

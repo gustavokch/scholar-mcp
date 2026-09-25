@@ -36,7 +36,8 @@ _PEDIATRIC_RE = re.compile(r"\b(?:pediatric|child(?:ren|hood)?|infants?|neonat(?
 # printed on nearly every OTC label. A storage instruction, not pediatric use.
 _OUT_OF_REACH_RE = re.compile(
     r"keep\s+(?:this\s+and\s+all\s+(?:drugs|medicines|medications)\s+)?"
-    r"out\s+of\s+(?:the\s+)?(?:sight\s+and\s+)?reach\s+of\s+children"
+    r"out\s+of\s+(?:the\s+)?(?:sight\s+and\s+)?reach\s+(?:and\s+sight\s+)?"
+    r"of\s+(?:[\w']+\s+)*?children"
 )
 
 
