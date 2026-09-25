@@ -210,7 +210,10 @@ class PubMedProvider:
         ``Journal``, so its venue is the book title and its ISSN is absent.
         Returns None for a record without a PMID.
         """
-        pmid_elem = record.find("PMID")
+        citation = record.find("MedlineCitation", recursive=False) or record.find(
+            "BookDocument", recursive=False
+        )
+        pmid_elem = citation.find("PMID", recursive=False) if citation is not None else None
         pmid = pmid_elem.get_text(strip=True) if pmid_elem is not None else ""
         if not pmid:
             return None

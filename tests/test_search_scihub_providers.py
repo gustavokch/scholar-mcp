@@ -1127,3 +1127,21 @@ async def test_pubmed_fetch_abstract_reads_bookshelf_record(client):
     meta = await PubMedProvider(client, Settings()).fetch_abstract(IdentifierMap(pmid="28613625"))
     assert meta is not None
     assert meta.abstract == "Dengue is a mosquito-borne viral infection."
+
+
+@respx.mock
+async def test_pubmed_search_reads_own_pmid_not_comments_corrections(client):
+    """A CommentsCorrections entry also carries a PMID (the notice's target).
+    The record's own PMID lives in MedlineCitation."""
+    record = _pubmed_article("32000000").replace(
+        "</MedlineCitation>",
+        "<CommentsCorrectionsList><CommentsCorrections RefType=\"RetractionIn\">"
+        "<PMID>99999999</PMID></CommentsCorrections></CommentsCorrectionsList>"
+        "</MedlineCitation>",
+    )
+    respx.get(url__startswith=ESEARCH).mock(
+        return_value=httpx.Response(200, json={"esearchresult": {"idlist": ["32000000"]}})
+    )
+    _mock_efetch(_efetch_set(record))
+    results = await PubMedProvider(client, Settings()).search("crispr", num_results=5)
+    assert [p.pmid for p in results] == ["32000000"]

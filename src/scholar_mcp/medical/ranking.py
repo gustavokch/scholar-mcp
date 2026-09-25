@@ -206,8 +206,10 @@ def rank_brazil_guidelines(
     among the BVS records in the input: BVS returns a single relevance-sorted
     list, which is the condition that prior is meant for. Gov.br catalog rows
     (``origin != "bvs"``) are prepended to that list by the merge and carry
-    no relevance order, so they score on lexical coverage alone.
-
+    no relevance order, so they score on lexical coverage alone. ``bvs_rank``
+    is keyed by object identity; it is correct only because callers pass
+    distinct objects (the merge dedupes by ``record_id`` and never copies
+    records). Do not pass the same object twice.
     Records with no retrievable body (``has_full_text`` false) keep their
     title signal but score halved, and then sort into a second tier behind
     every record with a body: the tier is the rule that enforces the gate,

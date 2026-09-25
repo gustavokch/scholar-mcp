@@ -173,7 +173,8 @@ class MedicalPubMedClient:
         the ladder only ever shortens ``query``. Composing the clause into
         ``query`` instead would hand it to ``relax_ladder``, which strips the
         quotes, parentheses and ``OR`` and turns the filter into free-text
-        words or drops it. Results are ranked against ``query`` alone.
+        words or drops it. Callers rank the returned articles against
+        ``query``, never against the composed term.
         """
         # The cache key stays the original query: a relaxed hit is still the
         # answer to what the caller asked, and the key must not fan out per
