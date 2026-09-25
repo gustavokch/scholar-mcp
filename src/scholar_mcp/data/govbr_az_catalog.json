@@ -745,7 +745,7 @@
   },
   "govbr-guias-2025-guia-rapido-de-vacinacao-contra-a-covid-19": {
     "aliases": "covid-19 vacinacao",
-    "description": "Guia Rápido de Vacinação contra a covid-19 - Vacinação de rotina e especial",
+    "description": "Guia de consulta rápida para profissionais de saúde com orientações sobre a vacinação contra a Covid-19, incluindo públicos indicados, esquemas e intervalos entre doses, apresentações dos imunizantes e registro das doses aplicadas.",
     "download_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2025/guia-rapido-de-vacinacao-contra-a-covid-19/@@download/file",
     "record_id": "govbr-guias-2025-guia-rapido-de-vacinacao-contra-a-covid-19",
     "slug": "guia-rapido-de-vacinacao-contra-a-covid-19",
@@ -1329,6 +1329,18 @@
     "topic": "2026",
     "tree": "guias",
     "view_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2026/manual-de-pca.pdf/view",
+    "year": "2026"
+  },
+  "govbr-guias-2026-manual-de-uso-do-kit-multimidia-de-telessaude.pdf": {
+    "aliases": "",
+    "description": "Este manual tem como objetivo orientar gestores e profissionais da Atenção Primária à Saúde (APS) quanto à instalação, utilização e gestão dos equipamentos que compõem o Kit Multimídia de Telessaúde, destinado ao apoio à operacionalização dos serviços de telessaúde nas Unidades Básicas de Saúde (UBS).",
+    "download_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2026/manual-de-uso-do-kit-multimidia-de-telessaude.pdf/@@download/file",
+    "record_id": "govbr-guias-2026-manual-de-uso-do-kit-multimidia-de-telessaude.pdf",
+    "slug": "manual-de-uso-do-kit-multimidia-de-telessaude.pdf",
+    "title": "Manual de Uso do Kit Multimídia de Telessaúde",
+    "topic": "2026",
+    "tree": "guias",
+    "view_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2026/manual-de-uso-do-kit-multimidia-de-telessaude.pdf/view",
     "year": "2026"
   },
   "govbr-guias-2026-manual-de-vigilancia-e-controle-da-leishmaniose-visceral.pdf": {
@@ -1969,7 +1981,7 @@
   },
   "govbr-guias-ultimos-guia-rapido-de-vacinacao-contra-a-covid-19": {
     "aliases": "covid-19 vacinacao",
-    "description": "Guia Rápido de Vacinação contra a covid-19 - Vacinação de rotina e especial",
+    "description": "Guia de consulta rápida para profissionais de saúde com orientações sobre a vacinação contra a Covid-19, incluindo públicos indicados, esquemas e intervalos entre doses, apresentações dos imunizantes e registro das doses aplicadas.",
     "download_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2025/guia-rapido-de-vacinacao-contra-a-covid-19/@@download/file",
     "record_id": "govbr-guias-ultimos-guia-rapido-de-vacinacao-contra-a-covid-19",
     "slug": "guia-rapido-de-vacinacao-contra-a-covid-19",
@@ -2361,6 +2373,18 @@
     "topic": "ultimos",
     "tree": "guias",
     "view_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2024/manual-de-treinamento-curso-de-capacitacao-em-codificacao-de-mortalidade-cid-10-caderno-de-exercicios/view",
+    "year": ""
+  },
+  "govbr-guias-ultimos-manual-de-uso-do-kit-multimidia-de-telessaude.pdf": {
+    "aliases": "",
+    "description": "Este manual tem como objetivo orientar gestores e profissionais da Atenção Primária à Saúde (APS) quanto à instalação, utilização e gestão dos equipamentos que compõem o Kit Multimídia de Telessaúde, destinado ao apoio à operacionalização dos serviços de telessaúde nas Unidades Básicas de Saúde (UBS).",
+    "download_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2026/manual-de-uso-do-kit-multimidia-de-telessaude.pdf/@@download/file",
+    "record_id": "govbr-guias-ultimos-manual-de-uso-do-kit-multimidia-de-telessaude.pdf",
+    "slug": "manual-de-uso-do-kit-multimidia-de-telessaude.pdf",
+    "title": "Manual de Uso do Kit Multimídia de Telessaúde",
+    "topic": "ultimos",
+    "tree": "guias",
+    "view_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/guias-e-manuais/2026/manual-de-uso-do-kit-multimidia-de-telessaude.pdf/view",
     "year": ""
   },
   "govbr-guias-ultimos-manual-de-uso-do-projeto-de-referencia-novo-pac-saude.pdf": {
