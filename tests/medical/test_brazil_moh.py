@@ -3084,6 +3084,45 @@ async def test_pcdt_record_wins_dedupe_against_az_duplicate(tmp_path: Path):
         await http_client.aclose()
 
 
+@respx.mock
+async def test_merged_search_scores_catalog_rows_without_bvs_position(tmp_path: Path):
+    """End to end through the real converters: the PCDT row sits first in
+    the merge, but only the BVS record gets the Solr position prior. The BVS
+    record is dated 2000 so recency cannot decide the order, whatever year the
+    suite runs in."""
+    from scholar_mcp.medical.govbr_pcdt import _dict_to_guideline as pcdt_row
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        catalog = pcdt_row(
+            {
+                "record_id": "pcdt-dengue",
+                "title": "Manejo da dengue",
+                "download_url": "https://www.gov.br/saude/pt-br/assuntos/pcdt/d/dengue/@@download/file",
+            }
+        )
+        engine.pcdt_engine.search = AsyncMock(
+            return_value=([catalog], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        engine.az_engine.search = AsyncMock(
+            return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))
+        )
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json=_bvs_response(
+                    [_bvs_doc("biblio-dengue", title="Manejo da dengue", da="200001")]
+                ),
+            )
+        )
+        records, meta = await engine.search_guidelines("manejo dengue grave", collection="all")
+        assert meta.error is False
+        assert [r.record_id for r in records] == ["biblio-dengue", "pcdt-dengue"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_local_fallback_returns_az_records_when_bvs_errors(tmp_path):
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.enable_browser_fallback = False

@@ -28,7 +28,26 @@ COMMON_DRUG_WORDS = {
     "mg",
 }
 
-PEDIATRIC_TERMS = ("pediatric", "child", "infant", "neonatal", "pediatric dosing")
+# Whole words only: a substring test let "child" match "childbearing"
+# ("females of childbearing potential") and every OTC Drug Facts label.
+_PEDIATRIC_RE = re.compile(
+    r"\b(?:pediatric|child(?:ren|hood)?|infants?|neonat(?:e|es|al)|adolescen(?:t|ts|ce))\b"
+)
+
+# The OTC Drug Facts child-safety line ("Keep out of reach of children"),
+# printed on nearly every OTC label. A storage instruction, not pediatric use.
+_OUT_OF_REACH_RE = re.compile(
+    r"keep\s+(?:this\s+and\s+all\s+(?:drugs|medicines|medications)\s+)?"
+    r"out\s+of\s+(?:the\s+)?(?:sight\s+and\s+)?reach\s+(?:and\s+sight\s+)?"
+    r"of\s+(?:[\w']+\s+)*?children"
+)
+
+
+def _mentions_pediatric_use(text: str) -> bool:
+    """True when ``text`` names a pediatric population outside the OTC
+    child-safety boilerplate."""
+    return bool(_PEDIATRIC_RE.search(_OUT_OF_REACH_RE.sub(" ", text.lower())))
+
 
 # Words that carry no drug-name signal; a query starting "What is the..."
 # must not have its stopword lead tokens match unrelated name fields.
@@ -382,7 +401,9 @@ class FDAClient:
         query: str,
         limit: int = 10,
     ) -> tuple[list[DrugLabel], CacheMetadata]:
-        cache_key = f"pediatric_drugs:{query}:{limit}"
+        # v2: rows written before whole-word matching admitted any OTC label
+        # through its "Keep out of reach of children" line.
+        cache_key = f"pediatric_drugs:v2:{query}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [DrugLabel.from_dict(d) for d in cached_data], meta
@@ -391,20 +412,22 @@ class FDAClient:
 
         pediatric_drugs: list[DrugLabel] = []
         for drug in base_drugs:
-            purpose = " ".join(drug.purpose).lower()
-            warnings = " ".join(drug.warnings).lower()
-            dosage = " ".join(drug.dosage_and_administration).lower()
-            indications = " ".join(drug.indications_and_usage).lower()
-            populations = " ".join(drug.use_in_specific_populations).lower()
-
+            label_text = " ".join(
+                [
+                    *drug.purpose,
+                    *drug.warnings,
+                    *drug.dosage_and_administration,
+                    *drug.indications_and_usage,
+                    *drug.use_in_specific_populations,
+                ]
+            )
+            # ``pediatric_dosing`` is the label's own Pediatric Use section.
+            # ``pediatric_warnings`` holds the whole boxed warning, whatever
+            # population it concerns, so it counts only when it names one.
             has_pediatric = (
                 bool(drug.pediatric_dosing)
-                or bool(drug.pediatric_warnings)
-                or any(
-                    term in text
-                    for term in PEDIATRIC_TERMS
-                    for text in (purpose, warnings, dosage, indications, populations)
-                )
+                or _mentions_pediatric_use(drug.pediatric_warnings or "")
+                or _mentions_pediatric_use(label_text)
             )
             if has_pediatric:
                 pediatric_drugs.append(drug)

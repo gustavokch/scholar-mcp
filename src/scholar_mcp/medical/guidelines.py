@@ -162,9 +162,10 @@ class GuidelinesEngine:
 
         # Layer 1: Search with formal publication type filters, relaxed down
         # the ladder while the query keeps over-constraining PubMed to too
-        # few results. Results accumulate across ladder steps. relax=False:
-        # the ladder lives here so the publication-type filter survives on
-        # every step; the client's own ladder would mangle it.
+        # few results. Results accumulate across ladder steps, so this path
+        # walks the ladder itself (relax=False) instead of the client's
+        # stop-at-first-hit walk; ``filters`` keeps the publication-type
+        # clause on every step.
         # relaxed_query reports the first relaxed variant that contributed
         # hits, so the caller can see the ladder worked.
         pt_query = " OR ".join(GUIDELINE_PUBLICATION_TYPES)
@@ -178,7 +179,7 @@ class GuidelinesEngine:
         # budget instead of shrinking relax_ladder for everyone.
         for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
             articles_step, meta_step = await self.pubmed.search_articles(
-                f"({q}) AND ({pt_query})", max_results=20, relax=False
+                q, max_results=20, relax=False, filters=pt_query
             )
             errored = errored or meta_step.error
             if meta_step.error:
@@ -210,7 +211,7 @@ class GuidelinesEngine:
             # self-driven, one NCBI request per step at 3 req/s.
             for step_idx, q in enumerate(relax_ladder(query)[: 1 + MAX_RELAX_EXTRA_CALLS]):
                 articles_l2, meta_l2 = await self.pubmed.search_articles(
-                    f"({q}) AND ({kw_terms})", max_results=20, relax=False
+                    q, max_results=20, relax=False, filters=kw_terms
                 )
                 errored = errored or meta_l2.error
                 if meta_l2.error:

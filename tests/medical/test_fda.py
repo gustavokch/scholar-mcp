@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 
 from scholar_mcp.config import Settings
@@ -620,3 +621,77 @@ async def test_search_drugs_request_budget_bounded(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+def _sectioned_label(**sections):
+    result = {
+        "openfda": {
+            "brand_name": ["Acme Relief"],
+            "generic_name": ["Acetaminophen"],
+            "manufacturer_name": ["Acme"],
+            "product_ndc": ["12345-678"],
+        },
+        "effective_time": "20240101",
+        "purpose": ["Pain reliever"],
+        "dosage_and_administration": ["Adults: take 2 tablets every 6 hours."],
+    }
+    result.update(sections)
+    return {"results": [result]}
+
+
+async def _pediatric_hits(tmp_path: Path, payload):
+    client, cache, http_client = await _make_client(tmp_path)
+    try:
+        respx.get(FDA_URL).respond(json=payload)
+        drugs, _ = await client.search_pediatric_drugs("acme relief", limit=5)
+        return drugs
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [
+        {"warnings": ["Keep out of reach of children. In case of overdose, get medical help."]},
+        {"use_in_specific_populations": ["Females of childbearing potential should use contraception."]},
+        {"boxed_warning": ["WARNING: Risk of serious cardiovascular thrombotic events."]},
+        {"warnings": ["Keep this and all medicines out of the reach of young children."]},
+        {"warnings": ["Keep out of reach and sight of children."]},
+    ],
+    ids=[
+        "otc-out-of-reach",
+        "childbearing",
+        "adult-boxed-warning",
+        "otc-young-children",
+        "otc-reach-and-sight",
+    ],
+)
+@respx.mock
+async def test_search_pediatric_drugs_rejects_non_pediatric_mentions(tmp_path: Path, sections):
+    """Each is an adult label the old predicate admitted: substring "child"
+    hit the OTC child-safety line and "childbearing", and any boxed warning
+    counted because pediatric_warnings holds the whole boxed warning."""
+    assert await _pediatric_hits(tmp_path, _sectioned_label(**sections)) == []
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [
+        {
+            "warnings": ["Keep out of reach of children."],
+            "dosage_and_administration": ["children under 12 years: ask a doctor"],
+        },
+        {"boxed_warning": ["WARNING: Suicidal thoughts in children and adolescents."]},
+        {
+            "use_in_specific_populations": [
+                "Safety and effectiveness in adolescents have been established."
+            ]
+        },
+    ],
+    ids=["otc-child-directions", "pediatric-boxed-warning", "adolescents-only"],
+)
+@respx.mock
+async def test_search_pediatric_drugs_keeps_pediatric_labels(tmp_path: Path, sections):
+    drugs = await _pediatric_hits(tmp_path, _sectioned_label(**sections))
+    assert [d.openfda.brand_name for d in drugs] == [["Acme Relief"]]

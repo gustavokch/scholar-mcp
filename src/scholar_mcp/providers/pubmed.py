@@ -141,75 +141,33 @@ class PubMedProvider:
             if not id_list:
                 return []
 
-            summary_params = {
-                **self._base_params(),
-                "db": "pubmed",
-                "id": ",".join(id_list),
-                "retmode": "json",
-            }
-            sum_resp = await self.http_client.get(ESUMMARY_URL, params=summary_params)
-            if sum_resp is None or sum_resp.status_code != 200:
-                self.last_error = failure_reason(self.http_client, resp=sum_resp)
+            # EFetch, not ESummary: ESummary carries no abstract, which left
+            # every scholar-path PubMed hit scored by ScoringEngine on its
+            # title alone and shipped to the agent with an empty snippet.
+            # One call either way; EFetch carries everything ESummary did.
+            fetch_resp = await self.http_client.get(
+                EFETCH_URL,
+                params={
+                    **self._base_params(),
+                    "db": "pubmed",
+                    "id": ",".join(id_list),
+                    "rettype": "xml",
+                    "retmode": "xml",
+                },
+            )
+            if fetch_resp is None or fetch_resp.status_code != 200:
+                self.last_error = failure_reason(self.http_client, resp=fetch_resp)
                 return []
 
-            sum_data = sum_resp.json()
-            results_dict = sum_data.get("result", {})
-            uids = results_dict.get("uids", id_list)
-
-            papers: list[PaperMetadata] = []
-            for uid in uids:
-                rec = results_dict.get(str(uid), {})
-                if not rec or not isinstance(rec, dict):
-                    continue
-
-                title = rec.get("title", "").rstrip(".")
-                authors: list[str] = []
-                for a in rec.get("authors", []):
-                    if isinstance(a, dict) and a.get("name"):
-                        authors.append(a["name"])
-
-                pubdate = rec.get("pubdate", "")
-                year_match = re.search(r"\b(19\d\d|20\d\d)\b", pubdate)
-                year = year_match.group(1) if year_match else pubdate
-
-                venue = rec.get("fulljournalname") or rec.get("source") or ""
-
-                doi = None
-                # Check elocationid
-                eloc = rec.get("elocationid", "")
-                if "doi:" in eloc.lower():
-                    doi = re.sub(r"^doi:\s*", "", eloc, flags=re.IGNORECASE).strip()
-                # Check articleids
-                for aid in rec.get("articleids", []):
-                    if isinstance(aid, dict) and aid.get("idtype") == "doi":
-                        doi = aid.get("value")
-
-                pubtypes = rec.get("pubtype", [])
-                if not isinstance(pubtypes, list):
-                    pubtypes = []
-                study_type = "; ".join(pubtypes) if pubtypes else None
-                evidence_grade = classify_evidence_grade(pubtypes)
-
-                issn = rec.get("issn") or rec.get("essn") or None
-
-                papers.append(
-                    PaperMetadata(
-                        title=title,
-                        authors=authors,
-                        year=year,
-                        venue=venue,
-                        doi=doi,
-                        pmid=str(uid),
-                        abstract="",
-                        oa_status="unknown",
-                        issn=issn,
-                        study_type=study_type,
-                        evidence_grade=evidence_grade,
-                        source="pubmed",
-                    )
-                )
-
-            return papers
+            soup = BeautifulSoup(fetch_resp.content, "lxml-xml")
+            by_pmid: dict[str, PaperMetadata] = {}
+            for record in soup.find_all(["PubmedArticle", "PubmedBookArticle"]):
+                paper = self._parse_record(record)
+                if paper is not None and paper.pmid:
+                    by_pmid[paper.pmid] = paper
+            # esearch's order is NCBI's relevance ranking; EFetch does not
+            # promise to preserve it.
+            return [by_pmid[str(pmid)] for pmid in id_list if str(pmid) in by_pmid]
         except Exception as exc:
             self.last_error = failure_reason(self.http_client, exc=exc)
             return []
@@ -219,14 +177,15 @@ class PubMedProvider:
         """Return the record's own ArticleId of ``id_type``, or "" if absent.
 
         A record's identifiers live in the ArticleIdList that is a direct child
-        of PubmedData. Every cited reference under ReferenceList carries its own
+        of PubmedData (PubmedBookData for a Bookshelf record). Every cited
+        reference under ReferenceList carries its own
         nested ArticleIdList, so a document-wide scan picks up a cited
         reference's identifier instead of the record's (observed live: PMID
         39770434 yielded the DOI of a 2015 paper it cites). Selecting only the
         direct child cannot reach a nested list, whatever containers NCBI adds
         later. Empty elements are skipped rather than ending the scan.
         """
-        pubmed_data = article.find("PubmedData")
+        pubmed_data = article.find(["PubmedData", "PubmedBookData"], recursive=False)
         if pubmed_data is None:
             return ""
         id_list = pubmed_data.find("ArticleIdList", recursive=False)
@@ -239,6 +198,110 @@ class PubMedProvider:
             if value:
                 return value
         return ""
+
+    @classmethod
+    def _parse_record(cls, record: Any) -> PaperMetadata | None:
+        """Map one EFetch ``PubmedArticle`` or ``PubmedBookArticle`` to PaperMetadata.
+
+        Shared by ``search`` (a batch) and ``fetch_abstract`` (one record), so
+        the two cannot disagree on a field. A Bookshelf record (StatPearls and
+        other NCBI books, frequent Best Match hits for clinical queries) keeps
+        its title, authors, date and abstract under ``BookDocument``; it has no
+        ``Journal``, so its venue is the book title and its ISSN is absent.
+        Returns None for a record without a PMID.
+        """
+        citation = record.find("MedlineCitation", recursive=False) or record.find(
+            "BookDocument", recursive=False
+        )
+        pmid_elem = citation.find("PMID", recursive=False) if citation is not None else None
+        pmid = pmid_elem.get_text(strip=True) if pmid_elem is not None else ""
+        if not pmid:
+            return None
+
+        title_elem = record.find("ArticleTitle") or record.find("BookTitle")
+        title = title_elem.get_text(" ", strip=True).rstrip(".") if title_elem is not None else ""
+
+        abstract_texts: list[str] = []
+        abstract_elem = record.find("Abstract")
+        if abstract_elem is not None:
+            for p in abstract_elem.find_all("AbstractText"):
+                txt = p.get_text(" ", strip=True)
+                if not txt:
+                    continue
+                label = p.get("Label") or p.get("label")
+                abstract_texts.append(f"{label.strip()}: {txt}" if label else txt)
+
+        # A Bookshelf record lists the book's editors before the chapter's
+        # authors; prefer the authors list when the two are typed.
+        authors: list[str] = []
+        author_list = record.find("AuthorList", attrs={"Type": "authors"}) or record.find(
+            "AuthorList"
+        )
+        if author_list is not None:
+            for author in author_list.find_all("Author", recursive=False):
+                collective = author.find("CollectiveName")
+                if collective is not None and collective.get_text(strip=True):
+                    authors.append(collective.get_text(" ", strip=True))
+                    continue
+                last = author.find("LastName")
+                fore = author.find("ForeName") or author.find("Initials")
+                full = " ".join(
+                    part.get_text(" ", strip=True) for part in (fore, last) if part is not None
+                ).strip()
+                if full:
+                    authors.append(full)
+
+        year = ""
+        pub_date = record.find("PubDate")
+        if pub_date is not None:
+            year_elem = pub_date.find("Year")
+            if year_elem is not None:
+                year = year_elem.get_text(strip=True)
+            else:
+                # MedlineDate: free text such as "2019 Nov-Dec".
+                match = re.search(r"\b(?:19|20)\d{2}\b", pub_date.get_text(" ", strip=True))
+                year = match.group(0) if match else ""
+
+        journal = record.find("Journal")
+        venue_elem = journal.find("Title") if journal is not None else record.find("BookTitle")
+        venue = venue_elem.get_text(" ", strip=True) if venue_elem is not None else ""
+        issn_elem = journal.find("ISSN") if journal is not None else None
+        issn = issn_elem.get_text(strip=True) if issn_elem is not None else ""
+
+        pubtypes = [
+            text
+            for text in (pt.get_text(" ", strip=True) for pt in record.find_all("PublicationType"))
+            if text
+        ]
+
+        # A record states its own DOI in its own ArticleIdList or, when that
+        # entry is absent, in Article/ELocationID.
+        doi = cls._own_article_id(record, "doi")
+        if not doi:
+            article_elem = record.find("Article")
+            elocation = (
+                article_elem.find("ELocationID", attrs={"EIdType": "doi"})
+                if article_elem is not None
+                else None
+            )
+            if elocation is not None:
+                doi = elocation.get_text(" ", strip=True)
+
+        return PaperMetadata(
+            title=title,
+            authors=authors,
+            year=year,
+            venue=venue,
+            doi=doi or None,
+            pmid=pmid,
+            pmcid=cls._own_article_id(record, "pmc") or None,
+            abstract="\n\n".join(abstract_texts),
+            oa_status="unknown",
+            issn=issn or None,
+            study_type="; ".join(pubtypes) or None,
+            evidence_grade=classify_evidence_grade(pubtypes),
+            source="pubmed",
+        )
 
     async def fetch_abstract(self, ids: IdentifierMap) -> PaperMetadata | None:
         """Fetch abstract and metadata for paper via PubMed efetch."""
@@ -280,82 +343,17 @@ class PubMedProvider:
                 return None
 
             soup = BeautifulSoup(resp.content, "lxml-xml")
-            article = soup.find("PubmedArticle")
-            if article is None:
+            record = soup.find(["PubmedArticle", "PubmedBookArticle"])
+            if record is None:
                 return None
-
-            title_elem = article.find("ArticleTitle")
-            title = title_elem.get_text(" ", strip=True) if title_elem is not None else ""
-
-            abstract_elem = article.find("Abstract")
-            abstract = ""
-            if abstract_elem is not None:
-                abstract_texts: list[str] = []
-                for p in abstract_elem.find_all("AbstractText"):
-                    txt = p.get_text(" ", strip=True)
-                    if not txt:
-                        continue
-                    label = p.get("Label") or p.get("label")
-                    if label:
-                        abstract_texts.append(f"{label.strip()}: {txt}")
-                    else:
-                        abstract_texts.append(txt)
-                abstract = "\n\n".join(abstract_texts)
-
-            authors: list[str] = []
-            author_list = article.find("AuthorList")
-            if author_list is not None:
-                for author in author_list.find_all("Author"):
-                    last = author.find("LastName")
-                    fore = author.find("ForeName") or author.find("Initials")
-                    last_str = last.get_text(" ", strip=True) if last is not None else ""
-                    fore_str = fore.get_text(" ", strip=True) if fore is not None else ""
-                    full = f"{fore_str} {last_str}".strip()
-                    if full:
-                        authors.append(full)
-
-            year = ""
-            pub_date = article.find("PubDate")
-            if pub_date is not None:
-                year_elem = pub_date.find("Year")
-                if year_elem is not None:
-                    year = year_elem.get_text(" ", strip=True)
-
-            venue = ""
-            journal = article.find("Journal")
-            if journal is not None:
-                journal_elem = journal.find("Title")
-                if journal_elem is not None:
-                    venue = journal_elem.get_text(" ", strip=True)
-
-            # A record states its own DOI in PubmedData/ArticleIdList, or, when
-            # that entry is absent, in Article/ELocationID. Both are the
-            # record's own claim; ids.doi is the caller's echo and applies only
-            # when the record states neither.
-            doi = self._own_article_id(article, "doi")
-            if not doi:
-                article_elem = article.find("Article")
-                elocation = (
-                    article_elem.find("ELocationID", attrs={"EIdType": "doi"})
-                    if article_elem is not None
-                    else None
-                )
-                if elocation is not None:
-                    doi = elocation.get_text(" ", strip=True)
-            doi = doi or ids.doi
-
-            return PaperMetadata(
-                title=title,
-                authors=authors,
-                year=year,
-                venue=venue,
-                doi=doi,
-                pmid=pmid,
-                pmcid=self._own_article_id(article, "pmc") or ids.pmcid,
-                abstract=abstract,
-                oa_status="unknown",
-                source="pubmed",
-            )
+            paper = self._parse_record(record)
+            if paper is None:
+                return None
+            # ids.* is the caller's echo: it fills a field only when the
+            # record itself states none.
+            paper.doi = paper.doi or ids.doi
+            paper.pmcid = paper.pmcid or ids.pmcid
+            return paper
         except Exception:
             return None
 
