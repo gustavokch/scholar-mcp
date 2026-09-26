@@ -32,14 +32,17 @@ def _strip_doi_url(doi_url: str | None) -> str | None:
 class OpenAlexProvider:
     """OpenAlex metadata, citation counts, OA URLs, institutions, citing works."""
 
-    def __init__(self, http_client: AsyncHttpClient, email: str | None = None) -> None:
+    def __init__(self, http_client: AsyncHttpClient, email: str | None = None, api_key: str | None = None) -> None:
         self.http_client = http_client
         self.email = email
+        self.api_key = api_key
 
     def _params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         params: dict[str, Any] = dict(extra or {})
         if self.email:
             params["mailto"] = self.email
+        if self.api_key:
+            params["api_key"] = self.api_key
         return params
 
     async def _get_work(self, doi: str) -> dict[str, Any] | None:

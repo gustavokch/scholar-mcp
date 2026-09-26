@@ -25,6 +25,7 @@ class Settings:
     unpaywall_email: str | None = None
     s2_api_key: str | None = None
     openalex_email: str | None = None
+    openalex_api_key: str | None = None
     enable_openalex: bool = True
     enable_s2: bool = True
     enable_scihub: bool = True
@@ -221,6 +222,7 @@ class Settings:
             unpaywall_email=unpaywall_email,
             s2_api_key=_env("S2_API_KEY"),
             openalex_email=_env("OPENALEX_MAILTO") or unpaywall_email,
+            openalex_api_key=_env("OPENALEX_API_KEY"),
             enable_openalex=_bool(os.getenv("ENABLE_OPENALEX"), True),
             enable_s2=_bool(os.getenv("ENABLE_S2"), True),
             enable_scihub=_bool(os.getenv("ENABLE_SCIHUB"), True),

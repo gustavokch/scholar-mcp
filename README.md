@@ -250,6 +250,7 @@ All options are configured via environment variables:
 |---|---|---|
 | `UNPAYWALL_EMAIL` | None | Email address required to enable the Unpaywall tier. |
 | `OPENALEX_MAILTO` | Falls back to `UNPAYWALL_EMAIL`/`PUBMED_EMAIL` | Email for the OpenAlex polite pool. |
+| `OPENALEX_API_KEY` | None | OpenAlex API key (free). Without one, requests share the per-IP daily budget; with one, they use the key's own budget. |
 | `S2_API_KEY` | None | Semantic Scholar API key (raises S2 rate limit from 1 rps to 5 rps). |
 | `ENABLE_OPENALEX` | `true` | Master switch for OpenAlex metadata enrichment and citations fallback. |
 | `ENABLE_S2` | `true` | Master switch for Semantic Scholar search and recommendations. |
