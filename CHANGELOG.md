@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`OPENALEX_API_KEY` setting**: passed as `api_key` on every OpenAlex request (`OpenAlexProvider._params`). Keyless requests share OpenAlex's per-IP daily budget (1000 credits); a free key gets its own (10000). Redacted from logs like the other credential params.
 - **`retryable_statuses` parameter on `AsyncHttpClient.get()`**: callers can override the default `RETRYABLE_STATUS_CODES` per request; Europe PMC `fullTextXML` uses it to fail fast on the 500 that means "no OA XML" instead of making four attempts (PR #39).
 - **gov.br "Saúde de A a Z" publication scraper (`GovBrAZEngine`)**: Indexing `/centrais-de-conteudo/publicacoes/svsa/<topic>` and `/centrais-de-conteudo/publicacoes/guias-e-manuais/<year>`, including the Dengue clinical management and Tuberculosis control manuals.
 - **`collection="az"` for `brazil_guidelines` tool**: New collection option in `search_brazil_moh_guidelines`; records also appear in the default `collection="all"` results and full text resolves via `get_brazil_moh_full_text`.
