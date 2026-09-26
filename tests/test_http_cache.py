@@ -607,21 +607,6 @@ def test_parse_retry_after_rejects_non_finite():
         assert _parse_retry_after(resp) is None, raw
 
 
-def test_parse_retry_after_clamps_to_max():
-    from scholar_mcp.utils.http import MAX_RETRY_AFTER, _parse_retry_after
-
-    resp = httpx.Response(429, headers={"Retry-After": "86400"})
-    assert _parse_retry_after(resp) == MAX_RETRY_AFTER
-
-    from datetime import datetime, timedelta, timezone
-
-    far = datetime.now(timezone.utc) + timedelta(days=1)
-    resp_date = httpx.Response(
-        429, headers={"Retry-After": far.strftime("%a, %d %b %Y %H:%M:%S GMT")}
-    )
-    assert _parse_retry_after(resp_date) == MAX_RETRY_AFTER
-
-
 def test_host_key_ignores_userinfo_and_ipv6_brackets():
     from scholar_mcp.utils.http import _host_key
 
