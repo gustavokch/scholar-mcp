@@ -244,3 +244,29 @@ async def test_long_retry_after_marks_the_host_throttled():
         assert not client.is_throttled("api.openalex.org")
     finally:
         await client.aclose()
+
+
+async def test_rate_limited_host_is_reprobed_once_the_capped_window_passes(monkeypatch):
+    """The short-circuit lasts min(Retry-After, MAX_RATE_LIMITED_HOST_S) and
+    then expires: the next call goes back to the network. Without the cap a
+    hostile Retry-After would blackhole the host for its full stated time."""
+    import asyncio
+
+    import scholar_mcp.utils.http as http_mod
+
+    monkeypatch.setattr(http_mod, "MAX_RATE_LIMITED_HOST_S", 0.05)
+    responses = iter(
+        [httpx.Response(429, headers={"Retry-After": "660"}), httpx.Response(200)]
+    )
+    client, calls = _client_with_handler(lambda request: next(responses))
+    try:
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert calls["count"] == 1  # second call short-circuited
+        await asyncio.sleep(0.1)
+        resp = await client.get("https://api.openalex.org/works/a")
+        assert resp is not None and resp.status_code == 200
+        assert calls["count"] == 2
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
