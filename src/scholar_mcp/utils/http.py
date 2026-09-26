@@ -102,10 +102,17 @@ def _matches_html_marker_groups(
         return False
     return any(all(m in sample for m in group) for group in groups)
 
-# Upper bound on any server-supplied Retry-After. Without it a hostile or
-# misconfigured host can park a request -- and, via limiter.throttle, every
-# other request to that host -- for hours.
+# Longest server-supplied Retry-After that ``get`` sleeps through and retries.
+# A longer one means no retry inside this call can succeed (OpenAlex answers
+# 660 s once its free daily budget is spent), so ``get`` fails fast and the
+# host is short-circuited instead -- sleeping a clamped 60 s per attempt only
+# turned one optional enrichment call into a three-minute stall.
 MAX_RETRY_AFTER = 60.0
+
+# Ceiling on how long a long Retry-After short-circuits its host. A hostile or
+# misconfigured value must not blackhole a host for hours; past this the host
+# is re-probed with one request.
+MAX_RATE_LIMITED_HOST_S = 1800.0
 
 # How long a "permanently dead" host verdict (DNS failure, bad cert) is
 # trusted before the next request re-probes the host. Long enough that a
@@ -190,7 +197,11 @@ def _is_permanent_transport_error(exc: BaseException) -> bool:
 
 
 def _parse_retry_after(resp: httpx.Response) -> float | None:
-    """Extract Retry-After header value as duration in seconds."""
+    """Extract Retry-After header value as a non-negative duration in seconds.
+
+    Uncapped: ``get`` compares it against ``MAX_RETRY_AFTER`` to choose between
+    retrying and short-circuiting the host.
+    """
     raw = resp.headers.get("Retry-After")
     if not raw:
         return None
@@ -203,7 +214,7 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
         # float() also accepts "inf"/"nan"; neither is a usable duration.
         if not math.isfinite(seconds):
             return None
-        return min(max(0.0, seconds), MAX_RETRY_AFTER)
+        return max(0.0, seconds)
     try:
         dt = email.utils.parsedate_to_datetime(raw)
     except (TypeError, ValueError, IndexError, OverflowError):
@@ -213,7 +224,7 @@ def _parse_retry_after(resp: httpx.Response) -> float | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     delta = (dt - datetime.now(timezone.utc)).total_seconds()
-    return min(max(0.0, delta), MAX_RETRY_AFTER)
+    return max(0.0, delta)
 
 # How much of a failing response body to quote in the log. Bytes are sliced before
 # decoding so a multi-megabyte PDF or XML body is never decoded in full.
@@ -322,6 +333,13 @@ class AsyncHttpClient:
     _dead_hosts: ClassVar[dict[str, float]] = {}
     _dead_hosts_lock = threading.Lock()
 
+    # Hosts that answered with a Retry-After beyond MAX_RETRY_AFTER, valued on
+    # (monotonic deadline, status). Requests short-circuit until the deadline
+    # rather than parking on the limiter: the caller gets its miss now and can
+    # fall back, instead of sleeping through a window no retry can outlast.
+    _rate_limited_hosts: ClassVar[dict[str, tuple[float, int]]] = {}
+    _rate_limited_hosts_lock = threading.Lock()
+
     # Typed record of the most recent terminal failure, per requesting task.
     # ContextScoped: the client is a shared singleton, so a plain attribute
     # would leak one request's failure into every concurrent call.
@@ -392,11 +410,13 @@ class AsyncHttpClient:
 
     @classmethod
     def reset_limiters(cls) -> None:
-        """Drop every limiter bucket and dead host. For tests; never call it on a live server."""
+        """Drop every limiter bucket, dead host, and rate-limited host. For tests; never call it on a live server."""
         with cls._limiters_lock:
             cls._limiters.clear()
         with cls._dead_hosts_lock:
             cls._dead_hosts.clear()
+        with cls._rate_limited_hosts_lock:
+            cls._rate_limited_hosts.clear()
 
     @classmethod
     def reset_dead_hosts(cls) -> None:
@@ -423,14 +443,38 @@ class AsyncHttpClient:
         with cls._dead_hosts_lock:
             cls._dead_hosts[_host_key(host)] = time.monotonic() + DEAD_HOST_TTL_S
 
-    def is_throttled(self, host: str) -> bool:
-        """True when ``host``'s limiter holds a throttle deadline in the future.
+    @classmethod
+    def _rate_limited_status(cls, host_key: str) -> int | None:
+        """Status that rate-limited ``host_key``, or None once the window has passed."""
+        with cls._rate_limited_hosts_lock:
+            entry = cls._rate_limited_hosts.get(host_key)
+            if entry is None:
+                return None
+            if entry[0] <= time.monotonic():
+                del cls._rate_limited_hosts[host_key]
+                return None
+            return entry[1]
 
-        Read-only: an unknown host is not throttled and gets no bucket.
+    @classmethod
+    def _mark_rate_limited(cls, host_key: str, retry_after: float, status: int) -> None:
+        deadline = time.monotonic() + min(retry_after, MAX_RATE_LIMITED_HOST_S)
+        with cls._rate_limited_hosts_lock:
+            cls._rate_limited_hosts[host_key] = (deadline, status)
+
+    def is_throttled(self, host: str) -> bool:
+        """True when ``host`` is parked or short-circuited by a server rate limit.
+
+        Covers both a limiter throttle deadline in the future (Retry-After within
+        MAX_RETRY_AFTER, or a 429/shielded 403 backoff) and a host short-circuited
+        by a Retry-After beyond it. Read-only: an unknown host is not throttled
+        and gets no bucket.
         """
+        key = _host_key(host)
         with self._limiters_lock:
-            limiter = self._limiters.get(_host_key(host))
-        return limiter is not None and limiter.throttled_until > time.monotonic()
+            limiter = self._limiters.get(key)
+        if limiter is not None and limiter.throttled_until > time.monotonic():
+            return True
+        return self._rate_limited_status(key) is not None
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.
@@ -554,6 +598,12 @@ class AsyncHttpClient:
             logger.info("HTTP GET %s skipped: host %s is marked permanently dead", log_url, host_key)
             return None
 
+        rate_limited_status = self._rate_limited_status(host_key)
+        if rate_limited_status is not None:
+            self.last_failure = FetchFailure("http", rate_limited_status, "RateLimitedCached")
+            logger.info("HTTP GET %s skipped: host %s is rate-limited", log_url, host_key)
+            return None
+
         # Cost of the last attempt, used to decide whether the next one fits the
         # deadline. A budget that fits the backoff but not the request starts an
         # attempt that gets cut off, and the completed response already in hand
@@ -632,12 +682,25 @@ class AsyncHttpClient:
                     and b"External viewer error" in resp.content
                     and b"Status: Timeout" in resp.content
                 )
-                if (
+                is_retryable = (
                     resp.status_code in effective_retry_statuses
                     or shielded_403
                     or ncbi_viewer_timeout
-                ) and attempt < self.max_retries - 1:
-                    retry_after = _parse_retry_after(resp)
+                )
+                retry_after = _parse_retry_after(resp) if is_retryable else None
+                if retry_after is not None and retry_after > MAX_RETRY_AFTER:
+                    # Falls through to the terminal path, which reports the
+                    # real status. Not a limiter throttle: that would park
+                    # every sibling caller instead of letting it fail over.
+                    self._mark_rate_limited(host_key, retry_after, resp.status_code)
+                    logger.info(
+                        "HTTP GET %s returned status %d with Retry-After %.0fs; "
+                        "not retrying, host short-circuited",
+                        log_url,
+                        resp.status_code,
+                        retry_after,
+                    )
+                elif is_retryable and attempt < self.max_retries - 1:
                     calc_wait = self.backoff_base * (2**attempt) + random.uniform(
                         0, 0.1 * self.backoff_base
                     )

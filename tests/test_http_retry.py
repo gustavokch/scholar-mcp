@@ -15,11 +15,12 @@ matching what httpx's real transports do with the OS error.
 
 import socket
 import ssl
+import time
 
 import httpx
 
 from scholar_mcp.config import Settings
-from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.http import AsyncHttpClient, FetchFailure
 
 
 def _client_with_handler(handler, max_retries: int = 4) -> tuple[AsyncHttpClient, dict]:
@@ -192,3 +193,101 @@ async def test_transient_failure_does_not_poison_the_host_cache():
     finally:
         await client.aclose()
         AsyncHttpClient.reset_dead_hosts()
+
+
+async def test_retry_after_beyond_cap_fails_fast_and_short_circuits_the_host():
+    """A 429 whose Retry-After exceeds MAX_RETRY_AFTER (OpenAlex's exhausted
+    daily budget answers 660) cannot succeed within this call: one attempt,
+    no sleep, the real status reported, and later calls to the host skip the
+    network until the server's stated time instead of re-paying the ladder."""
+    client, calls = _client_with_handler(
+        lambda request: httpx.Response(429, headers={"Retry-After": "660"})
+    )
+    try:
+        start = time.monotonic()
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert await client.get("https://api.openalex.org/works/b") is None
+        assert time.monotonic() - start < 1.0
+        assert calls["count"] == 1
+        assert client.last_failure == FetchFailure("http", 429, "RateLimitedCached")
+        # Other hosts are unaffected.
+        assert await client.get("https://api.crossref.org/works/c") is None
+        assert calls["count"] == 2
+    finally:
+        await client.aclose()
+
+
+async def test_retry_after_within_cap_still_retries():
+    """A Retry-After the cap tolerates keeps the normal wait-and-retry path."""
+    responses = iter([httpx.Response(429, headers={"Retry-After": "0.05"}), httpx.Response(200)])
+    client, calls = _client_with_handler(lambda request: next(responses))
+    client.min_429_wait = 0.0
+    try:
+        resp = await client.get("https://api.openalex.org/works/a")
+        assert resp is not None and resp.status_code == 200
+        assert calls["count"] == 2
+    finally:
+        await client.aclose()
+
+
+async def test_long_retry_after_marks_the_host_throttled():
+    """Callers that gate on is_throttled (BrazilMoHEngine._is_bvs_shielded)
+    must see a host short-circuited by a long Retry-After as throttled, just
+    as they see one parked by a limiter throttle. A sibling host sharing no
+    bucket stays unthrottled."""
+    client, _ = _client_with_handler(
+        lambda request: httpx.Response(429, headers={"Retry-After": "660"})
+    )
+    try:
+        assert await client.get("https://pesquisa.bvsalud.org/portal/") is None
+        assert client.is_throttled("pesquisa.bvsalud.org")
+        assert not client.is_throttled("api.openalex.org")
+    finally:
+        await client.aclose()
+
+
+async def test_rate_limited_host_is_reprobed_once_the_capped_window_passes(monkeypatch):
+    """The short-circuit lasts min(Retry-After, MAX_RATE_LIMITED_HOST_S) and
+    then expires: the next call goes back to the network. Without the cap a
+    hostile Retry-After would blackhole the host for its full stated time."""
+    import asyncio
+
+    import scholar_mcp.utils.http as http_mod
+
+    monkeypatch.setattr(http_mod, "MAX_RATE_LIMITED_HOST_S", 0.05)
+    responses = iter(
+        [httpx.Response(429, headers={"Retry-After": "660"}), httpx.Response(200)]
+    )
+    client, calls = _client_with_handler(lambda request: next(responses))
+    try:
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert calls["count"] == 1  # second call short-circuited
+        await asyncio.sleep(0.1)
+        resp = await client.get("https://api.openalex.org/works/a")
+        assert resp is not None and resp.status_code == 200
+        assert calls["count"] == 2
+        assert client.last_failure is None
+    finally:
+        await client.aclose()
+
+
+async def test_http_date_retry_after_beyond_cap_fails_fast():
+    """The HTTP-date form of Retry-After takes the same fail-fast path as the
+    delta-seconds form: one attempt, then the host short-circuits."""
+    from datetime import datetime, timedelta, timezone
+
+    far = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+        "%a, %d %b %Y %H:%M:%S GMT"
+    )
+    client, calls = _client_with_handler(
+        lambda request: httpx.Response(429, headers={"Retry-After": far})
+    )
+    try:
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert calls["count"] == 1
+        assert await client.get("https://api.openalex.org/works/b") is None
+        assert calls["count"] == 1
+        assert client.last_failure == FetchFailure("http", 429, "RateLimitedCached")
+    finally:
+        await client.aclose()

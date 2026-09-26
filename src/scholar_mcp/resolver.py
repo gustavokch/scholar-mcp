@@ -73,7 +73,7 @@ class WaterfallResolver:
         )
         self.pubmed = PubMedProvider(self.http_client, self.settings)
         self.crossref = CrossRefProvider(self.http_client)
-        self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email)
+        self.openalex = OpenAlexProvider(self.http_client, email=self.settings.openalex_email, api_key=self.settings.openalex_api_key)
         self.s2 = SemanticScholarProvider(self.http_client, api_key=self.settings.s2_api_key)
         self.ranking_pipeline = RankingPipeline(
             openalex=self.openalex,

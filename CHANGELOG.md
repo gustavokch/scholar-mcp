@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **`OPENALEX_API_KEY` setting**: passed as `api_key` on every OpenAlex request (`OpenAlexProvider._params`). Keyless requests share OpenAlex's per-IP daily budget (1000 credits); a free key gets its own (10000). Redacted from logs like the other credential params.
 - **`retryable_statuses` parameter on `AsyncHttpClient.get()`**: callers can override the default `RETRYABLE_STATUS_CODES` per request; Europe PMC `fullTextXML` uses it to fail fast on the 500 that means "no OA XML" instead of making four attempts (PR #39).
 - **gov.br "Saúde de A a Z" publication scraper (`GovBrAZEngine`)**: Indexing `/centrais-de-conteudo/publicacoes/svsa/<topic>` and `/centrais-de-conteudo/publicacoes/guias-e-manuais/<year>`, including the Dengue clinical management and Tuberculosis control manuals.
 - **`collection="az"` for `brazil_guidelines` tool**: New collection option in `search_brazil_moh_guidelines`; records also appear in the default `collection="all"` results and full text resolves via `get_brazil_moh_full_text`.
@@ -44,6 +45,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- **Long `Retry-After` no longer stalls calls for minutes**: a `Retry-After` beyond `MAX_RETRY_AFTER` (60 s) used to be clamped to 60 s and retried up to three times, so an OpenAlex 429 (`Retry-After: 660`, keyless daily budget exhausted) turned the optional citation enrichment in `get_metadata` into a ~180 s stall and client-side timeouts. `AsyncHttpClient.get` now fails fast on such a response and short-circuits the host until the stated time (capped at 30 min), so callers fall through to their other sources immediately.
 - **Brazilian guideline ranking — position prior scoped to BVS**: `rank_brazil_guidelines` applied the BVS Solr position prior over the merged gov.br catalog + BVS list, so the catalog row at index 0 took the top-rank bonus whatever its relevance. The prior now follows each record's rank among BVS records (`BrazilGuideline.origin`). Catalog rows score on lexical coverage.
 - **Undated records take a neutral recency**: across the medical rankers, a record with no year (every PCDT catalog row) took the mean recency of the dated records in its pool instead of a 10-year default age. `CACHE_SCHEMA` v3 (`brazil_moh`, `govbr_common`) retires rows cached without `origin`.
 - **`search_pediatric_drugs` admits pediatric labels only**: the filter substring-matched `"child"`, so every OTC label passed on "Keep out of reach of children", and so did adult labels mentioning "childbearing". Any boxed warning also counted. It now matches whole words after removing the OTC child-safety line, and a boxed warning counts only when it names a pediatric population. Cache key `pediatric_drugs:v2:`.
