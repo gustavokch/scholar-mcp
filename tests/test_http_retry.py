@@ -270,3 +270,24 @@ async def test_rate_limited_host_is_reprobed_once_the_capped_window_passes(monke
         assert client.last_failure is None
     finally:
         await client.aclose()
+
+
+async def test_http_date_retry_after_beyond_cap_fails_fast():
+    """The HTTP-date form of Retry-After takes the same fail-fast path as the
+    delta-seconds form: one attempt, then the host short-circuits."""
+    from datetime import datetime, timedelta, timezone
+
+    far = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+        "%a, %d %b %Y %H:%M:%S GMT"
+    )
+    client, calls = _client_with_handler(
+        lambda request: httpx.Response(429, headers={"Retry-After": far})
+    )
+    try:
+        assert await client.get("https://api.openalex.org/works/a") is None
+        assert calls["count"] == 1
+        assert await client.get("https://api.openalex.org/works/b") is None
+        assert calls["count"] == 1
+        assert client.last_failure == FetchFailure("http", 429, "RateLimitedCached")
+    finally:
+        await client.aclose()
