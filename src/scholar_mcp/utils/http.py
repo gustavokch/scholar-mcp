@@ -462,13 +462,19 @@ class AsyncHttpClient:
             cls._rate_limited_hosts[host_key] = (deadline, status)
 
     def is_throttled(self, host: str) -> bool:
-        """True when ``host``'s limiter holds a throttle deadline in the future.
+        """True when ``host`` is parked or short-circuited by a server rate limit.
 
-        Read-only: an unknown host is not throttled and gets no bucket.
+        Covers both a limiter throttle deadline in the future (Retry-After within
+        MAX_RETRY_AFTER, or a 429/shielded 403 backoff) and a host short-circuited
+        by a Retry-After beyond it. Read-only: an unknown host is not throttled
+        and gets no bucket.
         """
+        key = _host_key(host)
         with self._limiters_lock:
-            limiter = self._limiters.get(_host_key(host))
-        return limiter is not None and limiter.throttled_until > time.monotonic()
+            limiter = self._limiters.get(key)
+        if limiter is not None and limiter.throttled_until > time.monotonic():
+            return True
+        return self._rate_limited_status(key) is not None
 
     def _merge_params(self, url: str, params: dict[str, Any] | None) -> str:
         """Fold ``params`` into the URL query.

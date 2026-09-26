@@ -228,3 +228,19 @@ async def test_retry_after_within_cap_still_retries():
         assert calls["count"] == 2
     finally:
         await client.aclose()
+
+
+async def test_long_retry_after_marks_the_host_throttled():
+    """Callers that gate on is_throttled (BrazilMoHEngine._is_bvs_shielded)
+    must see a host short-circuited by a long Retry-After as throttled, just
+    as they see one parked by a limiter throttle. A sibling host sharing no
+    bucket stays unthrottled."""
+    client, _ = _client_with_handler(
+        lambda request: httpx.Response(429, headers={"Retry-After": "660"})
+    )
+    try:
+        assert await client.get("https://pesquisa.bvsalud.org/portal/") is None
+        assert client.is_throttled("pesquisa.bvsalud.org")
+        assert not client.is_throttled("api.openalex.org")
+    finally:
+        await client.aclose()
