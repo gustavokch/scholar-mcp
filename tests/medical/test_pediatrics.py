@@ -30,15 +30,18 @@ def _install_fake_camoufox(
     first_landing_url=None,
     challenge_html=None,
     hang_s=0.0,
+    abort_first_goto=False,
 ):
     """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
 
     ``first_landing_url`` simulates the Cloudflare interstitial: the first
     goto lands on a mangled redirect URL, later gotos land clean.
     ``challenge_html`` is served for the first navigation only, so a scrape
-    that reads content before re-navigating sees the challenge page, not the
     results.
     ``hang_s`` makes every goto sleep, to exercise the total-timeout guard.
+    ``abort_first_goto`` makes the first goto raise NS_BINDING_ABORTED, the
+    race the Cloudflare interstitial causes when its own redirect aborts the
+    in-flight navigation.
     ``sleeps`` records every wait_for_timeout(ms) call, so tests can assert
     the scrape keys off rendered content instead of fixed sleeps.
     """
@@ -68,6 +71,12 @@ def _install_fake_camoufox(
             self._nav += 1
             if hang_s:
                 await asyncio.sleep(hang_s)
+            if abort_first_goto and self._nav == 1:
+                # The production code matches on the message, not the
+                # playwright Error type: this module is faked out in tests.
+                raise RuntimeError(
+                    "Page.goto: NS_BINDING_ABORTED; maybe frame was detached?"
+                )
             self.url = (first_landing_url if self._nav == 1 else None) or url
             return None
 
@@ -739,6 +748,59 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
         )
         assert captured[-1] == f"{AAP_URL}?q=ibuprofen"
         assert guidelines, "content was read before re-navigation: got the challenge page"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_tolerates_aborted_goto_during_challenge(
+    tmp_path: Path, monkeypatch
+):
+    """The Cloudflare interstitial navigates the page itself; when that
+    redirect races the in-flight goto, Playwright raises NS_BINDING_ABORTED.
+    The abort means the challenge is in progress, not that navigation
+    failed: the scrape must continue into the settle/re-navigate recovery
+    instead of giving up."""
+    from unittest.mock import AsyncMock
+
+    from scholar_mcp.utils.sqlite_cache import CacheMetadata
+
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+
+    rendered_html = """
+    <html><body>
+      <div class="item-container"><div class="sri-title">
+        <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+      </div></div>
+    </body></html>
+    """
+    challenge_html = (
+        "<html><head><title>Just a moment...</title></head>"
+        "<body><div id='challenge-platform'></div></body></html>"
+    )
+    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        rendered_html,
+        challenge_html=challenge_html,
+        abort_first_goto=True,
+    )
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(captured) >= 2, "aborted first goto was not followed by a re-navigation"
+        assert guidelines, "aborted goto aborted the whole scrape"
         assert "Ibuprofen Safety in Infants" in guidelines[0].title
         assert meta.error is False
     finally:

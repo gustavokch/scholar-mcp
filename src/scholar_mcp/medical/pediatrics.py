@@ -67,7 +67,10 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # challenge needs time to settle, but search_aap_guidelines is an MCP tool
 # with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
 _NAV_TIMEOUT_MS = 15000
-_CHALLENGE_SETTLE_MS = 5000
+# Condition-based challenge budget: poll until the interstitial hands back
+# a real page (observed ~10s), not a fixed sleep that fires mid-challenge.
+_CHALLENGE_CLEAR_MS = 20000
+_CHALLENGE_POLL_MS = 500
 _POST_RENAV_SETTLE_MS = 3000
 _CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
 
@@ -305,6 +308,49 @@ class PediatricsEngine:
                 exc_info=True,
             )
 
+    @staticmethod
+    async def _goto(page, target: str) -> None:
+        """Navigate, tolerating a challenge redirect racing the goto.
+
+        The Cloudflare interstitial navigates the page itself (__cf_chl_tk
+        reloads, then ?autologincheck=redirected); when one of those aborts
+        the in-flight goto, Playwright raises NS_BINDING_ABORTED. The abort
+        means the challenge is in progress, not that the navigation failed:
+        the settle/re-navigate recovery handles it from there. Message
+        matching instead of playwright's Error type keeps this importable
+        without playwright at module scope."""
+        try:
+            await page.goto(
+                target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
+            )
+        except Exception as exc:
+            if "NS_BINDING_ABORTED" not in str(exc):
+                raise
+            logger.debug("goto aborted by a challenge redirect; continuing")
+
+    async def _await_challenge_clear(self, page, timeout_ms: int) -> str:
+        """Poll until the Cloudflare interstitial hands back a real page.
+
+        A cleared challenge lands on the mangled ?autologincheck=redirected
+        URL; a challenge never served means the first read is already real
+        content. content() itself raises while the interstitial JS is
+        mid-redirect, so a failed read just means "still busy". Returns the
+        latest content, cleared or not, when the budget runs out; the caller
+        re-navigates either way."""
+        waited = 0
+        content = ""
+        while True:
+            try:
+                content = await page.content()
+                if "autologincheck" in page.url or not _looks_like_challenge(content):
+                    return content
+            except Exception:
+                logger.debug("content unreadable mid-redirect; retrying")
+            if waited >= timeout_ms:
+                return content
+            await page.wait_for_timeout(_CHALLENGE_POLL_MS)
+            waited += _CHALLENGE_POLL_MS
+
     async def _camoufox_scrape(
         self,
         url: str,
@@ -325,25 +371,27 @@ class PediatricsEngine:
         async def _run() -> list[PediatricGuideline]:
             async with AsyncCamoufox(headless=True) as browser:
                 page = await browser.new_page()
-                await page.goto(
-                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
-                )
+                await self._goto(page, target)
                 # The Cloudflare interstitial auto-redirects to a mangled URL
                 # ("?autologincheck=redirected" appended to the query) that
                 # 404s. Once the challenge clears, its cookie is set and a
                 # clean re-navigation reaches the real results page.
-                await self._settle(page, item_selectors, _CHALLENGE_SETTLE_MS)
-                content = await page.content()
+                content = await self._await_challenge_clear(
+                    page, _CHALLENGE_CLEAR_MS
+                )
                 first = self._parse_guideline_items(
                     content, item_selectors, base_url, source
                 )
                 if page.url == target and not _looks_like_challenge(content):
                     return first
-                await page.goto(
-                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
-                )
+                await self._goto(page, target)
                 await self._settle(page, item_selectors, _POST_RENAV_SETTLE_MS)
-                content = await page.content()
+                try:
+                    content = await page.content()
+                except Exception:
+                    # Still mid-redirect after the re-navigation; keep the
+                    # first pass rather than fail the whole scrape.
+                    content = ""
                 second = self._parse_guideline_items(
                     content, item_selectors, base_url, source
                 )
