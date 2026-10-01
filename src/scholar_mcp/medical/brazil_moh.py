@@ -84,6 +84,7 @@ from scholar_mcp.medical.ranking import (
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
+from scholar_mcp.utils.browser import goto_tolerant, read_content_settled
 
 _BVS_HOST = "pesquisa.bvsalud.org"
 BVS_SEARCH_URL = f"https://{_BVS_HOST}/portal/"
@@ -138,6 +139,10 @@ CACHE_SCHEMA = "v3"
 # ceiling for the ceiling to be what ends a slow Solr response or a long Bunny
 # CDN challenge; at 30 s it cut navigations short and those requests failed.
 _CAMOUFOX_NAV_TIMEOUT_MS = 90000
+
+# After an aborted goto the shield page settles within seconds; the tier's
+# outer wait_for(effective_ceiling) still bounds the whole attempt.
+_CAMOUFOX_CONTENT_SETTLE_MS = 5000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
 # tier cannot do useful work, so skip the launch outright. Not independently
@@ -1644,10 +1649,10 @@ class BrazilMoHEngine:
                     _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
                 )
                 page = await browser.new_page()
-                await page.goto(
-                    target, wait_until="domcontentloaded", timeout=nav_timeout_ms
+                await goto_tolerant(page, target, nav_timeout_ms)
+                content = await read_content_settled(
+                    page, _CAMOUFOX_CONTENT_SETTLE_MS
                 )
-                content = await page.content()
             soup = BeautifulSoup(content, "html.parser")
             pre = soup.find("pre")
             text = pre.get_text() if pre else soup.get_text()

@@ -2285,11 +2285,15 @@ async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
         await http_client.aclose()
 
 
-def _install_fake_camoufox(monkeypatch, rendered_html=""):
+def _install_fake_camoufox(monkeypatch, rendered_html="", abort_goto=False):
     """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
 
     Copied from tests/medical/test_pediatrics.py — no conftest exists to
     share it through. ``rendered_html`` is what page.content() returns.
+    ``abort_goto`` makes goto raise NS_BINDING_ABORTED, the race the Bunny
+    shield interstitial causes when its own redirect aborts the in-flight
+    navigation. The production helper matches on the message, not the
+    playwright Error type: that module is faked out in tests.
     """
     import asyncio
     import sys
@@ -2306,6 +2310,10 @@ def _install_fake_camoufox(monkeypatch, rendered_html=""):
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
+            if abort_goto:
+                raise RuntimeError(
+                    "Page.goto: NS_BINDING_ABORTED; maybe frame was detached?"
+                )
             self.url = url
             return None
 
@@ -2399,6 +2407,45 @@ async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
+    """A Bunny-shield redirect racing the goto aborts it with
+    NS_BINDING_ABORTED; the JSON payload must still be read once the page
+    settles instead of the whole browser tier returning []."""
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client, cache, settings)
+    payload = {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "1", "ti": "Manejo da dengue",
+                         "pais_publicacao": "^eBrasil", "da": "202401",
+                         "ur": ["https://bvsms.saude.gov.br/x.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, json.dumps(payload), abort_goto=True
+    )
+    try:
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert attempts == [True]
+    finally:
+        await cache.close()
 
 
 async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, monkeypatch):
