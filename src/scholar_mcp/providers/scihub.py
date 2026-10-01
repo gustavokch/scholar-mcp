@@ -9,10 +9,15 @@ from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS, Settings
 from scholar_mcp.models import FullTextResponse, IdentifierMap
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
+from scholar_mcp.utils.browser import goto_tolerant, read_content_settled
 from scholar_mcp.utils.http import AsyncHttpClient
 
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
+_CAMOUFOX_GOTO_TIMEOUT_MS = 15000
+# After an aborted goto the interstitial page settles within seconds; the
+# tier's outer wait_for(_CAMOUFOX_TOTAL_TIMEOUT) still bounds everything.
+_CAMOUFOX_CONTENT_SETTLE_MS = 5000
 
 # Ceiling on a mirror's failure count. The count only orders the mirror list, so
 # anything above "worse than every healthy mirror" buys nothing and just delays
@@ -148,12 +153,12 @@ class SciHubProvider(BaseProvider):
                 for mirror in self.mirrors[:_CAMOUFOX_MAX_MIRRORS]:
                     mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
                     try:
-                        await page.goto(
-                            mirror_url,
-                            wait_until="domcontentloaded",
-                            timeout=15000,
+                        await goto_tolerant(
+                            page, mirror_url, _CAMOUFOX_GOTO_TIMEOUT_MS
                         )
-                        content = await page.content()
+                        content = await read_content_settled(
+                            page, _CAMOUFOX_CONTENT_SETTLE_MS
+                        )
                         page_referer = _landing_url(page.url, mirror_url)
                         pdf_url = _extract_pdf_url(content, base_url=page_referer)
                         if not pdf_url:

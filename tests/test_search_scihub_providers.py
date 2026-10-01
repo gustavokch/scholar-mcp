@@ -412,6 +412,7 @@ def _install_fake_camoufox(
     pdf_bytes=b"%PDF-1.5-fake-data",
     final_url=None,
     browser_status=200,
+    abort_goto=False,
 ):
     import sys
     import types
@@ -438,6 +439,12 @@ def _install_fake_camoufox(
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
+            if abort_goto:
+                # The production helper matches on the message, not the
+                # playwright Error type: that module is faked out in tests.
+                raise RuntimeError(
+                    "Page.goto: NS_BINDING_ABORTED; maybe frame was detached?"
+                )
             # A real page reports the URL it landed on after redirects.
             self.url = final_url or url
             return None
@@ -643,6 +650,29 @@ async def test_scihub_camoufox_uses_final_page_url_as_referer(client, monkeypatc
     assert pdf_bytes == b"%PDF-1.5-fake-data"
     assert pdf_url == "https://landed.org/10.1038/paper.pdf"
     assert fake.headers[0].get("Referer") == "https://landed.org/10.1038/test"
+
+
+@respx.mock
+async def test_scihub_camoufox_tolerates_aborted_goto(client, monkeypatch):
+    """A bot-shield interstitial navigates the page itself; when that
+    redirect races the goto, Playwright raises NS_BINDING_ABORTED. The abort
+    means the interstitial is working, not that the mirror failed: the
+    landing page is still read once it settles and the mirror is not
+    skipped."""
+    respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
+    rendered_html = '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
+    fake = _install_fake_camoufox(
+        monkeypatch, rendered_html=rendered_html, abort_goto=True
+    )
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
+
+    assert pdf_bytes == b"%PDF-1.5-fake-data"
+    assert pdf_url == "https://sci-pdf.org/paper.pdf"
+    assert fake.urls == ["https://mirror1.org/10.1038/test"]
+
 
 
 @respx.mock
