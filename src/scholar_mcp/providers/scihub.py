@@ -9,10 +9,21 @@ from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS, Settings
 from scholar_mcp.models import FullTextResponse, IdentifierMap
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
+from scholar_mcp.utils.browser import (
+    goto_tolerant,
+    looks_like_cloudflare_challenge,
+    read_content_settled,
+)
 from scholar_mcp.utils.http import AsyncHttpClient
 
 _CAMOUFOX_MAX_MIRRORS = 3
 _CAMOUFOX_TOTAL_TIMEOUT = 20
+_CAMOUFOX_GOTO_TIMEOUT_MS = 15000
+# After an aborted goto, how long one mirror may keep reading for the
+# Cloudflare interstitial to hand back the page. Up to _CAMOUFOX_MAX_MIRRORS
+# mirrors share _CAMOUFOX_TOTAL_TIMEOUT, so a mirror whose interstitial never
+# clears must not spend more than its share. Not measured against Sci-Hub.
+_CAMOUFOX_INTERSTITIAL_CLEAR_MS = 5000
 
 # Ceiling on a mirror's failure count. The count only orders the mirror list, so
 # anything above "worse than every healthy mirror" buys nothing and just delays
@@ -148,12 +159,18 @@ class SciHubProvider(BaseProvider):
                 for mirror in self.mirrors[:_CAMOUFOX_MAX_MIRRORS]:
                     mirror_url = f"{mirror.rstrip('/')}/{clean_doi}"
                     try:
-                        await page.goto(
-                            mirror_url,
-                            wait_until="domcontentloaded",
-                            timeout=15000,
+                        aborted = await goto_tolerant(
+                            page, mirror_url, _CAMOUFOX_GOTO_TIMEOUT_MS
                         )
-                        content = await page.content()
+                        # An aborted goto means an interstitial is mid-challenge:
+                        # keep reading until it hands back the page. A clean goto
+                        # keeps the single read, so a blocked mirror is skipped at
+                        # once instead of spending the budget its siblings share.
+                        content = await read_content_settled(
+                            page,
+                            _CAMOUFOX_INTERSTITIAL_CLEAR_MS if aborted else 0,
+                            ready=lambda html: not looks_like_cloudflare_challenge(html),
+                        )
                         page_referer = _landing_url(page.url, mirror_url)
                         pdf_url = _extract_pdf_url(content, base_url=page_referer)
                         if not pdf_url:

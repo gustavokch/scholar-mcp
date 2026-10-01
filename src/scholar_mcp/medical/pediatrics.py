@@ -8,6 +8,11 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle, PediatricGuideline
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
+from scholar_mcp.utils.browser import (
+    goto_tolerant,
+    looks_like_cloudflare_challenge,
+    read_content_settled,
+)
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -48,9 +53,6 @@ def _first_href_anchor(*scopes):
     return None
 
 
-def _looks_like_challenge(content: str) -> bool:
-    lowered = content.lower()
-    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
 DESC_SELECTORS = ".description, .summary, .abstract, p"
 
 AGE_RANGE_RE = re.compile(
@@ -67,17 +69,23 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 # challenge needs time to settle, but search_aap_guidelines is an MCP tool
 # with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
 _NAV_TIMEOUT_MS = 15000
-_CHALLENGE_SETTLE_MS = 5000
+# Condition-based challenge budget: poll until the interstitial hands back
+# a real page (observed ~10s), not a fixed sleep that fires mid-challenge.
+_CHALLENGE_CLEAR_MS = 20000
+_CHALLENGE_POLL_MS = 500
+# A challenge-free page can hand back its shell at DOMContentLoaded and render
+# the result list afterwards; this is how long the first pass waits for items.
+_RESULTS_SETTLE_MS = 5000
 _POST_RENAV_SETTLE_MS = 3000
-_CAMOUFOX_TOTAL_TIMEOUT_S = 45.0
-
-# Cloudflare interstitial markers. The title text is localised; the body
-# carries stable platform divs.
-_CHALLENGE_MARKERS = (
-    "just a moment",
-    "challenge-platform",
-    "cf-browser-verification",
-)
+# Ceiling for one scrape: the longest path (two navigations, the
+# challenge-clear poll, the re-navigation settle) with every phase at its cap,
+# plus headroom for the browser launch. The fixed 45 s this replaces was that
+# sum (38 s) plus 7 s while the challenge budget was 5 s; raising the budget to
+# 20 s left the caps summing past the ceiling.
+_CAMOUFOX_LAUNCH_HEADROOM_S = 7.0
+_CAMOUFOX_TOTAL_TIMEOUT_S = (
+    2 * _NAV_TIMEOUT_MS + _CHALLENGE_CLEAR_MS + _POST_RENAV_SETTLE_MS
+) / 1000 + _CAMOUFOX_LAUNCH_HEADROOM_S
 
 logger = logging.getLogger(__name__)
 
@@ -325,25 +333,51 @@ class PediatricsEngine:
         async def _run() -> list[PediatricGuideline]:
             async with AsyncCamoufox(headless=True) as browser:
                 page = await browser.new_page()
-                await page.goto(
-                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
-                )
+                await goto_tolerant(page, target, _NAV_TIMEOUT_MS)
+
+                def _challenge_cleared(html: str) -> bool:
+                    # A cleared challenge lands on the mangled URL; a challenge
+                    # never served means the first read is already real content.
+                    return (
+                        "autologincheck" in page.url
+                        or not looks_like_cloudflare_challenge(html)
+                    )
+
                 # The Cloudflare interstitial auto-redirects to a mangled URL
                 # ("?autologincheck=redirected" appended to the query) that
                 # 404s. Once the challenge clears, its cookie is set and a
                 # clean re-navigation reaches the real results page.
-                await self._settle(page, item_selectors, _CHALLENGE_SETTLE_MS)
-                content = await page.content()
+                content = await read_content_settled(
+                    page,
+                    _CHALLENGE_CLEAR_MS,
+                    _CHALLENGE_POLL_MS,
+                    ready=_challenge_cleared,
+                )
                 first = self._parse_guideline_items(
                     content, item_selectors, base_url, source
                 )
-                if page.url == target and not _looks_like_challenge(content):
-                    return first
-                await page.goto(
-                    target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
-                )
+                if page.url == target and not looks_like_cloudflare_challenge(content):
+                    if first:
+                        return first
+                    # No interstitial and no items yet: the list may render
+                    # after DOMContentLoaded, so wait for it before giving up.
+                    await self._settle(page, item_selectors, _RESULTS_SETTLE_MS)
+                    content = await read_content_settled(page, _POST_RENAV_SETTLE_MS)
+                    return self._parse_guideline_items(
+                        content, item_selectors, base_url, source
+                    )
+                await goto_tolerant(page, target, _NAV_TIMEOUT_MS)
                 await self._settle(page, item_selectors, _POST_RENAV_SETTLE_MS)
-                content = await page.content()
+                try:
+                    content = await page.content()
+                except Exception:
+                    # Still mid-redirect after the re-navigation; keep the
+                    # first pass rather than fail the whole scrape.
+                    logger.debug(
+                        "content unreadable after re-navigation; keeping the first pass",
+                        exc_info=True,
+                    )
+                    content = ""
                 second = self._parse_guideline_items(
                     content, item_selectors, base_url, source
                 )
