@@ -643,7 +643,7 @@ if settings.enable_medical_tools:
         Args:
             query: Free-text search terms. Portuguese terms match best;
                 every token is required (they are ANDed).
-            limit: Maximum number of results to return (max 50).
+            limit: Maximum number of results to return (max 25).
             collection: 'all' (default, all Brazilian grey literature),
                 'brisa' (health-technology assessments and PCDT only),
                 'pcdt' (PCDT clinical protocols from gov.br), or

@@ -108,7 +108,7 @@ FULLTEXT_ALLOWED_HOSTS = frozenset(
     {"fi-admin.bvsalud.org", "docs.bvsalud.org", "www.gov.br", "gov.br", "bvsms.saude.gov.br"}
 )
 
-MAX_RESULTS = 50
+MAX_RESULTS = 25
 # Over-fetch, then re-rank client-side, then slice. The factor is tied to
 # BASE_FILTER's width: admitting the monography class takes the pt pool from
 # roughly 23.6k to 117.8k documents and about triples the hit count of a
@@ -136,7 +136,7 @@ CACHE_SCHEMA = "v3"
 # ``settings.brazil_browser_timeout_s``. 30 s lets the navigation absorb a
 # slow Solr response or a long Bunny CDN challenge without the browser tier
 # ceiling (45 s) firing first.
-_CAMOUFOX_NAV_TIMEOUT_MS = 30000
+_CAMOUFOX_NAV_TIMEOUT_MS = 90000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
 # tier cannot do useful work, so skip the launch outright. Not independently
@@ -185,7 +185,7 @@ _CONNECT_FAILURE_DETAILS = frozenset({"ConnectTimeout", "ConnectError"})
 # the old downstream previews truncated well below what the source provides.
 # BVS ``ab`` fields run to a few KB; 2000 chars keeps the full abstract of a
 # technical manual while bounding the merged payload.
-ABSTRACT_MAX_CHARS = 2000
+ABSTRACT_MAX_CHARS = 4000
 
 # BVS returns a transient 5xx per request, not per outage: the same URL
 # alternates 502 and 200 across consecutive requests, and the 502 arrives in
