@@ -19,7 +19,18 @@ IRIS_ITEM_BUNDLES_URL = f"{IRIS_API_BASE}/core/items"
 IRIS_BUNDLE_BITSTREAMS_URL = f"{IRIS_API_BASE}/core/bundles"
 IRIS_BITSTREAM_CONTENT_URL = f"{IRIS_API_BASE}/core/bitstreams"
 IRIS_ITEM_TYPE_FILTER = "Publications,equals"
+# Asks DSpace to attach each listed item's bundles, and their bitstreams, to
+# the list response: the PDF link then costs no request per result.
+IRIS_EMBED_BITSTREAMS = "bundles/bitstreams"
 MAX_PAGE_SIZE = 100
+# The server loads the embedded sub-resources per item, so a list page's
+# latency grows with its size and with how many bitstreams its items carry.
+# Measured live (2026-09-30), browse endpoint: 1.1 s for 10 items, 3.3 s for
+# 25, 11.7 s for 50, 33-55 s for 100 (past the 30 s request_timeout). The
+# search endpoint costs about 1.6x more per item, and one 10-item page of
+# many-bitstream items took 7.9 s. Small pages keep the worst page far from
+# the timeout, and 10 is the default limit, so the common call is one request.
+MAX_EMBED_PAGE_SIZE = 10
 MAX_RESULTS = 200
 MAX_FULL_TEXT_CHARS = 600_000
 MAX_CONCURRENT_PDF_RESOLUTIONS = 10
@@ -111,31 +122,51 @@ def _extract_pdf_link_from_bitstreams(
     return "", ""
 
 
-def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
-    """Extract primary PDF bitstream content URL from an item dict if embedded."""
-    embedded = item.get("_embedded") or {}
-    bundles_container = embedded.get("bundles") or {}
-    bundles = (bundles_container.get("_embedded") or {}).get("bundles") or []
+def _is_complete(page_obj: dict[str, Any], listed: list[Any]) -> bool:
+    """True when a HAL page lists every entry of its resource.
+
+    DSpace embeds only the first page of a sub-resource, so a list that falls
+    short of ``page.totalElements`` proves nothing about what it leaves out.
+    """
+    total = (page_obj.get("page") or {}).get("totalElements")
+    return isinstance(total, int) and total <= len(listed)
+
+
+def _embedded_original_bitstreams(item: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The ORIGINAL bundle's bitstreams, as the list response embeds them.
+
+    ``None``: the payload cannot settle the item (nothing embedded, or a
+    partial page stands in the way), so the server has to be asked. ``[]``:
+    the embed shows the item has no ORIGINAL bitstreams at all.
+    """
+    bundles_page = (item.get("_embedded") or {}).get("bundles")
+    if not isinstance(bundles_page, dict):
+        return None
+    bundles = (bundles_page.get("_embedded") or {}).get("bundles") or []
     if not isinstance(bundles, list):
-        return ""
+        return None
 
     original = next(
         (b for b in bundles if isinstance(b, dict) and b.get("name") == "ORIGINAL"),
         None,
     )
-    if not original:
-        return ""
+    if original is None:
+        return [] if _is_complete(bundles_page, bundles) else None
 
     # DSpace embeds bitstreams like bundles: as a HAL page object
     # ({"_embedded": {"bitstreams": [...]}, "page": {...}}), not a bare list.
     bitstreams_page = (original.get("_embedded") or {}).get("bitstreams")
     if not isinstance(bitstreams_page, dict):
-        return ""
+        return None
     bitstreams = (bitstreams_page.get("_embedded") or {}).get("bitstreams") or []
-    if not isinstance(bitstreams, list):
-        return ""
+    if not isinstance(bitstreams, list) or not _is_complete(bitstreams_page, bitstreams):
+        return None
+    return bitstreams
 
-    url, _ = _extract_pdf_link_from_bitstreams(bitstreams)
+
+def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
+    """Extract primary PDF bitstream content URL from an item dict if embedded."""
+    url, _ = _extract_pdf_link_from_bitstreams(_embedded_original_bitstreams(item) or [])
     return url
 
 
@@ -198,10 +229,19 @@ class WHOIRISEngine:
         """
         collected: list[dict[str, Any]] = []
         page = 0
-        size = min(limit, MAX_PAGE_SIZE)
+        # Equal pages no larger than MAX_EMBED_PAGE_SIZE. DSpace pages by index
+        # at a fixed size, so a limit one over the ceiling fetched as two full
+        # pages would make the server embed almost a page nobody asked for.
+        pages = -(-limit // MAX_EMBED_PAGE_SIZE)
+        size = -(-limit // pages)
 
         while len(collected) < limit:
-            page_params = {**params, "size": str(size), "page": str(page)}
+            page_params = {
+                **params,
+                "size": str(size),
+                "page": str(page),
+                "embed": IRIS_EMBED_BITSTREAMS,
+            }
             try:
                 resp = await self.http_client.get(
                     url, params=page_params, headers={"Accept": "application/json"}
@@ -264,7 +304,13 @@ class WHOIRISEngine:
 
         async def _enrich_item(item: dict[str, Any]) -> tuple[WHOGuideline, bool]:
             rec = _build_record(item)
-            if not rec.pdf_url and item.get("uuid"):
+            # An item whose embed is complete is settled, with or without a PDF;
+            # only the rest costs a request.
+            if (
+                not rec.pdf_url
+                and item.get("uuid")
+                and _embedded_original_bitstreams(item) is None
+            ):
                 async with sem:
                     pdf_url, _, errored = await self._resolve_pdf_bitstream(
                         item.get("uuid") or ""
