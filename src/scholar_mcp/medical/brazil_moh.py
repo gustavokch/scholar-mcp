@@ -82,9 +82,9 @@ from scholar_mcp.medical.ranking import (
     tokenize_portuguese,
 )
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
+from scholar_mcp.utils.browser import goto_tolerant, read_content_settled
 from scholar_mcp.utils.http import RETRYABLE_STATUS_CODES, AsyncHttpClient
 from scholar_mcp.utils.sqlite_cache import BvsErrorKind, CacheMetadata, SQLiteCacheManager
-from scholar_mcp.utils.browser import goto_tolerant, read_content_settled
 
 _BVS_HOST = "pesquisa.bvsalud.org"
 BVS_SEARCH_URL = f"https://{_BVS_HOST}/portal/"
@@ -1661,6 +1661,9 @@ class BrazilMoHEngine:
             except (json.JSONDecodeError, ValueError):
                 # Only an unparseable payload can be a shield or an error page; a
                 # marker phrase inside a parsed record is just record text.
+                if not content:
+                    logger.info("brazil_moh: BVS browser fallback content unreadable after settle budget")
+                    return []
                 lowered = content.lower()
                 if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
                     logger.info("brazil_moh: BVS browser fallback received challenge or block page")

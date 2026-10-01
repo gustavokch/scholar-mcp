@@ -674,7 +674,6 @@ async def test_scihub_camoufox_tolerates_aborted_goto(client, monkeypatch):
     assert fake.urls == ["https://mirror1.org/10.1038/test"]
 
 
-
 @respx.mock
 async def test_scihub_camoufox_falls_through_to_http_without_bare_retry(client, monkeypatch):
     """When the browser fetch is refused, the httpx fall-through still sends the

@@ -2437,7 +2437,7 @@ async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
             }
         ]
     }
-    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(
         monkeypatch, json.dumps(payload), abort_goto=True
     )
     try:
@@ -2446,6 +2446,7 @@ async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
         assert attempts == [True]
     finally:
         await cache.close()
+        await http_client.aclose()
 
 
 async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, monkeypatch):
