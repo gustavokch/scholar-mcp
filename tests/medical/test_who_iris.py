@@ -1161,6 +1161,32 @@ async def test_search_guidelines_resolves_in_full_when_embedded_bitstreams_are_p
         await cache.close()
         await http_client.aclose()
 
+@respx.mock
+async def test_search_guidelines_resolves_in_full_when_embedded_bundles_are_partial(tmp_path: Path):
+    """A bundles page that lists fewer bundles than totalElements cannot prove
+    ORIGINAL is absent: like a partial bitstreams page, the item is resolved in
+    full instead of being settled with no PDF."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item()
+        item["_embedded"] = {"bundles": _hal_page("bundles", [{"name": "THUMBNAIL"}])}
+        item["_embedded"]["bundles"]["page"]["totalElements"] = 2  # 1 of 2 listed
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream(uuid="bit-full", name="guideline.pdf", size=9000)])
+        )
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+
+        assert guidelines[0].pdf_url == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-full/content"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
 
 @respx.mock
 async def test_search_guidelines_skips_lookups_the_embed_already_settled(tmp_path: Path):
