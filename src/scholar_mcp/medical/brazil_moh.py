@@ -140,9 +140,11 @@ CACHE_SCHEMA = "v3"
 # CDN challenge; at 30 s it cut navigations short and those requests failed.
 _CAMOUFOX_NAV_TIMEOUT_MS = 90000
 
-# After an aborted goto the shield page settles within seconds; the tier's
-# outer wait_for(effective_ceiling) still bounds the whole attempt.
-_CAMOUFOX_CONTENT_SETTLE_MS = 5000
+# How long, after an aborted goto, the tier keeps reading for the shield
+# interstitial to hand back the payload. Not measured against BVS: it is the
+# 20 s the AAP Cloudflare challenge (observed ~10 s) is given. The navigation
+# budget and the tier's outer wait_for(effective_ceiling) still bound it.
+_CAMOUFOX_SHIELD_CLEAR_MS = 20000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
 # tier cannot do useful work, so skip the launch outright. Not independently
@@ -716,6 +718,30 @@ def _dedupe_by_id(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             seen.add(record_id)
         unique.append(doc)
     return unique
+
+
+def _browser_payload_text(content: str) -> str:
+    """Text of a JSON response as the browser rendered it (raw JSON sits in ``<pre>``)."""
+    soup = BeautifulSoup(content, "html.parser")
+    pre = soup.find("pre")
+    return pre.get_text() if pre else soup.get_text()
+
+
+def _bvs_shield_pending(content: str) -> bool:
+    """True while the rendered page is still the CDN shield, not the payload.
+
+    Only an unparseable page can be the shield: a marker phrase inside a parsed
+    record (a ``b-cdn.net`` document link) is just record text. An outage page
+    carries no challenge marker, so it is not pending -- it will not clear.
+    """
+    lowered = content.lower()
+    if not any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
+        return False
+    try:
+        json.loads(_browser_payload_text(content))
+    except ValueError:
+        return True
+    return False
 
 
 def _classify_failure(failure: Any) -> BvsErrorKind:
@@ -1649,21 +1675,22 @@ class BrazilMoHEngine:
                     _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
                 )
                 page = await browser.new_page()
-                await goto_tolerant(page, target, nav_timeout_ms)
+                aborted = await goto_tolerant(page, target, nav_timeout_ms)
+                # An aborted goto means the shield is mid-challenge: keep
+                # reading until the payload replaces its interstitial. A clean
+                # goto keeps the single read, so a block page is classified at
+                # once instead of waited on.
                 content = await read_content_settled(
-                    page, _CAMOUFOX_CONTENT_SETTLE_MS
+                    page,
+                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms) if aborted else 0,
+                    ready=lambda html: not _bvs_shield_pending(html),
                 )
-            soup = BeautifulSoup(content, "html.parser")
-            pre = soup.find("pre")
-            text = pre.get_text() if pre else soup.get_text()
+            text = _browser_payload_text(content)
             try:
                 data = json.loads(text)
             except (json.JSONDecodeError, ValueError):
                 # Only an unparseable payload can be a shield or an error page; a
                 # marker phrase inside a parsed record is just record text.
-                if not content:
-                    logger.info("brazil_moh: BVS browser fallback content unreadable after settle budget")
-                    return []
                 lowered = content.lower()
                 if any(marker in lowered for marker in _BVS_CHALLENGE_MARKERS):
                     logger.info("brazil_moh: BVS browser fallback received challenge or block page")

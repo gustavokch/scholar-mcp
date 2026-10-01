@@ -2285,7 +2285,9 @@ async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
         await http_client.aclose()
 
 
-def _install_fake_camoufox(monkeypatch, rendered_html="", abort_goto=False):
+def _install_fake_camoufox(
+    monkeypatch, rendered_html="", abort_goto=False, content_script=None
+):
     """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
 
     Copied from tests/medical/test_pediatrics.py — no conftest exists to
@@ -2294,6 +2296,9 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", abort_goto=False):
     shield interstitial causes when its own redirect aborts the in-flight
     navigation. The production helper matches on the message, not the
     playwright Error type: that module is faked out in tests.
+    ``content_script`` replays one entry per page.content() call instead of
+    ``rendered_html``: an Exception is raised, a string returned, and the last
+    entry repeats.
     """
     import asyncio
     import sys
@@ -2307,6 +2312,7 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", abort_goto=False):
     class _FakePage:
         def __init__(self):
             self.url = ""
+            self._reads = list(content_script or [])
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
@@ -2325,7 +2331,12 @@ def _install_fake_camoufox(monkeypatch, rendered_html="", abort_goto=False):
             return None
 
         async def content(self):
-            return rendered_html
+            if not self._reads:
+                return rendered_html
+            entry = self._reads.pop(0) if len(self._reads) > 1 else self._reads[0]
+            if isinstance(entry, Exception):
+                raise entry
+            return entry
 
     class _FakeBrowser:
         async def new_page(self, *a, **k):
@@ -3767,6 +3778,107 @@ async def test_browser_success_does_not_cache_when_a_govbr_stage_errored(
         composed = _build_query("dengue", "all", operator="AND", title_scoped=True)
         _, cache_meta = await cache.get(f"brazil_moh_search:{CACHE_SCHEMA}:all:10:{composed}")
         assert cache_meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+_MID_REDIRECT = RuntimeError(
+    "Page.content: Unable to retrieve content because the page is navigating "
+    "and changing the content."
+)
+_BVS_INTERSTITIAL = (
+    "<html><head><title>Just a moment...</title></head>"
+    "<body><div id='challenge-platform'></div></body></html>"
+)
+
+
+def _bvs_payload(doc_url="https://bvsms.saude.gov.br/x.pdf") -> str:
+    return json.dumps(
+        {
+            "diaServerResponse": [
+                {
+                    "response": {
+                        "docs": [
+                            {"id": "1", "ti": "Manejo da dengue",
+                             "pais_publicacao": "^eBrasil", "da": "202401",
+                             "ur": [doc_url]},
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+
+
+async def _camoufox_engine(tmp_path: Path):
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    return BrazilMoHEngine(http_client, cache, settings), cache, http_client
+
+
+async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
+    tmp_path, monkeypatch
+):
+    """The aborted goto leaves the page on the Bunny interstitial; the payload
+    only replaces it once the challenge clears. The tier must keep reading
+    until then instead of classifying the interstitial as a block."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _attempts, _urls, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch,
+        abort_goto=True,
+        content_script=[
+            _MID_REDIRECT, _BVS_INTERSTITIAL, _BVS_INTERSTITIAL, _bvs_payload()
+        ],
+    )
+    try:
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert sleeps == [500, 500, 500]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_reads_once_when_the_goto_was_not_aborted(
+    tmp_path, monkeypatch
+):
+    """Without an abort nothing says the interstitial is mid-challenge: a
+    shield page is classified at once, not waited on for the whole budget."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _attempts, _urls, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch, content_script=[_BVS_INTERSTITIAL]
+    )
+    try:
+        assert await engine._camoufox_search("dengue", 10, None) == []
+        assert sleeps == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield_marker(
+    tmp_path, monkeypatch
+):
+    """A record linking a b-cdn.net document is record text, not a shield: the
+    parsed payload ends the wait even after an aborted goto."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _attempts, _urls, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch,
+        abort_goto=True,
+        content_script=[_bvs_payload("https://acme.b-cdn.net/dengue.pdf")],
+    )
+    try:
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert sleeps == []
     finally:
         await cache.close()
         await http_client.aclose()
