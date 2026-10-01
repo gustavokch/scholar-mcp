@@ -126,7 +126,12 @@ def _extract_pdf_link_from_item(item: dict[str, Any]) -> str:
     if not original:
         return ""
 
-    bitstreams = (original.get("_embedded") or {}).get("bitstreams") or []
+    # DSpace embeds bitstreams like bundles: as a HAL page object
+    # ({"_embedded": {"bitstreams": [...]}, "page": {...}}), not a bare list.
+    bitstreams_page = (original.get("_embedded") or {}).get("bitstreams")
+    if not isinstance(bitstreams_page, dict):
+        return ""
+    bitstreams = (bitstreams_page.get("_embedded") or {}).get("bitstreams") or []
     if not isinstance(bitstreams, list):
         return ""
 

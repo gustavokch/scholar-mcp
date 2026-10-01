@@ -41,6 +41,14 @@ def _browse_page(items, page=0, total_pages=1, total_elements=None):
     }
 
 
+def _hal_page(rel: str, items: list[dict]) -> dict:
+    """DSpace 7 embeds every sub-resource as a HAL page object, never a bare list."""
+    return {
+        "_embedded": {rel: items},
+        "page": {"number": 0, "size": 20, "totalPages": 1, "totalElements": len(items)},
+    }
+
+
 def _iris_item(
     handle="10665/44626",
     title="Guideline: neonatal vitamin A supplementation",
@@ -64,24 +72,26 @@ def _iris_item(
     }
     if pdf_url:
         item["_embedded"] = {
-            "bundles": {
-                "_embedded": {
-                    "bundles": [
-                        {
-                            "name": "ORIGINAL",
-                            "_embedded": {
-                                "bitstreams": [
+            "bundles": _hal_page(
+                "bundles",
+                [
+                    {
+                        "name": "ORIGINAL",
+                        "_embedded": {
+                            "bitstreams": _hal_page(
+                                "bitstreams",
+                                [
                                     {
                                         "uuid": "bit-1",
                                         "name": "guideline.pdf",
                                         "_links": {"content": {"href": pdf_url}},
                                     }
-                                ]
-                            },
-                        }
-                    ]
-                }
-            }
+                                ],
+                            )
+                        },
+                    }
+                ],
+            )
         }
     return item
 
@@ -963,20 +973,23 @@ def test_extract_pdf_link_from_item_handles_string_size_and_content_link():
                         {
                             "name": "ORIGINAL",
                             "_embedded": {
-                                "bitstreams": [
-                                    {
-                                        "uuid": "bit-small",
-                                        "name": "doc.pdf",
-                                        "sizeBytes": "100",
-                                        "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
-                                    },
-                                    {
-                                        "uuid": "bit-large",
-                                        "name": "doc_full.pdf",
-                                        "sizeBytes": "9999",
-                                        "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
-                                    },
-                                ]
+                                "bitstreams": _hal_page(
+                                    "bitstreams",
+                                    [
+                                        {
+                                            "uuid": "bit-small",
+                                            "name": "doc.pdf",
+                                            "sizeBytes": "100",
+                                            "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
+                                        },
+                                        {
+                                            "uuid": "bit-large",
+                                            "name": "doc_full.pdf",
+                                            "sizeBytes": "9999",
+                                            "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
+                                        },
+                                    ],
+                                )
                             },
                         }
                     ]
@@ -1011,18 +1024,21 @@ def test_extract_pdf_link_survives_nan_size():
                         {
                             "name": "ORIGINAL",
                             "_embedded": {
-                                "bitstreams": [
-                                    {
-                                        "uuid": "bit-nan",
-                                        "name": "broken.pdf",
-                                        "sizeBytes": float("nan"),
-                                    },
-                                    {
-                                        "uuid": "bit-ok",
-                                        "name": "ok.pdf",
-                                        "sizeBytes": 4096,
-                                    },
-                                ]
+                                "bitstreams": _hal_page(
+                                    "bitstreams",
+                                    [
+                                        {
+                                            "uuid": "bit-nan",
+                                            "name": "broken.pdf",
+                                            "sizeBytes": float("nan"),
+                                        },
+                                        {
+                                            "uuid": "bit-ok",
+                                            "name": "ok.pdf",
+                                            "sizeBytes": 4096,
+                                        },
+                                    ],
+                                )
                             },
                         }
                     ]
