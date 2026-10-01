@@ -133,9 +133,10 @@ CACHE_SCHEMA = "v3"
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
 # caller's own timeout. The total ceiling comes from
-# ``settings.brazil_browser_timeout_s``. 30 s lets the navigation absorb a
-# slow Solr response or a long Bunny CDN challenge without the browser tier
-# ceiling (45 s) firing first.
+# ``settings.brazil_browser_timeout_s`` (45 s by default). The navigation gets
+# ``min(this cap, ceiling left after launch)``, so the cap has to sit above the
+# ceiling for the ceiling to be what ends a slow Solr response or a long Bunny
+# CDN challenge; at 30 s it cut navigations short and those requests failed.
 _CAMOUFOX_NAV_TIMEOUT_MS = 90000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
@@ -183,7 +184,7 @@ _CONNECT_FAILURE_DETAILS = frozenset({"ConnectTimeout", "ConnectError"})
 
 # Raised abstract cap (S2.1): shaped hits must carry a decidable body, and
 # the old downstream previews truncated well below what the source provides.
-# BVS ``ab`` fields run to a few KB; 2000 chars keeps the full abstract of a
+# BVS ``ab`` fields run to a few KB; 4000 chars keeps the full abstract of a
 # technical manual while bounding the merged payload.
 ABSTRACT_MAX_CHARS = 4000
 

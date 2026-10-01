@@ -41,6 +41,14 @@ def _browse_page(items, page=0, total_pages=1, total_elements=None):
     }
 
 
+def _hal_page(rel: str, items: list[dict]) -> dict:
+    """DSpace 7 embeds every sub-resource as a HAL page object, never a bare list."""
+    return {
+        "_embedded": {rel: items},
+        "page": {"number": 0, "size": 20, "totalPages": 1, "totalElements": len(items)},
+    }
+
+
 def _iris_item(
     handle="10665/44626",
     title="Guideline: neonatal vitamin A supplementation",
@@ -64,24 +72,26 @@ def _iris_item(
     }
     if pdf_url:
         item["_embedded"] = {
-            "bundles": {
-                "_embedded": {
-                    "bundles": [
-                        {
-                            "name": "ORIGINAL",
-                            "_embedded": {
-                                "bitstreams": [
+            "bundles": _hal_page(
+                "bundles",
+                [
+                    {
+                        "name": "ORIGINAL",
+                        "_embedded": {
+                            "bitstreams": _hal_page(
+                                "bitstreams",
+                                [
                                     {
                                         "uuid": "bit-1",
                                         "name": "guideline.pdf",
                                         "_links": {"content": {"href": pdf_url}},
                                     }
-                                ]
-                            },
-                        }
-                    ]
-                }
-            }
+                                ],
+                            )
+                        },
+                    }
+                ],
+            )
         }
     return item
 
@@ -168,7 +178,6 @@ async def test_search_guidelines_prefix_mode_paginates_across_pages(tmp_path: Pa
         assert route.call_count == 2
         assert route.calls[0].request.url.params["page"] == "0"
         assert route.calls[1].request.url.params["page"] == "1"
-        assert route.calls[0].request.url.params["size"] == "25"
         assert meta.error is False
     finally:
         await cache.close()
@@ -247,6 +256,29 @@ def _search_page(items, page=0, total_pages=1, total_elements=None):
     }
 
 
+def _dspace_list(plain: list[dict], embedded: list[dict], search: bool = False):
+    """respx side effect that answers like DSpace: it honours size/page and
+    attaches each item's bundles/bitstreams only when the request asks for them
+    with ``embed``."""
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        size, page = int(params["size"]), int(params["page"])
+        source = embedded if params.get("embed") == "bundles/bitstreams" else plain
+        build = _search_page if search else _browse_page
+        return httpx.Response(
+            200,
+            json=build(
+                source[page * size : (page + 1) * size],
+                page=page,
+                total_pages=-(-len(source) // size),
+                total_elements=len(source),
+            ),
+        )
+
+    return _respond
+
+
 @respx.mock
 async def test_search_guidelines_fulltext_mode_parses_item(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
@@ -284,7 +316,6 @@ async def test_search_guidelines_fulltext_mode_paginates(tmp_path: Path):
         assert route.call_count == 2
         assert route.calls[0].request.url.params["page"] == "0"
         assert route.calls[1].request.url.params["page"] == "1"
-        assert route.calls[0].request.url.params["size"] == "23"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -337,24 +368,27 @@ async def test_search_guidelines_partial_failure_is_not_cached(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path):
+async def test_search_guidelines_clamps_limit_inside_engine(tmp_path: Path, monkeypatch):
+    import scholar_mcp.medical.who_iris as who_iris_mod
+
+    # A small ceiling keeps the page count, and the host's 5 req/s bucket, out of the runtime.
+    monkeypatch.setattr(who_iris_mod, "MAX_RESULTS", 30)
     engine, cache, http_client = await _engine(tmp_path)
     try:
-        page_items = [
+        items = [
             _iris_item(
                 handle=f"10665/{700 + i}",
                 pdf_url=f"https://iris.who.int/server/api/core/bitstreams/bit-{i}/content",
             )
-            for i in range(100)
+            for i in range(60)
         ]
-        route = respx.get(IRIS_BROWSE_TITLE_URL).respond(
-            json=_browse_page(page_items, total_pages=999, total_elements=99900)
-        )
+        route = respx.get(IRIS_BROWSE_TITLE_URL).mock(side_effect=_dspace_list(items, items))
 
         guidelines, _meta = await engine.search_guidelines("guideline", limit=10_000, mode="prefix")
 
-        assert route.call_count == 2  # clamped to 200 items: pages 0 and 1 only
-        assert len(guidelines) == 200
+        size = int(route.calls[0].request.url.params["size"])
+        assert len(guidelines) == 30  # clamped to the engine's own ceiling
+        assert route.call_count == -(-30 // size)  # and no page is fetched past it
     finally:
         await cache.close()
         await http_client.aclose()
@@ -963,20 +997,23 @@ def test_extract_pdf_link_from_item_handles_string_size_and_content_link():
                         {
                             "name": "ORIGINAL",
                             "_embedded": {
-                                "bitstreams": [
-                                    {
-                                        "uuid": "bit-small",
-                                        "name": "doc.pdf",
-                                        "sizeBytes": "100",
-                                        "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
-                                    },
-                                    {
-                                        "uuid": "bit-large",
-                                        "name": "doc_full.pdf",
-                                        "sizeBytes": "9999",
-                                        "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
-                                    },
-                                ]
+                                "bitstreams": _hal_page(
+                                    "bitstreams",
+                                    [
+                                        {
+                                            "uuid": "bit-small",
+                                            "name": "doc.pdf",
+                                            "sizeBytes": "100",
+                                            "_links": {"content": {"href": "https://iris.who.int/bit-small/content"}},
+                                        },
+                                        {
+                                            "uuid": "bit-large",
+                                            "name": "doc_full.pdf",
+                                            "sizeBytes": "9999",
+                                            "_links": {"content": {"href": "https://iris.who.int/bit-large/content"}},
+                                        },
+                                    ],
+                                )
                             },
                         }
                     ]
@@ -1011,18 +1048,21 @@ def test_extract_pdf_link_survives_nan_size():
                         {
                             "name": "ORIGINAL",
                             "_embedded": {
-                                "bitstreams": [
-                                    {
-                                        "uuid": "bit-nan",
-                                        "name": "broken.pdf",
-                                        "sizeBytes": float("nan"),
-                                    },
-                                    {
-                                        "uuid": "bit-ok",
-                                        "name": "ok.pdf",
-                                        "sizeBytes": 4096,
-                                    },
-                                ]
+                                "bitstreams": _hal_page(
+                                    "bitstreams",
+                                    [
+                                        {
+                                            "uuid": "bit-nan",
+                                            "name": "broken.pdf",
+                                            "sizeBytes": float("nan"),
+                                        },
+                                        {
+                                            "uuid": "bit-ok",
+                                            "name": "ok.pdf",
+                                            "sizeBytes": 4096,
+                                        },
+                                    ],
+                                )
                             },
                         }
                     ]
@@ -1032,6 +1072,155 @@ def test_extract_pdf_link_survives_nan_size():
     }
     extracted = _extract_pdf_link_from_item(item)
     assert extracted == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-ok/content"
+
+
+@respx.mock
+async def test_search_guidelines_takes_pdf_links_from_the_list_response(tmp_path: Path):
+    """The list request asks DSpace to embed bundles/bitstreams (``embed``), so
+    one request per page carries every result's PDF link; no per-result lookup."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        handles = [f"10665/{800 + i}" for i in range(3)]
+        hrefs = [f"{IRIS_BITSTREAM_CONTENT_URL}/bit-{i}/content" for i in range(3)]
+        plain = [_iris_item(handle=h) for h in handles]
+        embedded = [_iris_item(handle=h, pdf_url=href) for h, href in zip(handles, hrefs, strict=True)]
+        browse = respx.get(IRIS_BROWSE_TITLE_URL).mock(side_effect=_dspace_list(plain, embedded))
+        search = respx.get(IRIS_SEARCH_URL).mock(
+            side_effect=_dspace_list(plain, embedded, search=True)
+        )
+        lookups = respx.get(url__startswith=IRIS_ITEM_BUNDLES_URL).respond(json=_bundles_page([]))
+
+        for mode in ("prefix", "fulltext"):
+            guidelines, meta = await engine.search_guidelines("guideline", limit=3, mode=mode)
+            assert [g.pdf_url for g in guidelines] == hrefs
+            assert meta.error is False
+
+        assert browse.call_count == 1
+        assert search.call_count == 1
+        assert lookups.call_count == 0
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_splits_a_limit_into_small_equal_pages(tmp_path: Path):
+    """An embedded page costs the server time per item, and more than linearly
+    beyond a few dozen items: a limit is split into equal pages no larger than
+    MAX_EMBED_PAGE_SIZE, none of them padded out to a full page."""
+    from scholar_mcp.medical.who_iris import MAX_EMBED_PAGE_SIZE
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        limit = MAX_EMBED_PAGE_SIZE + 1
+        handles = [f"10665/{900 + i}" for i in range(2 * MAX_EMBED_PAGE_SIZE)]
+        hrefs = [f"{IRIS_BITSTREAM_CONTENT_URL}/bit-{i}/content" for i in range(len(handles))]
+        plain = [_iris_item(handle=h) for h in handles]
+        embedded = [_iris_item(handle=h, pdf_url=href) for h, href in zip(handles, hrefs, strict=True)]
+        route = respx.get(IRIS_BROWSE_TITLE_URL).mock(side_effect=_dspace_list(plain, embedded))
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=limit, mode="prefix")
+
+        sizes = [int(call.request.url.params["size"]) for call in route.calls]
+        assert [g.handle for g in guidelines] == handles[:limit]
+        assert max(sizes) <= MAX_EMBED_PAGE_SIZE
+        assert sum(sizes) < limit + len(sizes)  # the last page is not padded to a full one
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_resolves_in_full_when_embedded_bitstreams_are_partial(tmp_path: Path):
+    """DSpace embeds only the first page of a sub-resource. A PDF found in a
+    partial list need not be the largest, so the item is resolved in full."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item(pdf_url=f"{IRIS_BITSTREAM_CONTENT_URL}/bit-small/content")
+        original = item["_embedded"]["bundles"]["_embedded"]["bundles"][0]
+        original["_embedded"]["bitstreams"]["page"]["totalElements"] = 30  # 1 of 30 listed
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+            json=_bitstreams_page(
+                [
+                    _bitstream(uuid="bit-small", name="summary.pdf", size=100),
+                    _bitstream(uuid="bit-full", name="guideline.pdf", size=9000),
+                ]
+            )
+        )
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+
+        assert guidelines[0].pdf_url == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-full/content"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+@respx.mock
+async def test_search_guidelines_resolves_in_full_when_embedded_bundles_are_partial(tmp_path: Path):
+    """A bundles page that lists fewer bundles than totalElements cannot prove
+    ORIGINAL is absent: like a partial bitstreams page, the item is resolved in
+    full instead of being settled with no PDF."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        item = _iris_item()
+        item["_embedded"] = {"bundles": _hal_page("bundles", [{"name": "THUMBNAIL"}])}
+        item["_embedded"]["bundles"]["page"]["totalElements"] = 2  # 1 of 2 listed
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([item]))
+        respx.get(f"{IRIS_ITEM_BUNDLES_URL}/{item['uuid']}/bundles").respond(
+            json=_bundles_page([_bundle(uuid="bundle-1", name="ORIGINAL")])
+        )
+        respx.get(f"{IRIS_BUNDLE_BITSTREAMS_URL}/bundle-1/bitstreams").respond(
+            json=_bitstreams_page([_bitstream(uuid="bit-full", name="guideline.pdf", size=9000)])
+        )
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=1, mode="prefix")
+
+        assert guidelines[0].pdf_url == f"{IRIS_BITSTREAM_CONTENT_URL}/bit-full/content"
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_guidelines_skips_lookups_the_embed_already_settled(tmp_path: Path):
+    """A complete embed that shows no ORIGINAL PDF is the answer: asking the
+    server again would only repeat it, once per such result."""
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+        no_original = _iris_item(handle="10665/1001")
+        no_original["_embedded"] = {"bundles": _hal_page("bundles", [{"name": "THUMBNAIL"}])}
+        docx_only = _iris_item(handle="10665/1002")
+        docx_only["_embedded"] = {
+            "bundles": _hal_page(
+                "bundles",
+                [
+                    {
+                        "name": "ORIGINAL",
+                        "_embedded": {
+                            "bitstreams": _hal_page("bitstreams", [{"uuid": "bit-doc", "name": "annex.docx"}])
+                        },
+                    }
+                ],
+            )
+        }
+        respx.get(IRIS_BROWSE_TITLE_URL).respond(json=_browse_page([no_original, docx_only]))
+        lookups = respx.get(url__startswith=IRIS_ITEM_BUNDLES_URL).respond(json=_bundles_page([]))
+
+        guidelines, meta = await engine.search_guidelines("guideline", limit=2, mode="prefix")
+
+        assert [g.pdf_url for g in guidelines] == ["", ""]
+        assert lookups.call_count == 0
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
