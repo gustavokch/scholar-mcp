@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle, PediatricGuideline
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
+from scholar_mcp.utils.browser import goto_tolerant
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
 from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 
@@ -308,26 +309,6 @@ class PediatricsEngine:
                 exc_info=True,
             )
 
-    @staticmethod
-    async def _goto(page, target: str) -> None:
-        """Navigate, tolerating a challenge redirect racing the goto.
-
-        The Cloudflare interstitial navigates the page itself (__cf_chl_tk
-        reloads, then ?autologincheck=redirected); when one of those aborts
-        the in-flight goto, Playwright raises NS_BINDING_ABORTED. The abort
-        means the challenge is in progress, not that the navigation failed:
-        the settle/re-navigate recovery handles it from there. Message
-        matching instead of playwright's Error type keeps this importable
-        without playwright at module scope."""
-        try:
-            await page.goto(
-                target, wait_until="domcontentloaded", timeout=_NAV_TIMEOUT_MS
-            )
-        except Exception as exc:
-            if "NS_BINDING_ABORTED" not in str(exc):
-                raise
-            logger.debug("goto aborted by a challenge redirect; continuing")
-
     async def _await_challenge_clear(self, page, timeout_ms: int) -> str:
         """Poll until the Cloudflare interstitial hands back a real page.
 
@@ -371,7 +352,7 @@ class PediatricsEngine:
         async def _run() -> list[PediatricGuideline]:
             async with AsyncCamoufox(headless=True) as browser:
                 page = await browser.new_page()
-                await self._goto(page, target)
+                await goto_tolerant(page, target, _NAV_TIMEOUT_MS)
                 # The Cloudflare interstitial auto-redirects to a mangled URL
                 # ("?autologincheck=redirected" appended to the query) that
                 # 404s. Once the challenge clears, its cookie is set and a
@@ -384,7 +365,7 @@ class PediatricsEngine:
                 )
                 if page.url == target and not _looks_like_challenge(content):
                     return first
-                await self._goto(page, target)
+                await goto_tolerant(page, target, _NAV_TIMEOUT_MS)
                 await self._settle(page, item_selectors, _POST_RENAV_SETTLE_MS)
                 try:
                     content = await page.content()
