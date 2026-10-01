@@ -87,12 +87,6 @@ def test_brazil_timeout_env_overrides(monkeypatch):
     assert settings.brazil_browser_timeout_s == 60.0
 
 
-def test_camoufox_nav_timeout_covers_slow_challenge():
-    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_NAV_TIMEOUT_MS
-
-    assert _CAMOUFOX_NAV_TIMEOUT_MS == 30000
-
-
 def test_brazil_moh_cache_source_uses_its_own_ttl(tmp_path):
     from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 

@@ -242,12 +242,9 @@ async def test_timeout_state_maps_to_timeout_kind(tmp_path: Path):
         await http_client.aclose()
 
 
-async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypatch):
-    """The nav timeout is clamped to the ceiling minus whatever the launch
-    itself already spent, so it lands at or just under the ceiling -- never
-    over it."""
-    engine, cache, http_client = await _engine(tmp_path)
-    captured = {}
+def _install_fake_camoufox(monkeypatch) -> dict:
+    """Stand in for camoufox; the returned dict records the timeout handed to page.goto."""
+    captured: dict = {}
 
     class _FakePage:
         async def goto(self, url, *a, **k):
@@ -274,9 +271,34 @@ async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypat
     camoufox_mod.async_api = api_mod
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    return captured
+
+
+async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypatch):
+    """The nav timeout is clamped to the ceiling minus whatever the launch
+    itself already spent, so it lands at or just under the ceiling -- never
+    over it."""
+    engine, cache, http_client = await _engine(tmp_path)
+    captured = _install_fake_camoufox(monkeypatch)
     try:
         await engine._camoufox_search("dengue", 10, ceiling=25.0)
         assert 24000 <= captured["timeout"] <= 25000
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_nav_cap_leaves_the_browser_budget_in_charge(tmp_path, monkeypatch):
+    """With no chain ceiling, ``brazil_browser_timeout_s`` alone bounds the
+    navigation: the per-navigation cap must sit above it. A lower cap ends a
+    slow Solr response or CDN challenge while budget remains, and the request
+    fails."""
+    engine, cache, http_client = await _engine(tmp_path)
+    captured = _install_fake_camoufox(monkeypatch)
+    try:
+        budget_ms = engine.settings.brazil_browser_timeout_s * 1000
+        await engine._camoufox_search("dengue", 10, ceiling=None)
+        assert budget_ms - 1000 <= captured["timeout"] <= budget_ms
     finally:
         await cache.close()
         await http_client.aclose()
@@ -332,8 +354,8 @@ async def test_overfetch_shrinks_when_chain_half_burned(tmp_path: Path):
 def test_build_record_caps_long_abstract():
     from scholar_mcp.medical.brazil_moh import _build_record
 
-    record = _build_record(_bvs_doc(ab=["x" * 5000]))
-    assert len(record.abstract) == ABSTRACT_MAX_CHARS == 2000
+    record = _build_record(_bvs_doc(ab=["x" * (ABSTRACT_MAX_CHARS + 1000)]))
+    assert len(record.abstract) == ABSTRACT_MAX_CHARS
 
 
 def test_build_record_mesh_fallback_when_ab_missing():
