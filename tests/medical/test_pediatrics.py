@@ -31,17 +31,21 @@ def _install_fake_camoufox(
     challenge_html=None,
     hang_s=0.0,
     abort_first_goto=False,
+    page_factory=None,
 ):
     """Fake camoufox.async_api; returns (attempts, captured_urls, exits, sleeps).
 
     ``first_landing_url`` simulates the Cloudflare interstitial: the first
     goto lands on a mangled redirect URL, later gotos land clean.
     ``challenge_html`` is served for the first navigation only, so a scrape
+    that reads content before re-navigating sees the challenge page, not the
     results.
     ``hang_s`` makes every goto sleep, to exercise the total-timeout guard.
     ``abort_first_goto`` makes the first goto raise NS_BINDING_ABORTED, the
     race the Cloudflare interstitial causes when its own redirect aborts the
     in-flight navigation.
+    ``page_factory`` replaces the default page with one the test scripts read
+    by read (see ``_ScriptedPage``); the other knobs then do not apply.
     ``sleeps`` records every wait_for_timeout(ms) call, so tests can assert
     the scrape keys off rendered content instead of fixed sleeps.
     """
@@ -98,7 +102,7 @@ def _install_fake_camoufox(
 
     class _FakeBrowser:
         async def new_page(self, *a, **k):
-            return _FakePage()
+            return page_factory() if page_factory else _FakePage()
 
     class _FakeCamoufoxContext:
         async def __aenter__(self):
@@ -733,7 +737,7 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
         "<html><head><title>Just a moment...</title></head>"
         "<body><div id='challenge-platform'></div></body></html>"
     )
-    _attempts, captured, _exits, _sleeps = _install_fake_camoufox(
+    _attempts, captured, _exits, sleeps = _install_fake_camoufox(
         monkeypatch,
         rendered_html,
         first_landing_url=mangled,
@@ -750,6 +754,9 @@ async def test_camoufox_scrape_renavigates_when_challenge_redirects(
         assert guidelines, "content was read before re-navigation: got the challenge page"
         assert "Ibuprofen Safety in Infants" in guidelines[0].title
         assert meta.error is False
+        # The mangled URL means the challenge already cleared: the poll ends at
+        # once even though this landing still serves challenge markers.
+        assert sleeps == []
     finally:
         await cache.close()
         await http_client.aclose()
@@ -922,8 +929,7 @@ def test_title_selection_prefers_article_heading_over_section_heading():
 @respx.mock
 async def test_camoufox_waits_on_results_not_the_clock(tmp_path: Path, monkeypatch):
     """When result items are already rendered on the first navigation, the
-    scrape must key off the selector instead of burning the fixed
-    challenge-settle sleep."""
+    scrape returns them without spending any wait budget."""
     from unittest.mock import AsyncMock
 
     from scholar_mcp.utils.sqlite_cache import CacheMetadata
@@ -1142,6 +1148,146 @@ async def test_cache_if_any_parity(tmp_path: Path):
         cached, meta = await cache.get("k:empty")
         assert not meta.cached
         assert cached is None
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+_RESULTS_HTML = """
+<html><body><div class="item-container"><div class="sri-title">
+  <h4><a href="/pediatrics/article/9">Ibuprofen Safety in Infants 2024</a></h4>
+</div></div></body></html>
+"""
+_CHALLENGE_HTML = (
+    "<html><head><title>Just a moment...</title></head>"
+    "<body><div id='challenge-platform'></div></body></html>"
+)
+_MID_REDIRECT = (
+    "Page.content: Unable to retrieve content because the page is navigating "
+    "and changing the content."
+)
+
+
+class _ScriptedPage:
+    """AAP results page whose content() the test scripts read by read.
+
+    ``reads`` replays one entry per content() call: an Exception is raised, a
+    string returned, and the last entry repeats. ``after_selector`` swaps in a
+    new script once wait_for_selector has run, like a list that renders after
+    DOMContentLoaded. ``landings`` gives the URL each goto lands on (None: the
+    requested URL).
+    """
+
+    def __init__(self, reads, after_selector=None, landings=()):
+        self._reads = list(reads)
+        self._after_selector = after_selector
+        self._landings = list(landings)
+        self.url = ""
+        self.gotos: list[str] = []
+        self.sleeps: list[int] = []
+
+    async def goto(self, url, *a, **k):
+        index = len(self.gotos)
+        landed = self._landings[index] if index < len(self._landings) else None
+        self.gotos.append(url)
+        self.url = landed or url
+
+    async def content(self):
+        entry = self._reads.pop(0) if len(self._reads) > 1 else self._reads[0]
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+    async def wait_for_selector(self, selector, timeout=None):
+        if self._after_selector is None:
+            raise TimeoutError(f"no element matching {selector}")
+        self._reads = list(self._after_selector)
+
+    async def wait_for_timeout(self, ms):
+        self.sleeps.append(ms)
+
+
+async def _aap_engine(tmp_path: Path):
+    """Engine whose plain-HTTP AAP scrape is refused (403) and whose PubMed
+    fallback is empty, so the camoufox scrape is the only source of results."""
+    engine, cache, http_client = await _engine(tmp_path)
+    respx.get(AAP_URL).respond(status_code=403)
+    engine.pubmed = AsyncMock()
+    engine.pubmed.search_articles.return_value = (
+        [],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    return engine, cache, http_client
+
+
+@respx.mock
+async def test_camoufox_waits_for_items_that_render_after_domcontentloaded(
+    tmp_path: Path, monkeypatch
+):
+    """A challenge-free page can hand back its shell at DOMContentLoaded and
+    render the list afterwards: the first pass must wait for the items instead
+    of returning the empty shell."""
+    engine, cache, http_client = await _aap_engine(tmp_path)
+    page = _ScriptedPage(
+        ["<html><body><div id='app'></div></body></html>"],
+        after_selector=[_RESULTS_HTML],
+    )
+    _install_fake_camoufox(monkeypatch, page_factory=lambda: page)
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert guidelines, "the empty shell was returned before the list rendered"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+        assert page.gotos == [f"{AAP_URL}?q=ibuprofen"], "no re-navigation expected"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_polls_until_the_challenge_clears(tmp_path: Path, monkeypatch):
+    """Reads that raise mid-redirect or still show the interstitial are polled
+    through; a page that is real and still on the target URL needs no
+    re-navigation."""
+    engine, cache, http_client = await _aap_engine(tmp_path)
+    page = _ScriptedPage([RuntimeError(_MID_REDIRECT), _CHALLENGE_HTML, _RESULTS_HTML])
+    _install_fake_camoufox(monkeypatch, page_factory=lambda: page)
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert guidelines, "gave up before the challenge cleared"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
+        assert page.gotos == [f"{AAP_URL}?q=ibuprofen"], "no re-navigation expected"
+        assert page.sleeps == [500, 500]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_camoufox_keeps_first_pass_when_the_page_dies_after_renavigation(
+    tmp_path: Path, monkeypatch
+):
+    """The first pass already parsed results; a content() fault after the
+    re-navigation must not discard them."""
+    engine, cache, http_client = await _aap_engine(tmp_path)
+    mangled = f"{AAP_URL}?q=ibuprofen?autologincheck=redirected"
+    page = _ScriptedPage(
+        [_RESULTS_HTML, RuntimeError("Target page, context or browser has been closed")],
+        landings=[mangled],
+    )
+    _install_fake_camoufox(monkeypatch, page_factory=lambda: page)
+    _install_fake_playwright(monkeypatch)
+
+    try:
+        guidelines, meta = await engine.search_aap_guidelines("ibuprofen")
+        assert len(page.gotos) == 2, "expected a re-navigation attempt"
+        assert guidelines, "first-pass results were discarded by the failed re-read"
+        assert "Ibuprofen Safety in Infants" in guidelines[0].title
+        assert meta.error is False
     finally:
         await cache.close()
         await http_client.aclose()
