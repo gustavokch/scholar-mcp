@@ -1,5 +1,7 @@
 # Camoufox Interstitial-Abort Tolerance Implementation Plan
 
+> **Superseded in part by `2026-10-01-pr54-review-remediation.md`.** The PR #54 review changed `goto_tolerant` (it now returns whether the goto aborted), `read_content_settled` (narrowed exception, `ready` predicate, last readable content on exhaustion) and how the BVS, Sci-Hub and AAP tiers adopt them. The snippets below are the first-pass design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every Camoufox browser fallback in scholar-mcp survive the `NS_BINDING_ABORTED` goto race and mid-redirect `content()` reads that bot-shield interstitials (Cloudflare, Bunny CDN) cause.
