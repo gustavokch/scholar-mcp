@@ -404,6 +404,7 @@ class _FakeCamoufox(NamedTuple):
     attempts: list[bool]
     urls: list[str]
     headers: list[dict]
+    sleeps: list[int]
 
 
 def _install_fake_camoufox(
@@ -413,13 +414,18 @@ def _install_fake_camoufox(
     final_url=None,
     browser_status=200,
     abort_goto=False,
+    content_script=None,
 ):
+    """Fake camoufox.async_api. ``content_script`` replays one entry per
+    page.content() call instead of ``rendered_html``: an Exception is raised,
+    a string returned, and the last entry repeats."""
     import sys
     import types
 
     attempts: list[bool] = []
     captured_urls: list[str] = []
     captured_headers: list[dict] = []
+    captured_sleeps: list[int] = []
 
     class _FakeResponse:
         status = browser_status
@@ -436,6 +442,7 @@ def _install_fake_camoufox(
         def __init__(self):
             self.request = _FakeRequest()
             self.url = ""
+            self._reads = list(content_script or [])
 
         async def goto(self, url, *a, **k):
             captured_urls.append(url)
@@ -449,8 +456,16 @@ def _install_fake_camoufox(
             self.url = final_url or url
             return None
 
+        async def wait_for_timeout(self, ms):
+            captured_sleeps.append(ms)
+
         async def content(self):
-            return rendered_html
+            if not self._reads:
+                return rendered_html
+            entry = self._reads.pop(0) if len(self._reads) > 1 else self._reads[0]
+            if isinstance(entry, Exception):
+                raise entry
+            return entry
 
     class _FakeBrowser:
         async def new_page(self, *a, **k):
@@ -473,7 +488,7 @@ def _install_fake_camoufox(
     camoufox_mod.async_api = api_mod
     monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
     monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
-    return _FakeCamoufox(attempts, captured_urls, captured_headers)
+    return _FakeCamoufox(attempts, captured_urls, captured_headers, captured_sleeps)
 
 
 def test_landing_url_falls_back_for_non_http_urls():
@@ -1174,3 +1189,62 @@ async def test_pubmed_search_reads_own_pmid_not_comments_corrections(client):
     _mock_efetch(_efetch_set(record))
     results = await PubMedProvider(client, Settings()).search("crispr", num_results=5)
     assert [p.pmid for p in results] == ["32000000"]
+
+
+_MID_REDIRECT = RuntimeError(
+    "Page.content: Unable to retrieve content because the page is navigating "
+    "and changing the content."
+)
+_CLOUDFLARE_INTERSTITIAL = (
+    "<html><head><title>Just a moment...</title></head>"
+    "<body><div id='challenge-platform'></div></body></html>"
+)
+_MIRROR_PAGE = (
+    '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
+)
+
+
+@respx.mock
+async def test_scihub_camoufox_waits_out_the_interstitial_after_an_aborted_goto(
+    client, monkeypatch
+):
+    """The aborted goto leaves the page on the Cloudflare interstitial; the
+    mirror's real page only replaces it once the challenge clears. The mirror
+    must be read after that, not skipped for having no PDF link."""
+    respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
+    fake = _install_fake_camoufox(
+        monkeypatch,
+        abort_goto=True,
+        content_script=[_MID_REDIRECT, _CLOUDFLARE_INTERSTITIAL, _MIRROR_PAGE],
+    )
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+
+    pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
+
+    assert pdf_bytes == b"%PDF-1.5-fake-data"
+    assert pdf_url == "https://sci-pdf.org/paper.pdf"
+    assert fake.sleeps == [500, 500]
+
+
+@respx.mock
+async def test_scihub_camoufox_skips_a_blocked_mirror_without_waiting(
+    client, monkeypatch
+):
+    """Without an abort nothing says the interstitial is mid-challenge: a
+    mirror that serves one is skipped at once, so it cannot spend the tier
+    budget its sibling mirrors share."""
+    fake = _install_fake_camoufox(
+        monkeypatch, content_script=[_CLOUDFLARE_INTERSTITIAL]
+    )
+    settings = Settings(enable_browser_fallback=True)
+    provider = SciHubProvider(
+        client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings
+    )
+
+    assert await provider._fetch_via_camoufox("10.1038/test") == (None, None)
+    assert fake.urls == [
+        "https://mirror1.org/10.1038/test",
+        "https://mirror2.org/10.1038/test",
+    ]
+    assert fake.sleeps == []
