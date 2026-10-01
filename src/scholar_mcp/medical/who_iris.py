@@ -313,7 +313,7 @@ class WHOIRISEngine:
             ):
                 async with sem:
                     pdf_url, _, errored = await self._resolve_pdf_bitstream(
-                        item.get("uuid") or ""
+                        item["uuid"]
                     )
                     rec.pdf_url = pdf_url
                 if errored:
