@@ -404,7 +404,7 @@ async def annotate_oa_status(
 
             if r_doi in doi_map:
                 _apply(doi_map[r_doi], status_str, r.get("pmcid"))
-            elif r_pmid in pmid_map:
+            if r_pmid in pmid_map:
                 _apply(pmid_map[r_pmid], status_str, r.get("pmcid"))
     except Exception as exc:
         remaining = mapped_count - len(annotated)

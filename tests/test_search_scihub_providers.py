@@ -532,6 +532,38 @@ async def test_oa_status_duplicate_response_rows_annotate_once(client):
 
 
 @respx.mock
+async def test_oa_status_single_row_annotates_doi_and_pmid_buckets(client):
+    """One Europe PMC row can answer both a DOI clause and an EXT_ID clause —
+    when the batch holds the same work under two identifier shapes, both copies
+    must be annotated."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {
+                            "doi": "10.1/a",
+                            "pmid": "111",
+                            "isOpenAccess": "Y",
+                            "pmcid": "PMC1",
+                        },
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a", pmid="111"),
+        PaperMetadata(title="B", pmid="111"),
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "oa"
+    assert papers[1].pmcid == "PMC1"
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(
