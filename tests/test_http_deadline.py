@@ -261,6 +261,41 @@ async def test_request_timeout_applies_when_it_is_under_the_remaining_budget():
         AsyncHttpClient.reset_dead_hosts()
 
 
+async def test_request_timeout_override_raises_the_per_attempt_ceiling():
+    """A host whose healthy responses outlast the client-wide ceiling can opt
+    out of it per call, with or without a deadline."""
+    client, calls = _client(_always_503, request_timeout=30, max_retries=1)
+    try:
+        await client.get("https://example.org/slow", request_timeout=45.0)
+        await client.get(
+            "https://example.org/slow",
+            request_timeout=45.0,
+            deadline=time.monotonic() + 100.0,
+        )
+        await client.get("https://example.org/slow")
+        assert calls["timeouts"][0]["read"] == 45.0
+        assert calls["timeouts"][1]["read"] == 45.0
+        # Absent the override the client-wide value still applies.
+        assert calls["timeouts"][2]["read"] == 30.0
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()
+
+
+async def test_request_timeout_override_is_still_clamped_to_the_deadline():
+    client, calls = _client(_always_503, request_timeout=30, max_retries=1)
+    try:
+        await client.get(
+            "https://example.org/slow",
+            request_timeout=45.0,
+            deadline=time.monotonic() + 2.0,
+        )
+        assert 0 < calls["timeouts"][0]["read"] <= 2.0
+    finally:
+        await client.aclose()
+        AsyncHttpClient.reset_dead_hosts()
+
+
 async def test_no_request_is_issued_when_the_limiter_parks_past_the_deadline():
     """A throttled bucket can hold the call past the deadline on its own.
 

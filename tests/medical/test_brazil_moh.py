@@ -1327,13 +1327,11 @@ async def test_search_cache_key_ignores_query_whitespace(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
+async def test_search_chain_is_strict_title_then_title_or_then_all_field_or(tmp_path: Path):
     engine, cache, http_client = await _engine(tmp_path)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
-                httpx.Response(200, json=_bvs_response([])),
-                httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([])),
                 httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue hemorrágica")])),
@@ -1341,17 +1339,11 @@ async def test_search_relaxes_to_or_when_strict_returns_nothing(tmp_path: Path):
         )
         records, meta = await engine.search_guidelines("dengue hemorragica", limit=5)
 
-        assert route.call_count == 5
-        q_first = route.calls[0].request.url.params["q"]
-        q_relaxed_title = route.calls[1].request.url.params["q"]
-        third = str(route.calls[2].request.url)
-        fourth = str(route.calls[3].request.url)
-        fifth = str(route.calls[4].request.url)
-        assert "ti:dengue" in q_first and "ti:hemorragica" in q_first
-        assert "ti:dengue" in q_relaxed_title and "ti:hemorragica" not in q_relaxed_title
-        assert "ti%3Adengue+OR+ti%3Ahemorragica" in third or "ti:dengue OR ti:hemorragica" in third
-        assert "dengue+AND+hemorragica" in fourth or "dengue%20AND%20hemorragica" in fourth
-        assert "dengue+OR+hemorragica" in fifth or "dengue%20OR%20hemorragica" in fifth
+        assert route.call_count == 3
+        strict, title_or, all_field = (c.request.url.params["q"] for c in route.calls)
+        assert "ti:dengue AND ti:hemorragica" in strict
+        assert "ti:dengue OR ti:hemorragica" in title_or
+        assert "(dengue OR hemorragica)" in all_field and "ti:" not in all_field
         assert len(records) == 1
         assert meta.error is False
     finally:
@@ -1880,10 +1872,15 @@ async def test_search_title_stage_timeout_halts_remaining_bvs_stages(tmp_path: P
         await http_client.aclose()
 
 
-async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_browser(
+async def test_bvs_stage_timeout_skips_later_stages_and_does_not_launch_browser(
     tmp_path, monkeypatch
 ):
-    """A title-scoped timeout must skip all-field and relaxed, then use the browser."""
+    """A stalled origin ends the BVS chain and is not retried through a browser.
+
+    The browser tier beats the CDN shield; a timeout comes from the origin
+    itself, which Camoufox would reach just the same -- it would only spend the
+    chain budget a gov.br fallback could be served from.
+    """
     import asyncio as _asyncio
 
     settings = Settings(
@@ -1900,24 +1897,7 @@ async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_
     engine = BrazilMoHEngine(http_client, cache, settings)
     _stub_pcdt_empty(engine)
 
-    payload = {
-        "diaServerResponse": [
-            {
-                "response": {
-                    "docs": [
-                        {
-                            "id": "1",
-                            "ti": "Manejo da dengue",
-                            "pais_publicacao": "^eBrasil",
-                            "da": "202401",
-                            "ur": ["https://bvsms.saude.gov.br/dengue.pdf"],
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch, json.dumps(payload))
+    attempts, _urls, _exits, _sleeps = _install_fake_camoufox(monkeypatch, "{}")
     calls = []
 
     async def _slow_response(request):
@@ -1930,10 +1910,11 @@ async def test_bvs_stage_timeout_skips_subsequent_http_stages_and_falls_back_to_
             respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_response)
             records, meta = await engine.search_guidelines("dengue grave", limit=10)
 
-        assert len(calls) == 1, "all-field and relaxed must not issue requests"
-        assert attempts == [True], "exactly one browser launch"
-        assert [r.title for r in records] == ["Manejo da dengue"]
-        assert meta.error is False
+        assert len(calls) == 1, "title-OR and all-field must not issue requests"
+        assert attempts == [], "a timeout must not launch the browser"
+        assert records == []
+        assert meta.error is True
+        assert meta.error_kind == "timeout"
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2127,92 +2108,46 @@ def test_build_query_accepts_token_override():
     assert "ti:intratavel" not in composed
 
 
-def test_title_token_relaxations_generates_right_to_left_subsets():
-    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
-
-    tokens = ["dengue", "manejo", "clinico", "adulto"]
-    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
-    assert ladder == [
-        ["dengue", "manejo", "clinico"],
-        ["dengue", "manejo"],
-        ["dengue"],
-    ]
-
-
-def test_title_token_relaxations_respects_min_tokens():
-    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
-
-    tokens = ["dengue", "manejo"]
-    ladder = _title_token_relaxations(tokens, max_steps=3, min_tokens=1)
-    assert ladder == [["dengue"]]
-
-    # When min_tokens is 2, length-2 input produces no relaxation
-    assert _title_token_relaxations(tokens, max_steps=3, min_tokens=2) == []
-
-
-def test_title_token_relaxations_empty_or_single_token_returns_empty():
-    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
-
-    assert _title_token_relaxations([]) == []
-    assert _title_token_relaxations(["dengue"]) == []
-
-
-def test_title_token_relaxations_respects_max_steps():
-    from scholar_mcp.medical.brazil_moh import _title_token_relaxations
-
-    tokens = ["a", "b", "c", "d", "e", "f"]
-    ladder = _title_token_relaxations(tokens, max_steps=2, min_tokens=1)
-    assert len(ladder) == 2
-    assert ladder == [
-        ["a", "b", "c", "d", "e"],
-        ["a", "b", "c", "d"],
-    ]
-
-
 @respx.mock
-async def test_search_title_scoped_progressive_relaxation_hits(tmp_path: Path):
-    """When full title-scoped AND misses, progressive relaxation retries with
-    trailing tokens dropped until a title match is found."""
+async def test_search_strict_title_stage_ands_only_the_leading_tokens(tmp_path: Path):
+    """Six tokens must not all be ANDed in one title: that conjunction matches
+    no formal title and is a guaranteed miss. The title-OR stage carries all."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     try:
-        # Query has 3 usable tokens: 'dengue', 'manejo', 'intratavel'
-        # Call 1: ti:dengue AND ti:manejo AND ti:intratavel -> 0 hits
-        # Call 2: ti:dengue AND ti:manejo -> 1 hit
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),
-                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue: manejo clínico")])),
+                httpx.Response(200, json=_bvs_response([_bvs_doc(title="Ondas de calor")])),
             ]
         )
-        records, meta = await engine.search_guidelines("dengue manejo intratavel", limit=5)
+        records, meta = await engine.search_guidelines(
+            "onda calor hidratacao alerta monitoramento suscetiveis", limit=5
+        )
 
         assert len(records) == 1
-        assert records[0].title == "Dengue: manejo clínico"
         assert meta.error is False
         assert route.call_count == 2
-        q1 = route.calls[0].request.url.params["q"]
-        q2 = route.calls[1].request.url.params["q"]
-        assert "ti:dengue AND ti:manejo AND ti:intratavel" in q1
-        assert "ti:dengue AND ti:manejo" in q2
-        assert "ti:intratavel" not in q2
+        strict = route.calls[0].request.url.params["q"]
+        title_or = route.calls[1].request.url.params["q"]
+        assert "ti:onda AND ti:calor AND ti:hidratacao AND ti:alerta" in strict
+        assert "ti:monitoramento" not in strict and "ti:suscetiveis" not in strict
+        assert "ti:monitoramento" in title_or and "ti:suscetiveis" in title_or
+        assert " AND ti:" not in title_or.split("AND (", 1)[1]
     finally:
         await cache.close()
         await http_client.aclose()
 
 
 @respx.mock
-async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_to_all_field(tmp_path: Path):
-    """When all progressive title relaxations return empty, fall back to all-field query."""
+async def test_search_title_stages_missing_fall_back_to_all_field_or(tmp_path: Path):
+    """When both title stages return empty, fall back to the all-field OR query."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     try:
-        # 3 tokens: full title (miss) -> relax 2-tokens (miss) -> relax 1-token (miss) -> or-title (miss) -> all-field (hit)
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
-                httpx.Response(200, json=_bvs_response([])),  # full title
-                httpx.Response(200, json=_bvs_response([])),  # title relaxed 1
-                httpx.Response(200, json=_bvs_response([])),  # title relaxed 2
+                httpx.Response(200, json=_bvs_response([])),  # strict title
                 httpx.Response(200, json=_bvs_response([])),  # title-scoped-or
                 httpx.Response(200, json=_bvs_response([_bvs_doc(record_id="fallback-1")])),  # all-field
             ]
@@ -2222,18 +2157,17 @@ async def test_search_title_scoped_progressive_relaxation_exhausted_falls_back_t
         assert len(records) == 1
         assert records[0].record_id == "fallback-1"
         assert meta.error is False
-        assert route.call_count == 5
-        # Verify call 5 is all-field
-        assert "(dengue AND zika AND chikungunya)" in route.calls[4].request.url.params["q"]
+        assert route.call_count == 3
+        assert "(dengue OR zika OR chikungunya)" in route.calls[2].request.url.params["q"]
     finally:
         await cache.close()
         await http_client.aclose()
 
 
 @respx.mock
-async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
-    """If a progressive title relaxation step errors (HTTP error or timeout),
-    do not keep looping through relaxations; degrade gracefully."""
+async def test_search_title_or_stage_error_halts_remaining_stages(tmp_path: Path):
+    """If the title-OR stage errors (HTTP error or timeout), the all-field
+    stage does not run; the chain degrades gracefully."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     # Browser tier off: the respx mock cannot intercept camoufox, and this
@@ -2243,7 +2177,7 @@ async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
                 httpx.Response(200, json=_bvs_response([])),  # full title miss
-                httpx.Response(500, text="Server Error"),     # relaxed step errors
+                httpx.Response(500, text="Server Error"),     # title-OR step errors
             ]
         )
         records, meta = await engine.search_guidelines("dengue manejo intratavel", limit=5)
@@ -2257,16 +2191,16 @@ async def test_search_title_relaxation_stops_on_stage_error(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
-    """The relaxed title stage composes through _build_query, so the BRISA
-    collection filter must survive into the relaxed call."""
+async def test_search_title_or_stage_preserves_brisa_filter(tmp_path: Path):
+    """The title-OR stage composes through _build_query, so the BRISA
+    collection filter must survive into it."""
     engine, cache, http_client = await _engine(tmp_path)
     _stub_pcdt_empty(engine)
     try:
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             side_effect=[
-                httpx.Response(200, json=_bvs_response([])),  # full title miss
-                httpx.Response(200, json=_bvs_response([_bvs_doc()])),  # relaxed hit
+                httpx.Response(200, json=_bvs_response([])),  # strict title miss
+                httpx.Response(200, json=_bvs_response([_bvs_doc()])),  # title-OR hit
             ]
         )
         records, meta = await engine.search_guidelines(
@@ -2278,8 +2212,7 @@ async def test_search_title_relaxation_preserves_brisa_filter(tmp_path: Path):
         assert route.call_count == 2
         q2 = route.calls[1].request.url.params["q"]
         assert 'db:"BRISA"' in q2
-        assert "ti:dengue AND ti:manejo" in q2
-        assert "ti:intratavel" not in q2
+        assert "ti:dengue OR ti:manejo OR ti:intratavel" in q2
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2892,7 +2825,8 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
 
 @respx.mock
 async def test_fetch_records_non_json_block_html_marks_shielded(tmp_path):
-    """A 200 carrying block-HTML instead of JSON must trip the BVS breaker."""
+    """A 200 carrying block-HTML instead of JSON marks the shield; it must
+    neither trip nor reset the BVS breaker."""
     engine, cache, http_client = await _engine(tmp_path)
     try:
         challenge_html = (
@@ -3245,9 +3179,9 @@ async def test_bvs_origin_502_skips_further_bvs_stages(tmp_path: Path):
 
 
 @respx.mock
-async def test_bvs_empty_200_runs_progressive_relaxation_chain(tmp_path: Path):
-    """Empty-result 200s are query-shape misses, not origin outages.
-    Progressive relaxation must run fully across the chain."""
+async def test_bvs_empty_200_runs_the_full_chain(tmp_path: Path):
+    """Empty-result 200s are query-shape misses, not origin outages: every
+    stage runs, and the chain is bounded at three requests."""
     engine, cache, http_client = await _engine(tmp_path)
     engine.settings.enable_browser_fallback = False
     _stub_pcdt_empty(engine)
@@ -3258,8 +3192,8 @@ async def test_bvs_empty_200_runs_progressive_relaxation_chain(tmp_path: Path):
         records, meta = await engine.search_guidelines(
             "dengue classificacao risco manejo", limit=5
         )
-        # title-scoped + 3 relaxations + or-title + all-field + relaxed = 7 calls
-        assert route.call_count == 7
+        # strict title + title-OR + all-field OR = 3 calls
+        assert route.call_count == 3
         assert records == []
         assert meta.error is False
     finally:
@@ -3879,6 +3813,134 @@ async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield
         docs = await engine._camoufox_search("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_breaker_opens_after_consecutive_outages_and_later_searches_skip_bvs(
+    tmp_path: Path,
+):
+    """Two searches that end in an origin 5xx open the breaker; the third pays
+    no BVS request and is served from the gov.br rows instead."""
+    engine, cache, http_client = await _engine(tmp_path, backoff_base=0.01)
+    _pin_fast_limiter(http_client)
+
+    async def _pcdt(query, limit=10):
+        return (
+            [BrazilGuideline(record_id="pcdt-1", title="Dengue manejo clinico", year="2024")],
+            CacheMetadata(cached=False, cache_age=0, error=False),
+        )
+
+    engine.pcdt_engine.search = _pcdt
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(502, text="502 Bad Gateway")
+        )
+        for _ in range(2):
+            await engine.search_guidelines("dengue manejo", limit=5)
+        assert engine.bvs_guard.tripped() == "origin_outage"
+        calls_before = route.call_count
+
+        records, _meta = await engine.search_guidelines("dengue manejo", limit=5)
+
+        assert route.call_count == calls_before, "an open breaker must not issue requests"
+        assert [r.record_id for r in records] == ["pcdt-1"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_concurrent_identical_searches_share_one_bvs_request(tmp_path: Path):
+    engine, cache, http_client = await _engine(tmp_path)
+    _pin_fast_limiter(http_client)
+
+    async def _slow_hit(request):
+        await asyncio.sleep(0.2)
+        return httpx.Response(200, json=_bvs_response([_bvs_doc(title="Dengue manejo")]))
+
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(side_effect=_slow_hit)
+        results = await asyncio.gather(
+            *(engine.search_guidelines("dengue manejo", limit=5) for _ in range(3))
+        )
+        assert route.call_count == 1
+        assert all(len(records) == 1 for records, _ in results)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("failure", "trips"),
+    [
+        (("transport", None, "ReadTimeout"), True),
+        (("http", 502, "Bad Gateway"), True),
+        (("http", 403, "Forbidden"), False),
+        (("transport", None, "DeadlineExceeded"), False),
+    ],
+)
+async def test_only_origin_failures_count_against_the_breaker(tmp_path: Path, failure, trips):
+    """A shield 403 and a budget spent before any socket opened say nothing
+    about the origin's health."""
+    from scholar_mcp.utils.http import FetchFailure
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+
+        async def _failing(*args, **kwargs):
+            http_client.last_failure = FetchFailure(*failure)
+            return None
+
+        http_client.get = _failing  # type: ignore[method-assign]
+        for _ in range(engine.settings.brazil_breaker_threshold + 1):
+            resp, seen = await engine._bvs_request("q", 10, None)
+            assert resp is None and seen.detail == failure[2]
+        assert bool(engine.bvs_guard.tripped()) is trips
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_shield_block_html_200_does_not_reset_the_breaker(tmp_path: Path):
+    """A 200 carrying the CDN shield page is a shield outcome, not a healthy
+    origin: it must neither trip nor reset the breaker. With threshold 2, a
+    502, then a shield-200, then a 502 must still open the breaker."""
+    from scholar_mcp.utils.http import FetchFailure
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+
+        async def _fail(*args, **kwargs):
+            http_client.last_failure = FetchFailure("http", 502, "Bad Gateway")
+            return None
+
+        challenge_html = (
+            '<html><body><iframe '
+            'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+            "</iframe></body></html>"
+        )
+
+        async def _shield(*args, **kwargs):
+            return httpx.Response(
+                200, text=challenge_html, headers={"content-type": "text/html"}
+            )
+
+        http_client.get = _fail  # type: ignore[method-assign]
+        records, errored = await engine._fetch_records("q1", 10, _SearchState())
+        assert errored is True
+
+        http_client.get = _shield  # type: ignore[method-assign]
+        state = _SearchState()
+        records, errored = await engine._fetch_records("q2", 10, state)
+        assert errored is True
+        assert state.bvs_shielded is True
+
+        http_client.get = _fail  # type: ignore[method-assign]
+        await engine._fetch_records("q3", 10, _SearchState())
+        assert engine.bvs_guard.tripped() == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()

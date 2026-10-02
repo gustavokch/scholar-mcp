@@ -830,8 +830,9 @@ async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch)
         tmp_path, brazil_browser_fallback=True, enable_browser_fallback=True
     )
     try:
+        # A shield 403 is what qualifies for the browser tier; a 5xx does not.
         respx.get(url__startswith=BVS_SEARCH_URL).mock(
-            return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
+            return_value=httpx.Response(403, text="shield")
         )
         calls: list[int] = []
 

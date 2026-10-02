@@ -57,25 +57,26 @@ def test_brazil_moh_ttl_env_override(monkeypatch):
 
 
 def test_brazil_timeout_defaults_leave_room_for_browser_tier():
-    """Chain budget must cover PCDT + BVS stages AND leave time for the
-    camoufox fallback, which needs ~25 s for startup plus Bunny CDN challenge.
+    """Chain budget must cover PCDT + two BVS stages AND leave time for the
+    camoufox fallback, which needs ~20 s for startup plus Bunny CDN challenge.
 
-    The stage ceiling must also clear one real BVS response: the host's TTFB
-    runs to ~25 s even when Solr answers in under half a second, so a ceiling
-    below that floor cancels every success the stage would have produced.
+    The stage ceiling must also clear one real BVS response. Measured
+    2026-10-01 on a degraded host, the successes took 37-43 s, so a ceiling
+    below that cancels every success the stage would have produced -- and the
+    per-attempt read ceiling must clear it too, or the stage ceiling changes
+    nothing (each attempt is clamped to the smaller of the two).
     """
     settings = Settings.load()
-    assert settings.brazil_stage_timeout_s == 30.0
+    assert settings.brazil_stage_timeout_s == 45.0
+    assert settings.brazil_request_timeout_s == 45.0
     assert settings.brazil_chain_timeout_s == 120.0
     assert settings.brazil_browser_timeout_s == 45.0
-    # One BVS stage must outlast the host's slowest measured TTFB (27.9 s).
-    # It is not sized to also cover the 5xx retry ladder underneath it --
-    # that ladder is bounded in attempt count, not in time.
-    assert settings.brazil_stage_timeout_s > 25.0
-    # Worst case: 3 stages at full ceiling still leaves browser time.
+    assert settings.brazil_stage_timeout_s > 43.0
+    assert settings.brazil_request_timeout_s >= settings.brazil_stage_timeout_s
+    # Two stages at full ceiling still leave the browser tier its useful floor.
     assert (
-        settings.brazil_chain_timeout_s - 3 * settings.brazil_stage_timeout_s
-        > 0
+        settings.brazil_chain_timeout_s - 2 * settings.brazil_stage_timeout_s
+        >= 20.0
     )
 
 
