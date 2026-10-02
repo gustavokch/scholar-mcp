@@ -19,6 +19,10 @@ EPMC_XML_QUIET = frozenset({404, 500})
 EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
 
 
+def _papers(n: int) -> str:
+    return f"{n} paper" if n == 1 else f"{n} papers"
+
+
 class EuropePMCProvider(BaseProvider):
     """Europe PMC open-access provider with JATS XML support."""
 
@@ -372,8 +376,8 @@ async def annotate_oa_status(
             # The http layer already logged the cause at WARNING; this INFO
             # attributes the consequence: these papers keep oa_status="unknown".
             logger.info(
-                "OA status annotation skipped for %d papers: Europe PMC search unavailable%s",
-                mapped_count,
+                "OA status annotation skipped for %s: Europe PMC search unavailable%s",
+                _papers(mapped_count),
                 f" (status {resp.status_code})" if resp is not None else "",
             )
             return
@@ -400,7 +404,7 @@ async def annotate_oa_status(
                         paper.pmcid = r.get("pmcid")
     except Exception as exc:
         logger.info(
-            "OA status annotation skipped for %d papers: %s",
-            mapped_count - annotated,
+            "OA status annotation skipped for %s: %s",
+            _papers(mapped_count - annotated),
             exc,
         )

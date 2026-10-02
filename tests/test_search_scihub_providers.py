@@ -299,7 +299,8 @@ async def test_oa_status_skip_logs_info_on_malformed_json(client, caplog):
         if r.name == EPMC_LOGGER and r.levelname == "INFO"
     ]
     assert len(records) == 1
-    assert "1 papers" in records[0].getMessage()
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
 
 
 @respx.mock
@@ -344,7 +345,8 @@ async def test_oa_status_skip_count_excludes_already_annotated(client, caplog):
         if r.name == EPMC_LOGGER and r.levelname == "INFO"
     ]
     assert len(records) == 1
-    assert "1 papers" in records[0].getMessage()
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
 
 
 @respx.mock
