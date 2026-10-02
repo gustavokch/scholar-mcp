@@ -801,8 +801,14 @@ class BrazilMoHEngine:
         and callers sharing the request all need the same verdict.
 
         Outcomes feed the breaker only when they speak for the origin: a
-        response resets it, a timeout or 5xx counts against it, and a shield
-        403 or a budget spent before any socket opened does neither.
+        validated JSON answer resets it (recorded by ``_fetch_records`` after
+        ``resp.json()`` succeeds, so a shield block-HTML 200 or a garbage 200
+        neither trips nor resets it), a timeout or 5xx counts against it, and
+        a shield 403 or a budget spent before any socket opened does neither.
+        The single-flight key omits ``deadline`` on purpose: a caller whose
+        stage budget is nearly spent shares the in-flight request bound to
+        another caller's deadline, and its own ``_stage`` wait bounds the wait
+        (the shield detaches it without cancelling the shared request).
         """
 
         async def _work() -> tuple[httpx.Response | None, Any]:
@@ -820,7 +826,6 @@ class BrazilMoHEngine:
                     request_timeout=float(self.settings.brazil_request_timeout_s),
                 )
                 if resp is not None:
-                    self.bvs_guard.record_success()
                     return resp, None
                 failure = getattr(self.http_client, "last_failure", None)
                 kind = _classify_failure(failure)
@@ -891,6 +896,11 @@ class BrazilMoHEngine:
                 logger.warning("brazil_moh search returned non-JSON payload")
                 state.error_kind = "backend_error"
             return [], True
+
+        # A payload that parses as JSON is a genuine origin answer -- even an
+        # empty doc list -- and is what closes the breaker. Shield block-HTML
+        # and garbage 200s returned above without touching it.
+        self.bvs_guard.record_success()
 
         records = [_build_record(doc) for doc in _dedupe_by_id(_extract_docs(data))]
         return [record for record in records if _is_brazilian(record)], False

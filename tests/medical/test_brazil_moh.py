@@ -2825,7 +2825,8 @@ async def test_is_bvs_shielded_falls_back_to_the_host_throttle(tmp_path):
 
 @respx.mock
 async def test_fetch_records_non_json_block_html_marks_shielded(tmp_path):
-    """A 200 carrying block-HTML instead of JSON must trip the BVS breaker."""
+    """A 200 carrying block-HTML instead of JSON marks the shield; it must
+    neither trip nor reset the BVS breaker."""
     engine, cache, http_client = await _engine(tmp_path)
     try:
         challenge_html = (
@@ -3898,6 +3899,48 @@ async def test_only_origin_failures_count_against_the_breaker(tmp_path: Path, fa
             resp, seen = await engine._bvs_request("q", 10, None)
             assert resp is None and seen.detail == failure[2]
         assert bool(engine.bvs_guard.tripped()) is trips
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_shield_block_html_200_does_not_reset_the_breaker(tmp_path: Path):
+    """A 200 carrying the CDN shield page is a shield outcome, not a healthy
+    origin: it must neither trip nor reset the breaker. With threshold 2, a
+    502, then a shield-200, then a 502 must still open the breaker."""
+    from scholar_mcp.utils.http import FetchFailure
+
+    engine, cache, http_client = await _engine(tmp_path)
+    try:
+
+        async def _fail(*args, **kwargs):
+            http_client.last_failure = FetchFailure("http", 502, "Bad Gateway")
+            return None
+
+        challenge_html = (
+            '<html><body><iframe '
+            'src="https://shield-templates-prod.b-cdn.net/42085/block.html">'
+            "</iframe></body></html>"
+        )
+
+        async def _shield(*args, **kwargs):
+            return httpx.Response(
+                200, text=challenge_html, headers={"content-type": "text/html"}
+            )
+
+        http_client.get = _fail  # type: ignore[method-assign]
+        records, errored = await engine._fetch_records("q1", 10, _SearchState())
+        assert errored is True
+
+        http_client.get = _shield  # type: ignore[method-assign]
+        state = _SearchState()
+        records, errored = await engine._fetch_records("q2", 10, state)
+        assert errored is True
+        assert state.bvs_shielded is True
+
+        http_client.get = _fail  # type: ignore[method-assign]
+        await engine._fetch_records("q3", 10, _SearchState())
+        assert engine.bvs_guard.tripped() == "origin_outage"
     finally:
         await cache.close()
         await http_client.aclose()

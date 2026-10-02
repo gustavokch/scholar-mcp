@@ -296,7 +296,6 @@ async def test_request_timeout_override_is_still_clamped_to_the_deadline():
         AsyncHttpClient.reset_dead_hosts()
 
 
-
 async def test_no_request_is_issued_when_the_limiter_parks_past_the_deadline():
     """A throttled bucket can hold the call past the deadline on its own.
 
