@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import re
 from typing import Any
 
@@ -7,6 +9,8 @@ from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
 
+logger = logging.getLogger(__name__)
+
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 OAI_PMH_URL = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
 OAI_QUIET = frozenset({400, 404})
@@ -14,6 +18,15 @@ OAI_QUIET = frozenset({400, 404})
 # EPMC_XML_QUIET and EPMC_XML_RETRYABLE travel together as one policy for fullTextXML.
 EPMC_XML_QUIET = frozenset({404, 500})
 EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
+
+# Papers per batched OA query. 50 is the `num_results` ceiling (server.py, resolver.py),
+# so a search page is one request. Europe PMC rejects request URLs past ~7.7 KB (HTTP
+# 400/414); a 50-paper chunk carrying DOI + PMID is ~3.6 KB on real records.
+_OA_CHUNK_PAPERS = 50
+
+
+def _papers(n: int) -> str:
+    return f"{n} paper" if n == 1 else f"{n} papers"
 
 
 class EuropePMCProvider(BaseProvider):
@@ -323,22 +336,46 @@ async def annotate_oa_status(
     papers: list[PaperMetadata],
     http_client: AsyncHttpClient,
 ) -> None:
-    """Annotate a batch of papers with Europe PMC isOpenAccess status in a single query."""
+    """Annotate papers with Europe PMC isOpenAccess status.
+
+    Papers go out in chunks of ``_OA_CHUNK_PAPERS``, one query per chunk, issued
+    concurrently. A chunk that fails leaves only its own papers at ``unknown``.
+    """
     if not papers:
         return
+    chunks = [
+        papers[i : i + _OA_CHUNK_PAPERS]
+        for i in range(0, len(papers), _OA_CHUNK_PAPERS)
+    ]
+    await asyncio.gather(*(_annotate_chunk(chunk, http_client) for chunk in chunks))
 
-    doi_map: dict[str, PaperMetadata] = {}
-    pmid_map: dict[str, PaperMetadata] = {}
+
+async def _annotate_chunk(
+    papers: list[PaperMetadata],
+    http_client: AsyncHttpClient,
+) -> None:
+    """Annotate one chunk of papers with a single batched Europe PMC query."""
+
+    doi_map: dict[str, list[PaperMetadata]] = {}
+    pmid_map: dict[str, list[PaperMetadata]] = {}
 
     query_parts: list[str] = []
+    mapped_count = 0
     for p in papers:
+        if not p.doi and not p.pmid:
+            continue
+        mapped_count += 1
         if p.doi:
-            clean_d = p.doi.lower()
-            doi_map[clean_d] = p
-            query_parts.append(f'DOI:"{p.doi}"')
-        elif p.pmid:
-            pmid_map[p.pmid] = p
-            query_parts.append(f'EXT_ID:"{p.pmid}"')
+            key = p.doi.lower()
+            bucket = doi_map.setdefault(key, [])
+            if not bucket:
+                query_parts.append(f'DOI:"{p.doi}"')
+            bucket.append(p)
+        if p.pmid:
+            bucket = pmid_map.setdefault(p.pmid, [])
+            if not bucket:
+                query_parts.append(f'EXT_ID:"{p.pmid}"')
+            bucket.append(p)
 
     if not query_parts:
         return
@@ -347,33 +384,58 @@ async def annotate_oa_status(
     query_str = " OR ".join(query_parts)
     search_url = f"{EPMC_REST_BASE}/search"
 
+    annotated: set[int] = set()
+
+    def _apply(bucket: list[PaperMetadata], status_str: str, pmcid: str | None) -> None:
+        # First row wins: a paper already annotated by an earlier row (or bucket)
+        # is skipped, so each paper is written once and counted once.
+        for paper in bucket:
+            if id(paper) in annotated:
+                continue
+            annotated.add(id(paper))
+            paper.oa_status = status_str
+            if pmcid and not paper.pmcid:
+                paper.pmcid = pmcid
+
     try:
         resp = await http_client.get(
             search_url,
             params={
                 "query": query_str,
                 "format": "json",
-                "pageSize": min(len(query_parts), 100),
+                # At most 2 * _OA_CHUNK_PAPERS clauses (a DOI and an EXT_ID per paper),
+                # far below Europe PMC's pageSize maximum of 1000.
+                "pageSize": len(query_parts),
                 "resultType": "lite",
             },
         )
-        if resp is not None and resp.status_code == 200:
-            data = resp.json()
-            results = data.get("resultList", {}).get("result", [])
-            for r in results:
-                is_oa = r.get("isOpenAccess") == "Y"
-                status_str = "oa" if is_oa else "closed"
+        if resp is None or resp.status_code != 200:
+            # The http layer already logged the cause at WARNING; this INFO
+            # attributes the consequence: these papers keep oa_status="unknown".
+            logger.info(
+                "OA status annotation skipped for %s: Europe PMC search unavailable%s",
+                _papers(mapped_count),
+                f" (status {resp.status_code})" if resp is not None else "",
+            )
+            return
+        data = resp.json()
+        results = data.get("resultList", {}).get("result", [])
+        for r in results:
+            is_oa = r.get("isOpenAccess") == "Y"
+            status_str = "oa" if is_oa else "closed"
 
-                r_doi = (r.get("doi") or "").lower()
-                r_pmid = r.get("pmid")
+            r_doi = (r.get("doi") or "").lower()
+            r_pmid = r.get("pmid")
 
-                if r_doi in doi_map:
-                    doi_map[r_doi].oa_status = status_str
-                    if r.get("pmcid") and not doi_map[r_doi].pmcid:
-                        doi_map[r_doi].pmcid = r.get("pmcid")
-                elif r_pmid in pmid_map:
-                    pmid_map[r_pmid].oa_status = status_str
-                    if r.get("pmcid") and not pmid_map[r_pmid].pmcid:
-                        pmid_map[r_pmid].pmcid = r.get("pmcid")
-    except Exception:
-        pass
+            if r_doi in doi_map:
+                _apply(doi_map[r_doi], status_str, r.get("pmcid"))
+            if r_pmid in pmid_map:
+                _apply(pmid_map[r_pmid], status_str, r.get("pmcid"))
+    except Exception as exc:
+        remaining = mapped_count - len(annotated)
+        if remaining:
+            logger.info(
+                "OA status annotation skipped for %s: %s",
+                _papers(remaining),
+                exc,
+            )

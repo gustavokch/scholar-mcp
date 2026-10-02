@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from typing import NamedTuple
 
@@ -18,6 +19,7 @@ ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 CROSSREF = "https://api.crossref.org/works"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+EPMC_LOGGER = "scholar_mcp.providers.europe_pmc"
 
 
 @pytest.fixture
@@ -258,6 +260,457 @@ async def test_oa_status_annotated_in_one_batched_call(client):
     assert papers[0].oa_status == "oa"
     assert papers[1].oa_status == "closed"
     assert papers[2].oa_status == "unknown"
+
+
+@respx.mock
+async def test_oa_status_skip_logs_info_on_server_error(client, caplog):
+    """A failed batch must leave an attributable trail for oa_status='unknown'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "2 papers" in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_skip_logs_info_on_malformed_json(client, caplog):
+    """A 200 whose body is not JSON is still a skipped annotation, and must say so."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(200, text="not json at all")
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_success_logs_nothing(client, caplog):
+    """A successful batch (even with zero matching results) is not a skip."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(200, json={"resultList": {"result": []}})
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_skip_count_excludes_already_annotated(client, caplog):
+    """If the payload breaks mid-loop, the skip count must not re-count annotated papers."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        "garbage-row",  # .get() raises AttributeError mid-loop
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"  # annotated before the exception
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_empty_papers_logs_nothing(client, caplog):
+    """An empty paper list returns before any request and must stay silent."""
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status([], client)
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_no_identifiers_logs_nothing(client, caplog):
+    """Papers with no DOI/PMID never reach Europe PMC and must stay silent."""
+    papers = [PaperMetadata(title="A"), PaperMetadata(title="B")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    assert papers[1].oa_status == "unknown"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_duplicate_doi_annotates_both_papers(client):
+    """Two papers sharing a DOI must both be annotated; the first must not be
+    silently dropped by the identifier map."""
+    route = respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A1", doi="10.1/a"),
+        PaperMetadata(title="A2", doi="10.1/A"),  # case-variant of the same DOI
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+    assert papers[1].pmcid == "PMC1"
+    # A duplicated identifier must not bloat the query with a second clause.
+    assert route.calls.last.request.url.params["query"].count("DOI:") == 1
+
+
+@respx.mock
+async def test_oa_status_duplicate_pmid_annotates_both_papers(client):
+    """The pmid_map has the same overwrite flaw as doi_map; both papers must
+    be annotated."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"pmid": "123", "isOpenAccess": "N"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="P1", pmid="123"),
+        PaperMetadata(title="P2", pmid="123"),
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "closed"
+    assert papers[1].oa_status == "closed"
+
+
+@respx.mock
+async def test_oa_status_duplicate_doi_skip_log_counts_papers(client, caplog):
+    """On server error the skip log must count papers, not unique identifiers:
+    two papers sharing one DOI are 2 skipped papers."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [
+        PaperMetadata(title="A1", doi="10.1/a"),
+        PaperMetadata(title="A2", doi="10.1/a"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "2 papers" in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_skip_count_ignores_duplicate_result_rows(client, caplog):
+    """The exception-path count must count papers once each, even when Europe
+    PMC returns the same identifier in two rows. Two rows for 10.1/a would
+    inflate `annotated` to 2 while only paper A was hit, so paper B — which was
+    never annotated — reported as '0 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},  # duplicate row
+                        "garbage-row",  # .get() raises AttributeError mid-loop
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    assert "1 paper" in msg
+    assert "1 papers" not in msg
+
+
+@respx.mock
+async def test_oa_status_no_skip_log_when_everything_annotated(client, caplog):
+    """A batch whose papers were all annotated before the payload broke has
+    nothing skipped, so it must stay silent instead of logging '0 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        "garbage-row",
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_duplicate_response_rows_annotate_once(client):
+    """Duplicate rows for one DOI must not double-annotate: first row wins."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                        {"doi": "10.1/a", "isOpenAccess": "N", "pmcid": "PMC2"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A1", doi="10.1/a")]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+
+
+@respx.mock
+async def test_oa_status_single_row_annotates_doi_and_pmid_buckets(client):
+    """One Europe PMC row can answer both a DOI clause and an EXT_ID clause —
+    when the batch holds the same work under two identifier shapes, both copies
+    must be annotated."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {
+                            "doi": "10.1/a",
+                            "pmid": "111",
+                            "isOpenAccess": "Y",
+                            "pmcid": "PMC1",
+                        },
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a", pmid="111"),
+        PaperMetadata(title="B", pmid="111"),
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "oa"
+    assert papers[1].pmcid == "PMC1"
+
+
+@respx.mock
+async def test_oa_status_doi_paper_matched_on_pmid_only_row(client):
+    """A paper that has both a DOI and a PMID must survive a Europe PMC row
+    that carries only the PMID — the DOI may not be indexed upstream yet."""
+    route = respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"pmid": "111", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+    query = route.calls.last.request.url.params["query"]
+    assert 'DOI:"10.1/a"' in query
+    assert 'EXT_ID:"111"' in query
+
+
+@respx.mock
+async def test_oa_status_skip_log_counts_dual_identifier_paper_once(client, caplog):
+    """A paper contributes two query clauses but is one paper: on a failed
+    batch the skip log must say '1 paper', never '2 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_dual_identifier_paper_annotated_then_bad_row_logs_nothing(
+    client, caplog
+):
+    """One paper reached through both its DOI and its PMID bucket is annotated
+    once; a malformed row after it leaves nothing skipped, so nothing is logged."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "pmid": "111", "isOpenAccess": "Y"},
+                        "garbage-row",
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+# Europe PMC answers HTTP 400/414 once a request URL passes ~7.7 KB (measured against
+# the live service on 2026-10-02: 7,608 B accepted, 7,839 B rejected).
+EPMC_MAX_URL = 7_700
+
+
+def _dual_id_papers(n):
+    return [
+        PaperMetadata(
+            title=f"P{i}", doi=f"10.1016/j.jtest.2023.{i:05d}", pmid=str(100000 + i)
+        )
+        for i in range(n)
+    ]
+
+
+def _fake_europe_pmc(papers, fail_doi=None):
+    """Fake Europe PMC search: one row per requested DOI, cut to pageSize; HTTP 414
+    past the URL limit; HTTP 500 for any request that asks for `fail_doi`."""
+    by_doi = {p.doi: p for p in papers}
+
+    def handler(request):
+        if len(str(request.url)) > EPMC_MAX_URL:
+            return httpx.Response(414, text="Request-URI Too Large")
+        query = request.url.params["query"]
+        if fail_doi is not None and f'DOI:"{fail_doi}"' in query:
+            return httpx.Response(500, text="Server Error")
+        rows = [
+            {"doi": clause[5:-1], "pmid": by_doi[clause[5:-1]].pmid, "isOpenAccess": "Y"}
+            for clause in query.split(" OR ")
+            if clause.startswith('DOI:"')
+        ]
+        page_size = int(request.url.params["pageSize"])
+        return httpx.Response(200, json={"resultList": {"result": rows[:page_size]}})
+
+    return handler
+
+
+@respx.mock
+async def test_oa_status_fifty_papers_cost_one_request(client):
+    """`search_papers` never passes more than 50 papers (server.py clamps
+    num_results); that page must stay a single Europe PMC request."""
+    papers = _dual_id_papers(50)
+    route = respx.get(url__startswith=EPMC).mock(side_effect=_fake_europe_pmc(papers))
+    await annotate_oa_status(papers, client)
+    assert route.call_count == 1
+    assert sum(p.oa_status == "oa" for p in papers) == 50
+
+
+@respx.mock
+async def test_oa_status_large_batch_is_split_below_the_url_limit(client):
+    """Past ~110 papers carrying both identifiers, one query outgrows Europe
+    PMC's URL limit and the whole batch fails. Every request must stay under
+    it, and every paper must still be annotated."""
+    papers = _dual_id_papers(120)
+    respx.get(url__startswith=EPMC).mock(side_effect=_fake_europe_pmc(papers))
+    await annotate_oa_status(papers, client)
+    assert sum(p.oa_status == "oa" for p in papers) == 120
+
+
+@respx.mock
+async def test_oa_status_failed_chunk_leaves_only_its_own_papers_unknown(client, caplog):
+    """One failed request must cost only the papers it carried, and say so once."""
+    papers = _dual_id_papers(120)  # chunks of 50 / 50 / 20
+    respx.get(url__startswith=EPMC).mock(
+        side_effect=_fake_europe_pmc(papers, fail_doi=papers[50].doi)
+    )
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    statuses = [p.oa_status for p in papers]
+    assert statuses[:50] == ["oa"] * 50
+    assert statuses[50:100] == ["unknown"] * 50
+    assert statuses[100:] == ["oa"] * 20
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "50 papers" in records[0].getMessage()
 
 
 @respx.mock
