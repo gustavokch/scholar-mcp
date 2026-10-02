@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import Any
@@ -17,6 +18,11 @@ OAI_QUIET = frozenset({400, 404})
 # EPMC_XML_QUIET and EPMC_XML_RETRYABLE travel together as one policy for fullTextXML.
 EPMC_XML_QUIET = frozenset({404, 500})
 EPMC_XML_RETRYABLE = RETRYABLE_STATUS_CODES - {500}
+
+# Papers per batched OA query. 50 is the `num_results` ceiling (server.py, resolver.py),
+# so a search page is one request. Europe PMC rejects request URLs past ~7.7 KB (HTTP
+# 400/414); a 50-paper chunk carrying DOI + PMID is ~3.6 KB on real records.
+_OA_CHUNK_PAPERS = 50
 
 
 def _papers(n: int) -> str:
@@ -330,9 +336,25 @@ async def annotate_oa_status(
     papers: list[PaperMetadata],
     http_client: AsyncHttpClient,
 ) -> None:
-    """Annotate a batch of papers with Europe PMC isOpenAccess status in a single query."""
+    """Annotate papers with Europe PMC isOpenAccess status.
+
+    Papers go out in chunks of ``_OA_CHUNK_PAPERS``, one query per chunk, issued
+    concurrently. A chunk that fails leaves only its own papers at ``unknown``.
+    """
     if not papers:
         return
+    chunks = [
+        papers[i : i + _OA_CHUNK_PAPERS]
+        for i in range(0, len(papers), _OA_CHUNK_PAPERS)
+    ]
+    await asyncio.gather(*(_annotate_chunk(chunk, http_client) for chunk in chunks))
+
+
+async def _annotate_chunk(
+    papers: list[PaperMetadata],
+    http_client: AsyncHttpClient,
+) -> None:
+    """Annotate one chunk of papers with a single batched Europe PMC query."""
 
     doi_map: dict[str, list[PaperMetadata]] = {}
     pmid_map: dict[str, list[PaperMetadata]] = {}
@@ -381,7 +403,9 @@ async def annotate_oa_status(
             params={
                 "query": query_str,
                 "format": "json",
-                "pageSize": min(len(query_parts), 100),
+                # At most 2 * _OA_CHUNK_PAPERS clauses (a DOI and an EXT_ID per paper),
+                # far below Europe PMC's pageSize maximum of 1000.
+                "pageSize": len(query_parts),
                 "resultType": "lite",
             },
         )

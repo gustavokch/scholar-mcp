@@ -634,6 +634,85 @@ async def test_oa_status_dual_identifier_paper_annotated_then_bad_row_logs_nothi
     assert records == []
 
 
+# Europe PMC answers HTTP 400/414 once a request URL passes ~7.7 KB (measured against
+# the live service on 2026-10-02: 7,608 B accepted, 7,839 B rejected).
+EPMC_MAX_URL = 7_700
+
+
+def _dual_id_papers(n):
+    return [
+        PaperMetadata(
+            title=f"P{i}", doi=f"10.1016/j.jtest.2023.{i:05d}", pmid=str(100000 + i)
+        )
+        for i in range(n)
+    ]
+
+
+def _fake_europe_pmc(papers, fail_doi=None):
+    """Fake Europe PMC search: one row per requested DOI, cut to pageSize; HTTP 414
+    past the URL limit; HTTP 500 for any request that asks for `fail_doi`."""
+    by_doi = {p.doi: p for p in papers}
+
+    def handler(request):
+        if len(str(request.url)) > EPMC_MAX_URL:
+            return httpx.Response(414, text="Request-URI Too Large")
+        query = request.url.params["query"]
+        if fail_doi is not None and f'DOI:"{fail_doi}"' in query:
+            return httpx.Response(500, text="Server Error")
+        rows = [
+            {"doi": clause[5:-1], "pmid": by_doi[clause[5:-1]].pmid, "isOpenAccess": "Y"}
+            for clause in query.split(" OR ")
+            if clause.startswith('DOI:"')
+        ]
+        page_size = int(request.url.params["pageSize"])
+        return httpx.Response(200, json={"resultList": {"result": rows[:page_size]}})
+
+    return handler
+
+
+@respx.mock
+async def test_oa_status_fifty_papers_cost_one_request(client):
+    """`search_papers` never passes more than 50 papers (server.py clamps
+    num_results); that page must stay a single Europe PMC request."""
+    papers = _dual_id_papers(50)
+    route = respx.get(url__startswith=EPMC).mock(side_effect=_fake_europe_pmc(papers))
+    await annotate_oa_status(papers, client)
+    assert route.call_count == 1
+    assert sum(p.oa_status == "oa" for p in papers) == 50
+
+
+@respx.mock
+async def test_oa_status_large_batch_is_split_below_the_url_limit(client):
+    """Past ~110 papers carrying both identifiers, one query outgrows Europe
+    PMC's URL limit and the whole batch fails. Every request must stay under
+    it, and every paper must still be annotated."""
+    papers = _dual_id_papers(120)
+    respx.get(url__startswith=EPMC).mock(side_effect=_fake_europe_pmc(papers))
+    await annotate_oa_status(papers, client)
+    assert sum(p.oa_status == "oa" for p in papers) == 120
+
+
+@respx.mock
+async def test_oa_status_failed_chunk_leaves_only_its_own_papers_unknown(client, caplog):
+    """One failed request must cost only the papers it carried, and say so once."""
+    papers = _dual_id_papers(120)  # chunks of 50 / 50 / 20
+    respx.get(url__startswith=EPMC).mock(
+        side_effect=_fake_europe_pmc(papers, fail_doi=papers[50].doi)
+    )
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    statuses = [p.oa_status for p in papers]
+    assert statuses[:50] == ["oa"] * 50
+    assert statuses[50:100] == ["unknown"] * 50
+    assert statuses[100:] == ["oa"] * 20
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "50 papers" in records[0].getMessage()
+
+
 @respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
