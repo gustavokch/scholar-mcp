@@ -340,19 +340,20 @@ async def annotate_oa_status(
     query_parts: list[str] = []
     mapped_count = 0
     for p in papers:
+        if not p.doi and not p.pmid:
+            continue
+        mapped_count += 1
         if p.doi:
-            clean_d = p.doi.lower()
-            bucket = doi_map.setdefault(clean_d, [])
+            key = p.doi.lower()
+            bucket = doi_map.setdefault(key, [])
             if not bucket:
                 query_parts.append(f'DOI:"{p.doi}"')
             bucket.append(p)
-            mapped_count += 1
-        elif p.pmid:
+        if p.pmid:
             bucket = pmid_map.setdefault(p.pmid, [])
             if not bucket:
                 query_parts.append(f'EXT_ID:"{p.pmid}"')
             bucket.append(p)
-            mapped_count += 1
 
     if not query_parts:
         return

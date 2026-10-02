@@ -564,6 +564,77 @@ async def test_oa_status_single_row_annotates_doi_and_pmid_buckets(client):
 
 
 @respx.mock
+async def test_oa_status_doi_paper_matched_on_pmid_only_row(client):
+    """A paper that has both a DOI and a PMID must survive a Europe PMC row
+    that carries only the PMID — the DOI may not be indexed upstream yet."""
+    route = respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"pmid": "111", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+    query = route.calls.last.request.url.params["query"]
+    assert 'DOI:"10.1/a"' in query
+    assert 'EXT_ID:"111"' in query
+
+
+@respx.mock
+async def test_oa_status_skip_log_counts_dual_identifier_paper_once(client, caplog):
+    """A paper contributes two query clauses but is one paper: on a failed
+    batch the skip log must say '1 paper', never '2 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 paper" in records[0].getMessage()
+    assert "1 papers" not in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_dual_identifier_paper_annotated_then_bad_row_logs_nothing(
+    client, caplog
+):
+    """One paper reached through both its DOI and its PMID bucket is annotated
+    once; a malformed row after it leaves nothing skipped, so nothing is logged."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "pmid": "111", "isOpenAccess": "Y"},
+                        "garbage-row",
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a", pmid="111")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(
