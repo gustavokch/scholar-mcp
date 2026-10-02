@@ -16,18 +16,26 @@ counter-intuitive and are load-bearing for this module:
 * ``count=0`` returns HTTP 500 rather than a count-only response, and the
   host is unreliable enough that the error paths here are live.
 
-Search runs as a stage chain. A title-scoped stage ANDs the user tokens in
-the ``ti:`` field; when it returns no Brazilian records, progressive
-title-token relaxation drops trailing tokens right-to-left and retries,
-because scenario queries carry clinical descriptors that formal document
-titles rarely contain. A relaxed step that errors halts the chain: the
+Search runs as a stage chain of at most three BVS requests. The strict stage
+ANDs the first ``MAX_STRICT_TITLE_TOKENS`` user tokens in the ``ti:`` field;
+when it returns no Brazilian records, a title-OR stage ORs every token in
+``ti:``, because scenario queries carry clinical descriptors that formal
+document titles rarely contain and a conjunction of them matches nothing.
+When that also yields nothing, an all-field stage ORs every token across the
+whole record. A title stage that errors halts the remaining BVS stages: the
 endpoint is already misbehaving, so further variants likely fail the same
-way. When the ladder is exhausted without a hit, an all-field stage ANDs
-the same tokens; if it also yields nothing and two or more substantive
-tokens remain, the same tokens are retried ORed. Relaxation loosens the
-field scope or the operator and nothing else -- every stage composes from
-one stopword-stripped token list, so a relaxed hit is never one the strict
-stage structurally could not have matched.
+way. The chain is short on purpose -- a degraded host spends tens of seconds
+per request, so every extra stage is paid in full. Every stage composes from
+one stopword-stripped token list and loosens only the field scope or the
+operator, so a relaxed hit is never one the strict stage structurally could
+not have matched.
+
+Requests go through a process-wide ``BvsGuard`` (``bvs_guard.py``): identical
+in-flight requests are shared, requests in flight are capped, and a breaker
+opened by consecutive timeouts or 5xx makes searches skip BVS and answer from
+the gov.br catalogs. The browser tier runs only for a CDN shield (it carries
+the fingerprint the shield accepts); against a slow or 5xx origin it would hit
+the same backend and only spend chain budget.
 
 Results are then re-ranked by ``rank_brazil_guidelines``. Accent folding
 and Portuguese stopword stripping are what made that viable: without
@@ -68,9 +76,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.bvs_guard import BvsGuard
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
 from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
@@ -403,7 +413,11 @@ def _usable_tokens(query: str) -> list[str]:
     return tokens
 
 
-MAX_TITLE_RELAXATION_STEPS = 3
+# The strict title stage ANDs at most this many leading tokens. A conjunction
+# of six or nine title terms matches no formal document title, so the extra
+# tokens only made the strict stage a guaranteed miss that still cost a full
+# request; the title-OR stage covers the remaining tokens.
+MAX_STRICT_TITLE_TOKENS = 4
 
 
 def _candidate_terms(record: BrazilGuideline) -> set[str]:
@@ -488,31 +502,6 @@ def _topic_filtered(
         for record, carried in zip(records, per_record, strict=True)
         if carried & discriminating
     ]
-
-
-def _title_token_relaxations(
-    tokens: list[str],
-    max_steps: int = MAX_TITLE_RELAXATION_STEPS,
-    min_tokens: int = 1,
-) -> list[list[str]]:
-    """Ladder of progressively relaxed token subsets for title-scoped search.
-
-    When a full conjunction of title tokens returns no documents, trailing
-    tokens are dropped right-to-left. Trailing tokens in scenario queries
-    represent specific clinical criteria or modalities (e.g. 'parenteral',
-    'observacao') that rarely appear in formal document titles.
-
-    Relaxation stops when ``max_steps`` is reached or the token list length
-    would drop below ``min_tokens``.
-    """
-    ladder: list[list[str]] = []
-    current = list(tokens)
-    for _ in range(max_steps):
-        if len(current) <= min_tokens:
-            break
-        current = current[:-1]
-        ladder.append(current)
-    return ladder
 
 
 def _build_query(
@@ -794,6 +783,54 @@ class BrazilMoHEngine:
         self.settings = settings
         self.pcdt_engine = GovBrPCDTEngine(http_client, cache, settings)
         self.az_engine = GovBrAZEngine(http_client, cache, settings)
+        self.bvs_guard = BvsGuard(
+            settings.brazil_max_concurrent,
+            settings.brazil_breaker_threshold,
+            settings.brazil_breaker_cooldown_s,
+        )
+
+    async def _bvs_request(
+        self, composed: str, count: int, deadline: float | None
+    ) -> tuple[httpx.Response | None, Any]:
+        """One BVS search GET through the process-wide guard.
+
+        Returns ``(response, failure)``; ``failure`` is the client's typed
+        ``FetchFailure`` when ``response`` is ``None``. The failure is read
+        inside the shared request, not by the caller: ``last_failure`` is a
+        per-task context var, so only the task that issued the GET can read it,
+        and callers sharing the request all need the same verdict.
+
+        Outcomes feed the breaker only when they speak for the origin: a
+        response resets it, a timeout or 5xx counts against it, and a shield
+        403 or a budget spent before any socket opened does neither.
+        """
+
+        async def _work() -> tuple[httpx.Response | None, Any]:
+            async with self.bvs_guard.slot():
+                resp = await self.http_client.get(
+                    BVS_SEARCH_URL,
+                    headers=BVS_HEADERS,
+                    params={
+                        "q": composed,
+                        "output": "json",
+                        "count": count,
+                    },
+                    retryable_statuses=_BVS_RETRYABLE_STATUSES,
+                    deadline=deadline,
+                    request_timeout=float(self.settings.brazil_request_timeout_s),
+                )
+                if resp is not None:
+                    self.bvs_guard.record_success()
+                    return resp, None
+                failure = getattr(self.http_client, "last_failure", None)
+                kind = _classify_failure(failure)
+                if kind in ("timeout", "origin_outage") and (
+                    getattr(failure, "detail", "") != "DeadlineExceeded"
+                ):
+                    self.bvs_guard.record_failure(kind)
+                return None, failure
+
+        return await self.bvs_guard.single_flight((composed, count), _work)
 
     async def _fetch_records(
         self,
@@ -825,19 +862,8 @@ class BrazilMoHEngine:
         """
         state.stages_attempted += 1
         state.overfetch_window = max(state.overfetch_window, count)
-        resp = await self.http_client.get(
-            BVS_SEARCH_URL,
-            headers=BVS_HEADERS,
-            params={
-                "q": composed,
-                "output": "json",
-                "count": count,
-            },
-            retryable_statuses=_BVS_RETRYABLE_STATUSES,
-            deadline=deadline,
-        )
+        resp, failure = await self._bvs_request(composed, count, deadline)
         if resp is None:
-            failure = getattr(self.http_client, "last_failure", None)
             state.http_status = getattr(failure, "status", None)
             kind = _classify_failure(failure)
             state.error_kind = kind
@@ -875,8 +901,13 @@ class BrazilMoHEngine:
         return self.http_client.is_throttled(_BVS_HOST)
 
     def _bvs_unavailable(self, state: _SearchState) -> bool:
-        """True when BVS is shielded by CDN 403, throttled, origin 5xx, or timed out."""
-        return self._is_bvs_shielded(state) or state.bvs_origin_down or state.bvs_timed_out
+        """True when BVS is shielded, throttled, 5xx, timed out, or the breaker is open."""
+        return (
+            self._is_bvs_shielded(state)
+            or state.bvs_origin_down
+            or state.bvs_timed_out
+            or bool(self.bvs_guard.tripped())
+        )
 
     def _stage_budget(self, chain_start: float | None = None) -> float:
         """Effective time budget for one retrieval stage.
@@ -975,6 +1006,20 @@ class BrazilMoHEngine:
         state: _SearchState,
         chain_start: float | None = None,
     ) -> tuple[list[BrazilGuideline], bool]:
+        tripped = self.bvs_guard.tripped()
+        if tripped:
+            # Open breaker: BVS has just failed repeatedly, so this stage would
+            # only spend its budget on the same answer. Report the outage kind
+            # that opened it and let the chain fall through to the gov.br rows.
+            logger.info("brazil_moh %s stage skipped: BVS breaker open (%s)", stage, tripped)
+            if tripped == "timeout":
+                self._mark_bvs_timed_out(state)
+            else:
+                state.bvs_origin_down = True
+                if not state.error_kind:
+                    state.error_kind = "origin_outage"
+            return [], True
+
         def _on_timeout() -> None:
             self._mark_bvs_timed_out(state)
 
@@ -1242,7 +1287,13 @@ class BrazilMoHEngine:
         # year filter uniformly on every read (hit or miss), so one row
         # serves every ``since_year`` instead of fragmenting the 30-day
         # cache per distinct year requested.
-        title_composed = _build_query(query, norm_collection, operator="AND", title_scoped=True)
+        title_composed = _build_query(
+            query,
+            norm_collection,
+            operator="AND",
+            title_scoped=True,
+            tokens=tokens[:MAX_STRICT_TITLE_TOKENS],
+        )
         cache_key = (
             f"brazil_moh_search:{CACHE_SCHEMA}:{norm_collection}:{clamped}:{title_composed}"
         )
@@ -1301,17 +1352,14 @@ class BrazilMoHEngine:
                     stage_meta.error_kind or "backend_error"
                 )
                 state.local_timed_out = state.local_timed_out or stage_meta.timeout
-        # The browser tier answers BVS failures (the CDN shield 403s plain
-        # HTTP clients); a PCDT outage with a healthy BVS must not launch a
-        # real browser. Track BVS errors on their own flag.
-        bvs_errored = False
 
         count = self._overfetch_count(clamped, chain_start)
-        # The all-field query is built once and shared by the all-field
-        # fallback stage and the browser tier, which need the identical
-        # composition. Both consumers only run when `tokens` is non-empty.
+        # The all-field query is built once and shared by the all-field stage
+        # and the browser tier, which need the identical composition. It ORs
+        # the tokens; for a single token that is the strict composition. Both
+        # consumers only run when `tokens` is non-empty.
         all_composed: str | None = (
-            _build_query(query, norm_collection, operator="AND", title_scoped=False)
+            _build_query(query, norm_collection, operator="OR", title_scoped=False)
             if tokens
             else None
         )
@@ -1323,43 +1371,17 @@ class BrazilMoHEngine:
             chain_start=chain_start,
         )
         errored_any = errored_any or errored
-        bvs_errored = bvs_errored or errored
 
-        # Progressive title-token relaxation: when the full-token title AND
-        # returns zero records without error, drop trailing tokens and retry.
-        # Scenario queries frequently contain clinical descriptors ('grupo',
-        # 'criterios', 'hidratacao') that do not appear in formal manual titles.
-        # An errored title stage halts the remaining BVS stages regardless of
-        # which title stage failed: the endpoint is already misbehaving, so
-        # further variants likely fail the same way. When BVS is unavailable
-        # (shielded by CDN 403 or origin 5xx down), skip further stages.
+        # An errored title stage halts the remaining BVS stages: the endpoint
+        # is already misbehaving, so further variants likely fail the same way.
+        # When BVS is unavailable (shielded by CDN 403, origin 5xx down, timed
+        # out, or the breaker open), skip further stages.
         title_chain_errored = False
-        if not records and not errored and tokens and not self._bvs_unavailable(state):
-            for relaxed_tokens in _title_token_relaxations(tokens):
-                relaxed_title_composed = _build_query(
-                    query, norm_collection, title_scoped=True, tokens=relaxed_tokens
-                )
 
-                relaxed_title_records, relaxed_title_errored = await self._bvs_stage(
-                    "title-scoped-relaxed",
-                    relaxed_title_composed,
-                    count,
-                    state,
-                    chain_start=chain_start,
-                )
-                errored_any = errored_any or relaxed_title_errored
-                bvs_errored = bvs_errored or relaxed_title_errored
-                if relaxed_title_errored:
-                    title_chain_errored = True
-                    break
-                if relaxed_title_records:
-                    records = relaxed_title_records
-                    break
-
-        # OR-title stage. Every AND conjunction above requires all tokens to
+        # OR-title stage. The strict conjunction requires every capped token to
         # share one title, which a clinical-scenario query rarely satisfies:
-        # measured on the dengue item, the strict stage and all three
-        # relaxation steps return zero while ORing the same tokens in ti:
+        # measured on the dengue item, the strict conjunction and every
+        # relaxation of it return zero while ORing the same tokens in ti:
         # surfaces the manual inside the over-fetch window for the client
         # ranker to lift. It runs before the all-field fallback because a
         # title match is a stronger signal than an abstract match, and it is
@@ -1371,7 +1393,6 @@ class BrazilMoHEngine:
             not records
             and not errored
             and len(tokens) >= 2
-            and not title_chain_errored
             and not self._bvs_unavailable(state)
         ):
             or_title_composed = _build_query(
@@ -1385,18 +1406,16 @@ class BrazilMoHEngine:
                 chain_start=chain_start,
             )
             errored_any = errored_any or or_title_errored
-            bvs_errored = bvs_errored or or_title_errored
             if or_title_errored:
                 title_chain_errored = True
             else:
                 records = or_title_records
 
-        # Fall back to an all-field query when the title-scoped stage yields no
-        # Brazilian records. A stalled, shielded (CDN anti-bot 403) or 5xx BVS
-        # is treated as unhealthy for the rest of the call: further HTTP stages
-        # would each burn a full stage budget against the same bad host, and the
-        # browser tier -- which is what actually beats a shield -- needs what is
-        # left of the chain budget more than they do.
+        # Fall back to an all-field query when the title stages yield no
+        # Brazilian records. A stalled, shielded (CDN anti-bot 403), 5xx or
+        # breaker-open BVS is treated as unhealthy for the rest of the call:
+        # further HTTP stages would each burn a full stage budget against the
+        # same bad host.
         if (
             not records
             and tokens
@@ -1411,39 +1430,17 @@ class BrazilMoHEngine:
                 chain_start=chain_start,
             )
             errored_any = errored_any or fallback_errored
-            bvs_errored = bvs_errored or fallback_errored
             records = fallback_records
 
-        # The strict conjunction found nothing usable -- either no hits at all,
-        # or only records the Brazil assertion dropped. Retry the same tokens
-        # ORed. A single substantive token is skipped: the two groups would be
-        # byte-identical, so the request would be pure waste.
+        # The CDN shield 403s every plain HTTP request and the PCDT engine
+        # alone cannot cover the non-conventional index. One rendered browser
+        # fetch carries the fingerprint the shield accepts; success clears the
+        # BVS errors, so the merge is cached unless a gov.br stage also
+        # errored. Only a shield qualifies: a timeout or 5xx comes from the
+        # origin itself, which the browser would hit just the same.
         if (
             not records
-            and len(tokens) >= 2
-            and not title_chain_errored
-            and not self._bvs_unavailable(state)
-        ):
-            composed_relaxed = _build_query(query, norm_collection, operator="OR", title_scoped=False)
-            relaxed_records, relaxed_errored = await self._bvs_stage(
-                "relaxed",
-                composed_relaxed,
-                self._overfetch_count(clamped, chain_start),
-                state,
-                chain_start=chain_start,
-            )
-            errored_any = errored_any or relaxed_errored
-            bvs_errored = bvs_errored or relaxed_errored
-            records = relaxed_records
-
-        # Every BVS HTTP stage errored (the CDN shield 403s every request) and
-        # the PCDT engine alone cannot cover the non-conventional index. One
-        # rendered browser fetch carries the fingerprint the shield accepts;
-        # success clears the BVS errors, so the merge is cached unless a
-        # gov.br stage also errored.
-        if (
-            not records
-            and bvs_errored
+            and state.bvs_shielded
             and tokens
             and self.settings.enable_browser_fallback
             and self.settings.brazil_browser_fallback

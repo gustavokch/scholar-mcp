@@ -548,6 +548,7 @@ class AsyncHttpClient:
         quiet_statuses: frozenset[int] | set[int] | None = None,
         retryable_statuses: frozenset[int] | set[int] | None = None,
         deadline: float | None = None,
+        request_timeout: float | None = None,
     ) -> httpx.Response | None:
         """GET with rate-limiting and retries.
 
@@ -564,6 +565,10 @@ class AsyncHttpClient:
         outer ``asyncio.wait_for`` firing mid-attempt replaces that status with
         a bare cancellation. ``None`` (the default) leaves the loop exactly as
         it was for every caller that does not opt in.
+
+        ``request_timeout`` replaces ``settings.request_timeout`` as the
+        per-attempt read/write/pool ceiling for this call only (the connect
+        bound is unchanged). Absent, every caller keeps the client-wide value.
 
         ``ok_statuses`` lists statuses the caller must inspect itself, so they are
         returned as-is instead (e.g. api.fda.gov uses 404 for "no matches found",
@@ -587,6 +592,13 @@ class AsyncHttpClient:
         merged into a single status-policy object; call sites pass them by
         keyword, and that convention is not enforced with a ``*`` marker.
         """
+        # Per-attempt read/write/pool ceiling. ``request_timeout`` replaces the
+        # client-wide setting for this call only, for a host whose healthy
+        # responses outlast it (BVS holds a connection 37-43 s when degraded,
+        # against the 30 s default every other provider keeps).
+        attempt_timeout = float(
+            self.settings.request_timeout if request_timeout is None else request_timeout
+        )
         target_url = self._inject_credentials(self._merge_params(url, params))
         log_url = redact_url(target_url)
         limiter = self._limiter_for_url(target_url)
@@ -648,9 +660,16 @@ class AsyncHttpClient:
                 # 30 s ceiling in a single connect.
                 request_kwargs["timeout"] = httpx.Timeout(
                     connect=min(float(self.settings.connect_timeout_s), remaining),
-                    read=min(float(self.settings.request_timeout), remaining),
-                    write=min(float(self.settings.request_timeout), remaining),
-                    pool=min(float(self.settings.request_timeout), remaining),
+                    read=min(attempt_timeout, remaining),
+                    write=min(attempt_timeout, remaining),
+                    pool=min(attempt_timeout, remaining),
+                )
+            elif request_timeout is not None:
+                request_kwargs["timeout"] = httpx.Timeout(
+                    connect=float(self.settings.connect_timeout_s),
+                    read=attempt_timeout,
+                    write=attempt_timeout,
+                    pool=attempt_timeout,
                 )
             # Outside the ``try``: the ``except`` below reads it to cost the
             # attempt, and a statement inserted above it inside the block would

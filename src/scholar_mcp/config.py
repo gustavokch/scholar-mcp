@@ -85,14 +85,14 @@ class Settings:
     cache_ttl_clinical_trials: int = 86400
     cache_ttl_who_iris: int = 2592000
     cache_ttl_brazil_moh: int = 2592000
-    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to seven BVS stages
-    # (title-scoped, three title relaxations, title-scoped-or, all-field,
-    # OR-relaxed) run sequentially, and callers wrap the whole chain in their
-    # own hard timeout. The ceiling must clear one real BVS response: the host
-    # front end holds the connection ~19-25 s even when Solr answers in under
-    # half a second (slowest measured success: 27.9 s), so 20 s cancelled
-    # responses that were about to arrive. 30 s clears one such response and
-    # keeps one stalled stage from eating the remaining stages' share.
+    # Per-stage ceiling for BrazilMoHEngine: PCDT plus up to three BVS stages
+    # (strict title AND, title OR, all-field OR) run sequentially, and callers
+    # wrap the whole chain in their own hard timeout. The ceiling must clear
+    # one real BVS response. Measured 2026-10-01 against a degraded host, the
+    # successful responses took 37-43 s (earlier: 19-27.9 s), the rest were
+    # 502s or read timeouts, so 30 s cancelled answers that were about to
+    # arrive. 45 s clears them; the stage count was cut so that the chain
+    # budget below still holds two full stages.
     #
     # This ceiling also bounds the 5xx retry ladder underneath it: the stage
     # passes its own deadline into ``AsyncHttpClient.get``, so the ladder
@@ -102,17 +102,28 @@ class Settings:
     # cancellation. The ladder therefore never needs this value raised to fit a
     # full ``max_retries`` run, which would starve the remaining stages.
     #
-    # Also caps the per-attempt timeout together with ``request_timeout``:
-    # AsyncHttpClient clamps each attempt to min(request_timeout, budget left),
-    # so raising this ceiling past request_timeout changes nothing unless
-    # request_timeout rises too.
-    brazil_stage_timeout_s: float = 30.0
+    # Each attempt is clamped to min(brazil_request_timeout_s, budget left), so
+    # raising this ceiling past brazil_request_timeout_s changes nothing unless
+    # that rises too.
+    brazil_stage_timeout_s: float = 45.0
+    # Per-attempt read ceiling for BVS search requests, replacing
+    # ``request_timeout`` (30 s, shared by every provider) for this host only.
+    brazil_request_timeout_s: float = 45.0
+    # BVS requests in flight at once across every concurrent search. The host
+    # limiter paces request starts (1 req/s) but does not bound how many are
+    # open while the host holds each for tens of seconds.
+    brazil_max_concurrent: int = 2
+    # Consecutive BVS timeouts/5xx that open the breaker, and how long it stays
+    # open. While open, searches skip BVS and are served from the gov.br
+    # catalogs immediately instead of each paying a full stage budget.
+    brazil_breaker_threshold: int = 2
+    brazil_breaker_cooldown_s: float = 60.0
     # Whole-chain ceiling for BrazilMoHEngine. Both the HTTP stages and the
     # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,
     # chain budget left), and the browser tier receives min(brazil_browser_timeout_s,
     # chain budget left). PCDT plus BVS stages cannot exceed this bound.
-    # 120 s keeps three full-ceiling stages from starving the ~25 s camoufox
-    # tier that follows them. <= 0 disables the bound.
+    # 120 s keeps two full-ceiling stages from starving the camoufox tier
+    # (>= 20 s useful floor) that follows them. <= 0 disables the bound.
     brazil_chain_timeout_s: float = 120.0
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
@@ -278,7 +289,11 @@ class Settings:
             cache_ttl_clinical_trials=_int_env("CACHE_TTL_CLINICAL_TRIALS", 86400),
             cache_ttl_who_iris=_int_env("CACHE_TTL_WHO_IRIS", 2592000),
             cache_ttl_brazil_moh=_int_env("CACHE_TTL_BRAZIL_MOH", 2592000),
-            brazil_stage_timeout_s=_float_env("BRAZIL_STAGE_TIMEOUT_S", 30.0),
+            brazil_stage_timeout_s=_float_env("BRAZIL_STAGE_TIMEOUT_S", 45.0),
+            brazil_request_timeout_s=_float_env("BRAZIL_REQUEST_TIMEOUT_S", 45.0),
+            brazil_max_concurrent=_int_env("BRAZIL_MAX_CONCURRENT", 2),
+            brazil_breaker_threshold=_int_env("BRAZIL_BREAKER_THRESHOLD", 2),
+            brazil_breaker_cooldown_s=_float_env("BRAZIL_BREAKER_COOLDOWN_S", 60.0),
             brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 120.0),
             scihub_mirror_timeout_s=_float_env("SCIHUB_MIRROR_TIMEOUT_S", 12.0),
             scihub_tier_timeout_s=_float_env("SCIHUB_TIER_TIMEOUT_S", 20.0),
