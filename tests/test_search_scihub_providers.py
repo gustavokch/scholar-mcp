@@ -316,6 +316,59 @@ async def test_oa_status_success_logs_nothing(client, caplog):
 
 
 @respx.mock
+async def test_oa_status_skip_count_excludes_already_annotated(client, caplog):
+    """If the payload breaks mid-loop, the skip count must not re-count annotated papers."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        "garbage-row",  # .get() raises AttributeError mid-loop
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"  # annotated before the exception
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 papers" in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_empty_papers_logs_nothing(client, caplog):
+    """An empty paper list returns before any request and must stay silent."""
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status([], client)
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_no_identifiers_logs_nothing(client, caplog):
+    """Papers with no DOI/PMID never reach Europe PMC and must stay silent."""
+    papers = [PaperMetadata(title="A"), PaperMetadata(title="B")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    assert papers[1].oa_status == "unknown"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(

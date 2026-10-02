@@ -350,6 +350,7 @@ async def annotate_oa_status(
     query_str = " OR ".join(query_parts)
     search_url = f"{EPMC_REST_BASE}/search"
 
+    annotated = 0
     try:
         resp = await http_client.get(
             search_url,
@@ -380,15 +381,17 @@ async def annotate_oa_status(
 
             if r_doi in doi_map:
                 doi_map[r_doi].oa_status = status_str
+                annotated += 1
                 if r.get("pmcid") and not doi_map[r_doi].pmcid:
                     doi_map[r_doi].pmcid = r.get("pmcid")
             elif r_pmid in pmid_map:
                 pmid_map[r_pmid].oa_status = status_str
+                annotated += 1
                 if r.get("pmcid") and not pmid_map[r_pmid].pmcid:
                     pmid_map[r_pmid].pmcid = r.get("pmcid")
     except Exception as exc:
         logger.info(
             "OA status annotation skipped for %d papers: %s",
-            len(query_parts),
+            len(query_parts) - annotated,
             exc,
         )
