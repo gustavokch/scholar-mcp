@@ -330,18 +330,25 @@ async def annotate_oa_status(
     if not papers:
         return
 
-    doi_map: dict[str, PaperMetadata] = {}
-    pmid_map: dict[str, PaperMetadata] = {}
+    doi_map: dict[str, list[PaperMetadata]] = {}
+    pmid_map: dict[str, list[PaperMetadata]] = {}
 
     query_parts: list[str] = []
+    mapped_count = 0
     for p in papers:
         if p.doi:
             clean_d = p.doi.lower()
-            doi_map[clean_d] = p
-            query_parts.append(f'DOI:"{p.doi}"')
+            bucket = doi_map.setdefault(clean_d, [])
+            if not bucket:
+                query_parts.append(f'DOI:"{p.doi}"')
+            bucket.append(p)
+            mapped_count += 1
         elif p.pmid:
-            pmid_map[p.pmid] = p
-            query_parts.append(f'EXT_ID:"{p.pmid}"')
+            bucket = pmid_map.setdefault(p.pmid, [])
+            if not bucket:
+                query_parts.append(f'EXT_ID:"{p.pmid}"')
+            bucket.append(p)
+            mapped_count += 1
 
     if not query_parts:
         return
@@ -366,7 +373,7 @@ async def annotate_oa_status(
             # attributes the consequence: these papers keep oa_status="unknown".
             logger.info(
                 "OA status annotation skipped for %d papers: Europe PMC search unavailable%s",
-                len(query_parts),
+                mapped_count,
                 f" (status {resp.status_code})" if resp is not None else "",
             )
             return
@@ -380,18 +387,20 @@ async def annotate_oa_status(
             r_pmid = r.get("pmid")
 
             if r_doi in doi_map:
-                doi_map[r_doi].oa_status = status_str
-                annotated += 1
-                if r.get("pmcid") and not doi_map[r_doi].pmcid:
-                    doi_map[r_doi].pmcid = r.get("pmcid")
+                for paper in doi_map[r_doi]:
+                    paper.oa_status = status_str
+                    annotated += 1
+                    if r.get("pmcid") and not paper.pmcid:
+                        paper.pmcid = r.get("pmcid")
             elif r_pmid in pmid_map:
-                pmid_map[r_pmid].oa_status = status_str
-                annotated += 1
-                if r.get("pmcid") and not pmid_map[r_pmid].pmcid:
-                    pmid_map[r_pmid].pmcid = r.get("pmcid")
+                for paper in pmid_map[r_pmid]:
+                    paper.oa_status = status_str
+                    annotated += 1
+                    if r.get("pmcid") and not paper.pmcid:
+                        paper.pmcid = r.get("pmcid")
     except Exception as exc:
         logger.info(
             "OA status annotation skipped for %d papers: %s",
-            len(query_parts) - annotated,
+            mapped_count - annotated,
             exc,
         )

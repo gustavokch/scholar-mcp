@@ -369,6 +369,81 @@ async def test_oa_status_no_identifiers_logs_nothing(client, caplog):
 
 
 @respx.mock
+async def test_oa_status_duplicate_doi_annotates_both_papers(client):
+    """Two papers sharing a DOI must both be annotated; the first must not be
+    silently dropped by the identifier map."""
+    route = respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A1", doi="10.1/a"),
+        PaperMetadata(title="A2", doi="10.1/A"),  # case-variant of the same DOI
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+    assert papers[1].pmcid == "PMC1"
+    # A duplicated identifier must not bloat the query with a second clause.
+    assert route.calls.last.request.url.params["query"].count("DOI:") == 1
+
+
+@respx.mock
+async def test_oa_status_duplicate_pmid_annotates_both_papers(client):
+    """The pmid_map has the same overwrite flaw as doi_map; both papers must
+    be annotated."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"pmid": "123", "isOpenAccess": "N"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="P1", pmid="123"),
+        PaperMetadata(title="P2", pmid="123"),
+    ]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "closed"
+    assert papers[1].oa_status == "closed"
+
+
+@respx.mock
+async def test_oa_status_duplicate_doi_skip_log_counts_papers(client, caplog):
+    """On server error the skip log must count papers, not unique identifiers:
+    two papers sharing one DOI are 2 skipped papers."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [
+        PaperMetadata(title="A1", doi="10.1/a"),
+        PaperMetadata(title="A2", doi="10.1/a"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "2 papers" in records[0].getMessage()
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(
