@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from typing import NamedTuple
 
@@ -18,6 +19,7 @@ ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 CROSSREF = "https://api.crossref.org/works"
 EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+EPMC_LOGGER = "scholar_mcp.providers.europe_pmc"
 
 
 @pytest.fixture
@@ -258,6 +260,59 @@ async def test_oa_status_annotated_in_one_batched_call(client):
     assert papers[0].oa_status == "oa"
     assert papers[1].oa_status == "closed"
     assert papers[2].oa_status == "unknown"
+
+
+@respx.mock
+async def test_oa_status_skip_logs_info_on_server_error(client, caplog):
+    """A failed batch must leave an attributable trail for oa_status='unknown'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(500, text="Server Error")
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "2 papers" in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_skip_logs_info_on_malformed_json(client, caplog):
+    """A 200 whose body is not JSON is still a skipped annotation, and must say so."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(200, text="not json at all")
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    assert "1 papers" in records[0].getMessage()
+
+
+@respx.mock
+async def test_oa_status_success_logs_nothing(client, caplog):
+    """A successful batch (even with zero matching results) is not a skip."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(200, json={"resultList": {"result": []}})
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
 
 
 @respx.mock

@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Any
 
@@ -6,6 +7,8 @@ from scholar_mcp.parsers.jats import jats_to_markdown, list_sections
 
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
 from scholar_mcp.utils.http import AsyncHttpClient, RETRYABLE_STATUS_CODES
+
+logger = logging.getLogger(__name__)
 
 EPMC_REST_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 OAI_PMH_URL = "https://pmc.ncbi.nlm.nih.gov/api/oai/v1/mh/"
@@ -357,23 +360,35 @@ async def annotate_oa_status(
                 "resultType": "lite",
             },
         )
-        if resp is not None and resp.status_code == 200:
-            data = resp.json()
-            results = data.get("resultList", {}).get("result", [])
-            for r in results:
-                is_oa = r.get("isOpenAccess") == "Y"
-                status_str = "oa" if is_oa else "closed"
+        if resp is None or resp.status_code != 200:
+            # The http layer already logged the cause at WARNING; this INFO
+            # attributes the consequence: these papers keep oa_status="unknown".
+            logger.info(
+                "OA status annotation skipped for %d papers: Europe PMC search unavailable%s",
+                len(query_parts),
+                f" (status {resp.status_code})" if resp is not None else "",
+            )
+            return
+        data = resp.json()
+        results = data.get("resultList", {}).get("result", [])
+        for r in results:
+            is_oa = r.get("isOpenAccess") == "Y"
+            status_str = "oa" if is_oa else "closed"
 
-                r_doi = (r.get("doi") or "").lower()
-                r_pmid = r.get("pmid")
+            r_doi = (r.get("doi") or "").lower()
+            r_pmid = r.get("pmid")
 
-                if r_doi in doi_map:
-                    doi_map[r_doi].oa_status = status_str
-                    if r.get("pmcid") and not doi_map[r_doi].pmcid:
-                        doi_map[r_doi].pmcid = r.get("pmcid")
-                elif r_pmid in pmid_map:
-                    pmid_map[r_pmid].oa_status = status_str
-                    if r.get("pmcid") and not pmid_map[r_pmid].pmcid:
-                        pmid_map[r_pmid].pmcid = r.get("pmcid")
-    except Exception:
-        pass
+            if r_doi in doi_map:
+                doi_map[r_doi].oa_status = status_str
+                if r.get("pmcid") and not doi_map[r_doi].pmcid:
+                    doi_map[r_doi].pmcid = r.get("pmcid")
+            elif r_pmid in pmid_map:
+                pmid_map[r_pmid].oa_status = status_str
+                if r.get("pmcid") and not pmid_map[r_pmid].pmcid:
+                    pmid_map[r_pmid].pmcid = r.get("pmcid")
+    except Exception as exc:
+        logger.info(
+            "OA status annotation skipped for %d papers: %s",
+            len(query_parts),
+            exc,
+        )
