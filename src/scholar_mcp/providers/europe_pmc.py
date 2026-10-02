@@ -361,7 +361,19 @@ async def annotate_oa_status(
     query_str = " OR ".join(query_parts)
     search_url = f"{EPMC_REST_BASE}/search"
 
-    annotated = 0
+    annotated: set[int] = set()
+
+    def _apply(bucket: list[PaperMetadata], status_str: str, pmcid: str | None) -> None:
+        # First row wins: a paper already annotated by an earlier row (or bucket)
+        # is skipped, so each paper is written once and counted once.
+        for paper in bucket:
+            if id(paper) in annotated:
+                continue
+            annotated.add(id(paper))
+            paper.oa_status = status_str
+            if pmcid and not paper.pmcid:
+                paper.pmcid = pmcid
+
     try:
         resp = await http_client.get(
             search_url,
@@ -391,20 +403,14 @@ async def annotate_oa_status(
             r_pmid = r.get("pmid")
 
             if r_doi in doi_map:
-                for paper in doi_map[r_doi]:
-                    paper.oa_status = status_str
-                    annotated += 1
-                    if r.get("pmcid") and not paper.pmcid:
-                        paper.pmcid = r.get("pmcid")
+                _apply(doi_map[r_doi], status_str, r.get("pmcid"))
             elif r_pmid in pmid_map:
-                for paper in pmid_map[r_pmid]:
-                    paper.oa_status = status_str
-                    annotated += 1
-                    if r.get("pmcid") and not paper.pmcid:
-                        paper.pmcid = r.get("pmcid")
+                _apply(pmid_map[r_pmid], status_str, r.get("pmcid"))
     except Exception as exc:
-        logger.info(
-            "OA status annotation skipped for %s: %s",
-            _papers(mapped_count - annotated),
-            exc,
-        )
+        remaining = mapped_count - len(annotated)
+        if remaining:
+            logger.info(
+                "OA status annotation skipped for %s: %s",
+                _papers(remaining),
+                exc,
+            )

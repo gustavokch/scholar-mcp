@@ -446,6 +446,92 @@ async def test_oa_status_duplicate_doi_skip_log_counts_papers(client, caplog):
 
 
 @respx.mock
+async def test_oa_status_skip_count_ignores_duplicate_result_rows(client, caplog):
+    """The exception-path count must count papers once each, even when Europe
+    PMC returns the same identifier in two rows. Two rows for 10.1/a would
+    inflate `annotated` to 2 while only paper A was hit, so paper B — which was
+    never annotated — reported as '0 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},  # duplicate row
+                        "garbage-row",  # .get() raises AttributeError mid-loop
+                    ]
+                }
+            },
+        )
+    )
+    papers = [
+        PaperMetadata(title="A", doi="10.1/a"),
+        PaperMetadata(title="B", doi="10.1/b"),
+    ]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[1].oa_status == "unknown"
+    records = [
+        r for r in caplog.records
+        if r.name == EPMC_LOGGER and r.levelname == "INFO"
+    ]
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    assert "1 paper" in msg
+    assert "1 papers" not in msg
+
+
+@respx.mock
+async def test_oa_status_no_skip_log_when_everything_annotated(client, caplog):
+    """A batch whose papers were all annotated before the payload broke has
+    nothing skipped, so it must stay silent instead of logging '0 papers'."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        {"doi": "10.1/a", "isOpenAccess": "Y"},
+                        "garbage-row",
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A", doi="10.1/a")]
+    with caplog.at_level(logging.INFO, logger=EPMC_LOGGER):
+        await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    records = [r for r in caplog.records if r.name == EPMC_LOGGER]
+    assert records == []
+
+
+@respx.mock
+async def test_oa_status_duplicate_response_rows_annotate_once(client):
+    """Duplicate rows for one DOI must not double-annotate: first row wins."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                        {"doi": "10.1/a", "isOpenAccess": "N", "pmcid": "PMC2"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A1", doi="10.1/a")]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(
