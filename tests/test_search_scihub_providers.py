@@ -446,6 +446,28 @@ async def test_oa_status_duplicate_doi_skip_log_counts_papers(client, caplog):
 
 
 @respx.mock
+async def test_oa_status_duplicate_response_rows_annotate_once(client):
+    """Duplicate rows for one DOI must not double-annotate: first row wins."""
+    respx.get(url__startswith=EPMC).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "resultList": {
+                    "result": [
+                        {"doi": "10.1/a", "isOpenAccess": "Y", "pmcid": "PMC1"},
+                        {"doi": "10.1/a", "isOpenAccess": "N", "pmcid": "PMC2"},
+                    ]
+                }
+            },
+        )
+    )
+    papers = [PaperMetadata(title="A1", doi="10.1/a")]
+    await annotate_oa_status(papers, client)
+    assert papers[0].oa_status == "oa"
+    assert papers[0].pmcid == "PMC1"
+
+
+@respx.mock
 async def test_scihub_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(

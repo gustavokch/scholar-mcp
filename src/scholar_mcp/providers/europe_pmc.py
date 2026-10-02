@@ -383,6 +383,7 @@ async def annotate_oa_status(
             return
         data = resp.json()
         results = data.get("resultList", {}).get("result", [])
+        seen: set[int] = set()
         for r in results:
             is_oa = r.get("isOpenAccess") == "Y"
             status_str = "oa" if is_oa else "closed"
@@ -392,12 +393,18 @@ async def annotate_oa_status(
 
             if r_doi in doi_map:
                 for paper in doi_map[r_doi]:
+                    if id(paper) in seen:
+                        continue
+                    seen.add(id(paper))
                     paper.oa_status = status_str
                     annotated += 1
                     if r.get("pmcid") and not paper.pmcid:
                         paper.pmcid = r.get("pmcid")
             elif r_pmid in pmid_map:
                 for paper in pmid_map[r_pmid]:
+                    if id(paper) in seen:
+                        continue
+                    seen.add(id(paper))
                     paper.oa_status = status_str
                     annotated += 1
                     if r.get("pmcid") and not paper.pmcid:
