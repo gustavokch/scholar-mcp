@@ -843,7 +843,7 @@ async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch)
         monkeypatch.setattr(engine, "_overfetch_count", _spy)
         seen: list[int] = []
 
-        async def _fake_browser(composed, count, ceiling):
+        async def _fake_browser(composed, count, ceiling, fallback_composed=None):
             seen.append(count)
             return []
 
