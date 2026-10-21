@@ -6,6 +6,7 @@ from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 
 from scholar_mcp.config import Settings
+from scholar_mcp.medical.guidelines import same_guideline
 from scholar_mcp.medical.models import MedicalArticle, PediatricGuideline
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
 from scholar_mcp.utils.browser import (
@@ -154,6 +155,28 @@ async def _cache_if_any(
     """
     if items:
         await cache.set(key, [g.to_dict() for g in items], source=source)
+
+
+# AAP document-type markers as they appear in Pediatrics titles.
+_AAP_CATEGORY_RE = re.compile(
+    r"\b(Clinical Practice Guideline|Clinical Report|Policy Statement|Technical Report)\b",
+    re.IGNORECASE,
+)
+
+
+def _aap_category(title: str) -> str:
+    """The AAP document type named in ``title``, or "" when it names none."""
+    match = _AAP_CATEGORY_RE.search(title)
+    return match.group(1).title() if match else ""
+
+
+def _dedupe_guidelines(items: list[PediatricGuideline]) -> list[PediatricGuideline]:
+    """First copy of each guideline (see ``same_guideline``)."""
+    unique: list[PediatricGuideline] = []
+    for g in items:
+        if not any(same_guideline(g.title, kept.title) for kept in unique):
+            unique.append(g)
+    return unique
 
 
 class PediatricsEngine:
@@ -407,7 +430,7 @@ class PediatricsEngine:
                     year=str(g.year or ""),
                     description=g.description,
                     age_group=_extract_age_group(f"{g.title} {g.description}"),
-                    category="Policy Statement",
+                    category=_aap_category(g.title),
                 )
             )
         return out
@@ -494,13 +517,7 @@ class PediatricsEngine:
                 logger.warning("Pediatric guideline sub-search raised", exc_info=res)
                 errored = True
 
-        seen: set[str] = set()
-        deduped: list[PediatricGuideline] = []
-        for g in all_items:
-            norm = re.sub(r"[^\w\s]", "", g.title.lower())
-            if norm not in seen:
-                seen.add(norm)
-                deduped.append(g)
+        deduped = _dedupe_guidelines(all_items)
 
         # The AAP-hosted search pages are SPAs: with or without JS they render
         # static navigation items regardless of the query. Drop items that
@@ -528,13 +545,7 @@ class PediatricsEngine:
                 )
                 browser_items = []
             if browser_items:
-                deduped = []
-                browser_seen: set[str] = set()
-                for g in self._filter_matches(browser_items, query):
-                    norm = re.sub(r"[^\w\s]", "", g.title.lower())
-                    if norm not in browser_seen:
-                        browser_seen.add(norm)
-                        deduped.append(g)
+                deduped = _dedupe_guidelines(self._filter_matches(browser_items, query))
                 errored = False
 
         if deduped and all(g.source == "pubmed-aap" for g in deduped):

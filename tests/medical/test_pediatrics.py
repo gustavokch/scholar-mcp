@@ -257,6 +257,48 @@ async def test_search_aap_guidelines_combines_and_dedups(tmp_path: Path):
 
 
 @respx.mock
+async def test_search_aap_guidelines_pubmed_rows_take_category_from_title(tmp_path: Path):
+    """PubMed-backed AAP rows were all labelled "Policy Statement". The
+    category now comes from the title marker; a title without one gets none.
+    Two copies of one guideline (title differing only by the "A Report of
+    the ..." tail) merge."""
+    from scholar_mcp.medical.models import MedicalArticle
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    respx.get(AAP_URL).respond(status_code=403)
+    core = "Evaluation and Management of Well-Appearing Febrile Infants 8 to 60 Days Old"
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=f"Clinical Practice Guideline: {core}",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="1",
+            ),
+            MedicalArticle(
+                title=f"Clinical Practice Guideline: {core}: A Report of the Subcommittee",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="2",
+            ),
+            MedicalArticle(
+                title="Febrile Infants: Fever Without a Source Guideline",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="3",
+            ),
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+    try:
+        guidelines, _ = await engine.search_aap_guidelines("febrile infant")
+        assert [(g.title, g.category) for g in guidelines] == [
+            (f"Clinical Practice Guideline: {core}", "Clinical Practice Guideline"),
+            ("Febrile Infants: Fever Without a Source Guideline", ""),
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
 async def test_search_pediatric_literature_keeps_journal_filter_when_relaxing(tmp_path: Path):
     from scholar_mcp.medical.pubmed import MedicalPubMedClient
 
