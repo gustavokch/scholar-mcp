@@ -237,7 +237,7 @@ pip install 'scholar-mcp[medical]'
 | `search_brazil_moh_guidelines` | BVS / iAHx & gov.br | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS, PCDT guidelines, and "Saúde de A a Z" surveillance manuals from SVSA and guias-e-manuais publication trees. Supported `collection` options: `all` (default), `brisa`, `pcdt`, and `az`. |
 | `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
 | `search_clinical_trials` | ClinicalTrials.gov | Search registered trials. Optional `intervention` and `condition` go to `query.intr` / `query.cond`; with an `intervention`, only trials that give it are kept. |
-| `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
+| `search_medical_databases` | PubMed, ClinicalTrials.gov, Europe PMC | Cross-database search of PubMed, ClinicalTrials.gov and Europe PMC systematic reviews/meta-analyses with fuzzy deduplication. A review is labelled "Cochrane" only when its journal is a Cochrane title. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
 
