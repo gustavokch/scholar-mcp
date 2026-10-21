@@ -162,7 +162,7 @@ class PubMedProvider:
             soup = BeautifulSoup(fetch_resp.content, "lxml-xml")
             by_pmid: dict[str, PaperMetadata] = {}
             for record in soup.find_all(["PubmedArticle", "PubmedBookArticle"]):
-                paper = self._parse_record(record)
+                paper = self.parse_record(record)
                 if paper is not None and paper.pmid:
                     by_pmid[paper.pmid] = paper
             # esearch's order is NCBI's relevance ranking; EFetch does not
@@ -200,11 +200,12 @@ class PubMedProvider:
         return ""
 
     @classmethod
-    def _parse_record(cls, record: Any) -> PaperMetadata | None:
+    def parse_record(cls, record: Any) -> PaperMetadata | None:
         """Map one EFetch ``PubmedArticle`` or ``PubmedBookArticle`` to PaperMetadata.
 
-        Shared by ``search`` (a batch) and ``fetch_abstract`` (one record), so
-        the two cannot disagree on a field. A Bookshelf record (StatPearls and
+        Shared by ``search`` (a batch), ``fetch_abstract`` (one record) and the
+        medical client's ``parse_pubmed_xml``, so they cannot disagree on a
+        field. A Bookshelf record (StatPearls and
         other NCBI books, frequent Best Match hits for clinical queries) keeps
         its title, authors, date and abstract under ``BookDocument``; it has no
         ``Journal``, so its venue is the book title and its ISSN is absent.
@@ -346,7 +347,7 @@ class PubMedProvider:
             record = soup.find(["PubmedArticle", "PubmedBookArticle"])
             if record is None:
                 return None
-            paper = self._parse_record(record)
+            paper = self.parse_record(record)
             if paper is None:
                 return None
             # ids.* is the caller's echo: it fills a field only when the

@@ -45,7 +45,7 @@ def parse_pubmed_xml(xml_text: str) -> list[MedicalArticle]:
     soup = BeautifulSoup(xml_text, "lxml-xml")
     articles: list[MedicalArticle] = []
     for record in soup.find_all(["PubmedArticle", "PubmedBookArticle"]):
-        paper = PubMedProvider._parse_record(record)
+        paper = PubMedProvider.parse_record(record)
         if paper is not None:
             articles.append(_to_medical_article(paper))
     return articles
