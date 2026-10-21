@@ -498,8 +498,10 @@ async def test_search_clinical_guidelines_merges_simultaneous_publications(tmp_p
                 )
                 + _guideline_record(
                     "702", "Hypertension",
-                    f"{core}: A Report of the American College of Cardiology/American "
-                    "Heart Association Task Force on Clinical Practice Guidelines",
+                    # No tail on this copy: with it, the parser's stripped
+                    # trailing "." makes both titles identical and the client's
+                    # fuzzy dedupe merges them before the engine merge runs.
+                    core,
                     "10.1161/HYP.0000000000000065",
                 )
                 + "</PubmedArticleSet>"
@@ -509,6 +511,51 @@ async def test_search_clinical_guidelines_merges_simultaneous_publications(tmp_p
         guidelines, meta = await engine.search_clinical_guidelines("hypertension", organization="ACC")
         assert meta.error is False
         assert [g.pmid for g in guidelines] == ["701"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_keeps_the_copy_that_passes_the_org_filter(
+    tmp_path: Path,
+):
+    """A joint statement in Ann Emerg Med (first) and Pediatrics: only the
+    Pediatrics copy passes organization="AAP" (journal signal). Merging first
+    kept the Ann Emerg Med copy, the filter then dropped it, and the
+    guideline was lost. The Pediatrics title carries a "A Report of the ..."
+    tail, so the client's fuzzy dedupe does not merge the two first."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    title = (
+        "Joint Policy Statement: Guidelines for Care of Children in the Emergency Department"
+    )
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["801", "802"]}})
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet>"
+                + _guideline_record(
+                    "801", "Annals of Emergency Medicine", title,
+                    "10.1016/j.annemergmed.2009.08.001",
+                )
+                + _guideline_record(
+                    "802", "Pediatrics",
+                    f"{title}: A Report of the Joint Pediatric Emergency Care Task Force",
+                    "10.1542/peds.2009-1807",
+                )
+                + "</PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "emergency care children", organization="AAP"
+        )
+        assert meta.error is False
+        assert [g.pmid for g in guidelines] == ["802"]
     finally:
         await cache.close()
         await http_client.aclose()

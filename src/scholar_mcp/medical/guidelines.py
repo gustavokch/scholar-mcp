@@ -322,18 +322,6 @@ class GuidelinesEngine:
                 if added:
                     break
 
-        # One guideline published in two journals is one candidate; the
-        # first (Layer 1, NCBI relevance order) copy is kept.
-        unique_candidates: list[tuple[MedicalArticle, bool, bool]] = []
-        for cand in candidates:
-            art = cand[0]
-            if not any(
-                same_guideline(art.title, kept.title, art.doi, kept.doi)
-                for kept, _, _ in unique_candidates
-            ):
-                unique_candidates.append(cand)
-        candidates = unique_candidates
-
         # Filter by organization if specified
         if organization:
             requested_aap = organization_matches(organization, "AAP")
@@ -349,6 +337,19 @@ class GuidelinesEngine:
                 if requested_aap and _is_aap_journal(art.journal):
                     filtered_candidates.append((art, has_pub, from_kw))
             candidates = filtered_candidates
+
+        # One guideline published in two journals is one candidate. The merge
+        # runs after the organisation filter, so the kept copy is the first
+        # (Layer 1, NCBI relevance order) copy that passed it.
+        unique_candidates: list[tuple[MedicalArticle, bool, bool]] = []
+        for cand in candidates:
+            art = cand[0]
+            if not any(
+                same_guideline(art.title, kept.title, art.doi, kept.doi)
+                for kept, _, _ in unique_candidates
+            ):
+                unique_candidates.append(cand)
+        candidates = unique_candidates
 
         # Score and build guidelines
         guidelines: list[ClinicalGuideline] = []
