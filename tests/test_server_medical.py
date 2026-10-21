@@ -21,6 +21,7 @@ MEDICAL_TOOLS = {
     "search_brazil_moh_guidelines",
     "get_brazil_moh_full_text",
     "search_medical_databases",
+    "search_clinical_trials",
     "search_medical_journals",
     "get_medical_cache_stats",
 }
@@ -183,3 +184,38 @@ async def test_search_clinical_guidelines_envelope_surfaces_relaxed_query(monkey
     )
     result = await srv.search_clinical_guidelines("dengue")
     assert "relaxed_query" not in result
+
+
+async def test_search_clinical_trials_tool_forwards_structured_fields(monkeypatch):
+    from scholar_mcp.medical.models import MedicalArticle
+
+    mock = AsyncMock()
+    mock.search_clinical_trials.return_value = (
+        [
+            MedicalArticle(
+                title="Metformin vs insulin in GDM",
+                nct_id="NCT01234567",
+                source_database="ClinicalTrials.gov",
+            )
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    monkeypatch.setattr(srv, "clinical_trials_client", mock)
+    result = await srv.search_clinical_trials(
+        "neonatal hypoglycemia",
+        intervention="metformin",
+        condition="gestational diabetes",
+        limit=5,
+    )
+    mock.search_clinical_trials.assert_awaited_once_with(
+        "neonatal hypoglycemia",
+        limit=5,
+        intervention="metformin",
+        condition="gestational diabetes",
+    )
+    assert "NCT01234567" in result["markdown"]
+
+    await srv.search_clinical_trials("asthma", limit=999)
+    assert mock.search_clinical_trials.await_args.kwargs["limit"] == 50
+    await srv.search_clinical_trials("asthma", limit=0)
+    assert mock.search_clinical_trials.await_args.kwargs["limit"] == 1

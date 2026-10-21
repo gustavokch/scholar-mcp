@@ -729,6 +729,35 @@ if settings.enable_medical_tools:
             return {"status": "error", "error": str(ex), "source": "databases"}
 
     @mcp.tool()
+    async def search_clinical_trials(
+        query: str,
+        intervention: str | None = None,
+        condition: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Search ClinicalTrials.gov registered studies.
+
+        ClinicalTrials.gov ANDs every word of the query, so give the drug and
+        the disease of a long clinical question in their own fields.
+
+        Args:
+            query: Clinical question or keywords.
+            intervention: Optional drug or intervention (e.g. 'metformin'). Dose
+                and route words are dropped; trials whose interventions do not
+                name it are removed unless no fetched trial names it.
+            condition: Optional disease or condition (e.g. 'gestational diabetes').
+            limit: Number of trials to return (max 50).
+        """
+        clamped = min(max(1, limit), 50)
+        try:
+            articles, meta = await clinical_trials_client.search_clinical_trials(
+                query, limit=clamped, intervention=intervention, condition=condition
+            )
+            return _with_degraded(format_medical_articles(articles, query, meta), meta)
+        except Exception as ex:
+            return {"status": "error", "error": str(ex), "source": "clinical_trials"}
+
+    @mcp.tool()
     async def search_medical_journals(query: str) -> dict[str, Any]:
         """Search top-tier general medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine) via PubMed.
 
