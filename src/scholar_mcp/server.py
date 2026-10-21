@@ -715,7 +715,9 @@ if settings.enable_medical_tools:
 
     @mcp.tool()
     async def search_medical_databases(query: str) -> dict[str, Any]:
-        """Search across PubMed, ClinicalTrials.gov, and Cochrane Library with cross-database deduplication.
+        """Search PubMed, ClinicalTrials.gov, and Europe PMC systematic reviews/meta-analyses with cross-database deduplication.
+
+        Europe PMC records are labelled "Cochrane" only when the journal is a Cochrane title.
 
         Args:
             query: Medical condition, intervention, or clinical question.
