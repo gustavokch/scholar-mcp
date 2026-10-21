@@ -322,6 +322,34 @@ async def test_search_clinical_trials_drops_a_dose_only_as_number_and_unit(
         await http_client.aclose()
 
 
+@respx.mock
+async def test_search_clinical_trials_matches_intervention_ending_in_punctuation(
+    tmp_path: Path,
+):
+    """A name that ends in ")" is still a whole phrase: the filter keeps the
+    trial that gives it instead of falling back to the whole pool."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(CT_URL).respond(
+            json={
+                "studies": [
+                    _study("NCT1", "COMPLETED", [{"name": "Insulin Aspart"}]),
+                    _study("NCT2", "COMPLETED", [{"name": "Insulin (glargine)"}]),
+                ]
+            }
+        )
+        articles, _ = await client.search_clinical_trials(
+            "type 1 diabetes", intervention="insulin (glargine)"
+        )
+        assert [a.nct_id for a in articles] == ["NCT2"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @pytest.mark.parametrize(
     ("input_query", "max_terms", "expected"),
     [

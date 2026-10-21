@@ -92,8 +92,10 @@ def _residual_term(query: str, intervention: str | None, condition: str | None) 
 
 
 def _phrase_re(text: str) -> re.Pattern[str]:
+    # Lookarounds, not \b: a name can start or end in punctuation
+    # ("Insulin (glargine)"), where \b never matches.
     return re.compile(
-        r"\b" + r"\s+".join(map(re.escape, text.split())) + r"\b", re.IGNORECASE
+        r"(?<!\w)" + r"\s+".join(map(re.escape, text.split())) + r"(?!\w)", re.IGNORECASE
     )
 
 
