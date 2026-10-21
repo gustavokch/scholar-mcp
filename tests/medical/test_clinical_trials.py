@@ -179,6 +179,77 @@ async def test_search_clinical_trials_shares_cache_for_overlong_queries(tmp_path
         await http_client.aclose()
 
 
+def _study(nct: str, status: str, interventions: list[dict]) -> dict:
+    return {
+        "protocolSection": {
+            "identificationModule": {"nctId": nct, "briefTitle": f"Trial {nct}"},
+            "statusModule": {"overallStatus": status},
+            "armsInterventionsModule": {"interventions": interventions},
+        }
+    }
+
+
+@respx.mock
+async def test_search_clinical_trials_sends_intervention_and_condition_fields(tmp_path: Path):
+    """query.term ANDs every word: a sentence query finds a handful of trials.
+    The intervention and condition go to their own fields; only the query's
+    other content words stay in query.term."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(CT_URL).respond(json={"studies": []})
+        await client.search_clinical_trials(
+            "metformin versus insulin in gestational diabetes for neonatal hypoglycemia",
+            limit=10,
+            intervention="metformin",
+            condition="gestational diabetes",
+        )
+        params = route.calls.last.request.url.params
+        assert params["query.intr"] == "metformin"
+        assert params["query.cond"] == "gestational diabetes"
+        assert params["query.term"] == "insulin neonatal hypoglycemia"
+        assert params["pageSize"] == "50"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_trials_keeps_trials_that_give_the_intervention(tmp_path: Path):
+    """query.intr also matches arm descriptions: a trial whose interventions
+    never name the drug is dropped. UNKNOWN-status trials sort last, then
+    the list is cut to ``limit``."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        respx.get(CT_URL).respond(
+            json={
+                "studies": [
+                    _study("NCT1", "UNKNOWN", [{"name": "Metformin Hydrochloride"}]),
+                    _study("NCT2", "COMPLETED", [{"name": "Insulin", "description": "vs metformin"}]),
+                    _study("NCT3", "RECRUITING", [{"name": "Glucophage", "otherNames": ["metformin"]}]),
+                    _study("NCT4", "COMPLETED", [{"name": "Metformin"}]),
+                ]
+            }
+        )
+        articles, _ = await client.search_clinical_trials(
+            "metformin gestational diabetes", limit=2, intervention="metformin"
+        )
+        assert [a.nct_id for a in articles] == ["NCT3", "NCT4"]
+
+        articles, _ = await client.search_clinical_trials(
+            "metformin gestational diabetes", limit=5, intervention="metformin"
+        )
+        assert [a.nct_id for a in articles] == ["NCT3", "NCT4", "NCT1"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @pytest.mark.parametrize(
     ("input_query", "max_terms", "expected"),
     [
