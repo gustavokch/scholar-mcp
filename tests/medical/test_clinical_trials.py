@@ -307,8 +307,9 @@ async def test_search_clinical_trials_over_specific_intervention_keeps_hits(
 async def test_search_clinical_trials_drops_a_dose_only_as_number_and_unit(
     tmp_path: Path, intervention: str, expected_intr: str
 ):
-    """"G" in "penicillin G" and "2" in "interleukin 2" name the drug: dropping
-    them sends query.intr "penicillin", and Penicillin V trials pass the filter."""
+    """The "G" in "penicillin G" and the "2" in "interleukin 2" name the drug:
+    dropping them sends query.intr "penicillin", and Penicillin V trials pass
+    the filter."""
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
     cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)

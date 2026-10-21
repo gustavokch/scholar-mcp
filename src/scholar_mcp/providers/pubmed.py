@@ -205,10 +205,10 @@ class PubMedProvider:
 
         Shared by ``search`` (a batch), ``fetch_abstract`` (one record) and the
         medical client's ``parse_pubmed_xml``, so they cannot disagree on a
-        field. A Bookshelf record (StatPearls and
-        other NCBI books, frequent Best Match hits for clinical queries) keeps
-        its title, authors, date and abstract under ``BookDocument``; it has no
-        ``Journal``, so its venue is the book title and its ISSN is absent.
+        field. A Bookshelf record (StatPearls and other NCBI books, frequent
+        Best Match hits for clinical queries) keeps its title, authors, date
+        and abstract under ``BookDocument``; it has no ``Journal``, so its
+        venue is the book title and its ISSN is absent.
         Returns None for a record without a PMID.
         """
         citation = record.find("MedlineCitation", recursive=False) or record.find(

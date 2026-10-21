@@ -40,7 +40,7 @@ _ROUTE_WORDS = frozenset({
 
 
 def _is_unit(token: str) -> bool:
-    """"mg", "IU", or a per-unit form such as "mg/kg"."""
+    """True for a unit word: "mg", "IU", or a per-unit form such as "mg/kg"."""
     return token.lower().split("/", 1)[0] in _UNIT_WORDS
 
 
@@ -55,6 +55,7 @@ def _bare_intervention(intervention: str) -> str:
         elif _NUMBER_RE.fullmatch(token) and i + 1 < len(tokens) and _is_unit(tokens[i + 1]):
             dropped.update((i, i + 1))
     return " ".join(t for i, t in enumerate(tokens) if i not in dropped) or intervention
+
 
 logger = logging.getLogger(__name__)
 
