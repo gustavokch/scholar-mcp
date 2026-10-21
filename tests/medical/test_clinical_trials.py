@@ -292,6 +292,37 @@ async def test_search_clinical_trials_over_specific_intervention_keeps_hits(
 
 
 @pytest.mark.parametrize(
+    ("intervention", "expected_intr"),
+    [
+        # A unit letter or a bare number alone is part of the drug name.
+        ("penicillin G", "penicillin G"),
+        ("interleukin 2", "interleukin 2"),
+        # A number with its unit is a dose, joined or split.
+        ("metformin 500mg", "metformin"),
+        ("vitamin D 1000 IU", "vitamin D"),
+        ("5 mg/kg ketamine", "ketamine"),
+    ],
+)
+@respx.mock
+async def test_search_clinical_trials_drops_a_dose_only_as_number_and_unit(
+    tmp_path: Path, intervention: str, expected_intr: str
+):
+    """"G" in "penicillin G" and "2" in "interleukin 2" name the drug: dropping
+    them sends query.intr "penicillin", and Penicillin V trials pass the filter."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(CT_URL).respond(json={"studies": []})
+        await client.search_clinical_trials("trial", intervention=intervention)
+        assert route.calls.last.request.url.params["query.intr"] == expected_intr
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
     ("input_query", "max_terms", "expected"),
     [
         ("", 10, ""),

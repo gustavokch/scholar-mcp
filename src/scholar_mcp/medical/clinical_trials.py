@@ -27,23 +27,34 @@ _WORD_RE = re.compile(r"[\w'-]+")
 
 # Dose and route words around a drug name ("metformin 500 mg", "intravenous
 # tranexamic acid"): ClinicalTrials.gov intervention names rarely carry them,
-# so they are dropped from query.intr and from the intervention match.
-_DOSE_TOKEN_RE = re.compile(r"\d[\d.,]*(?:mg|mcg|µg|ug|g|ml|iu|%)?(?:/\w+)?", re.IGNORECASE)
-_DOSE_ROUTE_WORDS = frozenset({
-    "mg", "mcg", "µg", "ug", "g", "ml", "iu", "unit", "units",
+# so they are dropped from query.intr and from the intervention match. A
+# number or a unit word is a dose only as a pair ("500 mg", "500mg"); alone it
+# is part of the name ("penicillin G", "interleukin 2").
+_DOSED_NUMBER_RE = re.compile(r"\d[\d.,]*(?:mg|mcg|µg|ug|g|ml|iu|%)(?:/\w+)?", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"\d[\d.,]*")
+_UNIT_WORDS = frozenset({"mg", "mcg", "µg", "ug", "g", "ml", "iu", "unit", "units"})
+_ROUTE_WORDS = frozenset({
     "intravenous", "iv", "oral", "orally", "intramuscular", "im", "subcutaneous",
     "sc", "topical", "inhaled", "intranasal", "sublingual", "rectal",
 })
 
 
+def _is_unit(token: str) -> bool:
+    """"mg", "IU", or a per-unit form such as "mg/kg"."""
+    return token.lower().split("/", 1)[0] in _UNIT_WORDS
+
+
 def _bare_intervention(intervention: str) -> str:
     """``intervention`` without dose and route words; unchanged when
     nothing else is left."""
-    kept = [
-        t for t in intervention.split()
-        if t.lower() not in _DOSE_ROUTE_WORDS and not _DOSE_TOKEN_RE.fullmatch(t)
-    ]
-    return " ".join(kept) or intervention
+    tokens = intervention.split()
+    dropped: set[int] = set()
+    for i, token in enumerate(tokens):
+        if token.lower() in _ROUTE_WORDS or _DOSED_NUMBER_RE.fullmatch(token):
+            dropped.add(i)
+        elif _NUMBER_RE.fullmatch(token) and i + 1 < len(tokens) and _is_unit(tokens[i + 1]):
+            dropped.update((i, i + 1))
+    return " ".join(t for i, t in enumerate(tokens) if i not in dropped) or intervention
 
 logger = logging.getLogger(__name__)
 
