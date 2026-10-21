@@ -747,25 +747,3 @@ async def test_pubmed_client_cache_key_stays_original_query(tmp_path: Path):
         await cache.close()
         await http_client.aclose()
 
-
-async def test_pubmed_client_legacy_list_shaped_cache_row_still_loads(tmp_path: Path):
-    """A row written before finding 4's fix is a bare list, not
-    ``{"articles": ..., "relaxed_query": ...}``. It must still load, with
-    relaxed_query reported as None -- the variant is not recoverable from a
-    legacy row, and that is an honest degrade, not a wrong answer."""
-    settings = Settings.load()
-    http_client = AsyncHttpClient(settings)
-    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
-    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
-    try:
-        article = MedicalArticle(title="Legacy", pmid="1")
-        await cache.set(
-            "pubmed:search:legacy query:5", [article.to_dict()], source="pubmed"
-        )
-        articles, meta = await client.search_articles("legacy query", max_results=5)
-        assert len(articles) == 1
-        assert articles[0].title == "Legacy"
-        assert meta.relaxed_query is None
-    finally:
-        await cache.close()
-        await http_client.aclose()

@@ -416,7 +416,7 @@ class PediatricsEngine:
         self,
         query: str,
     ) -> tuple[list[PediatricGuideline], CacheMetadata]:
-        cache_key = f"bright_futures:{query}"
+        cache_key = f"bright_futures:v2:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [PediatricGuideline.from_dict(d) for d in cached_data], meta
@@ -466,7 +466,7 @@ class PediatricsEngine:
         self,
         query: str,
     ) -> tuple[list[PediatricGuideline], CacheMetadata]:
-        cache_key = f"aap_guidelines:{query}"
+        cache_key = f"aap_guidelines:v2:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [PediatricGuideline.from_dict(d) for d in cached_data], meta
@@ -555,8 +555,9 @@ class PediatricsEngine:
         max_results: int = 10,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
         # v2: rows written before the journal filter survived relaxation hold
-        # unfiltered PubMed results.
-        cache_key = f"pediatric_journals:v2:{query}:{max_results}"
+        # unfiltered PubMed results. v3: rows written before the PubMed parser
+        # delegation hold DateCompleted years and cited references' DOIs.
+        cache_key = f"pediatric_journals:v3:{query}:{max_results}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta

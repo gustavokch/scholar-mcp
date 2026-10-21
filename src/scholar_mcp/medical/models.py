@@ -196,6 +196,8 @@ class MedicalArticle:
     full_text: str | None = None
     source_database: str = "PubMed"
     score: float | None = None  # set by rank_medical_articles
+    study_type: str | None = None  # PubMed PublicationType list, "; "-joined
+    evidence_grade: str | None = None  # classify_evidence_grade over study_type
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

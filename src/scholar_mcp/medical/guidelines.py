@@ -155,7 +155,7 @@ class GuidelinesEngine:
         query: str,
         organization: str | None = None,
     ) -> tuple[list[ClinicalGuideline], CacheMetadata]:
-        cache_key = f"guidelines:v2:{query}:{organization}"
+        cache_key = f"guidelines:v3:{query}:{organization}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [ClinicalGuideline.from_dict(d) for d in cached_data], meta
