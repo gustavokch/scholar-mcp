@@ -146,6 +146,71 @@ async def test_get_child_health_statistics(tmp_path: Path):
     await http_client.aclose()
 
 
+def _bra_sex_rows(base: float) -> dict:
+    """Live GHO row shape: sex in Dim1Type/Dim1, three sexes, two years, the
+    older year first so the response order cannot pick the answer."""
+    rows = []
+    for year, bump in (("2022", 0.0), ("2023", 1.0)):
+        for dim, offset in (("SEX_FMLE", 2.0), ("SEX_MLE", -2.0), ("SEX_BTSX", 0.0)):
+            rows.append(
+                {
+                    "SpatialDim": "BRA",
+                    "TimeDim": year,
+                    "Dim1Type": "SEX",
+                    "Dim1": dim,
+                    "Dim2Type": "AGEGROUP",
+                    "Dim2": "YEARS18-PLUS",
+                    "NumericValue": base + bump + offset,
+                }
+            )
+    return {"value": rows}
+
+
+def _assert_latest_bra_slices(records, base: float) -> None:
+    assert [(r.time_dim, r.sex, r.numeric_value) for r in records] == [
+        ("2023", "Both sexes", base + 1.0),
+        ("2023", "Female", base + 3.0),
+        ("2023", "Male", base - 1.0),
+    ]
+    assert {r.age_group for r in records} == {"YEARS18-PLUS"}
+
+
+@respx.mock
+async def test_get_health_statistics_keeps_latest_year_per_sex(tmp_path: Path):
+    client, cache, http_client = _client(tmp_path)
+    respx.get(f"{GHO_BASE}/Indicator").respond(
+        json={"value": [{"IndicatorCode": "WHOSIS_000001", "IndicatorName": "Life expectancy"}]}
+    )
+    route = respx.get(f"{GHO_BASE}/WHOSIS_000001").respond(json=_bra_sex_rows(75.0))
+    try:
+        records, _ = await client.get_health_statistics("life expectancy", country="BRA", limit=5)
+        _assert_latest_bra_slices(records, 75.0)
+        assert route.calls.last.request.url.params["$orderby"] == "TimeDim desc"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_child_health_statistics_keeps_latest_year_per_sex(tmp_path: Path):
+    client, cache, http_client = _client(tmp_path)
+    from scholar_mcp.medical.who import WHO_CHILD_HEALTH_INDICATORS
+
+    route = respx.get(f"{GHO_BASE}/MDG_0000000001").respond(json=_bra_sex_rows(12.0))
+    for code in WHO_CHILD_HEALTH_INDICATORS:
+        if code != "MDG_0000000001":
+            respx.get(f"{GHO_BASE}/{code}").respond(json={"value": []})
+    try:
+        records, _ = await client.get_child_health_statistics(
+            "infant mortality", country="BRA", limit=3
+        )
+        _assert_latest_bra_slices(records, 12.0)
+        assert route.calls.last.request.url.params["$orderby"] == "TimeDim desc"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @respx.mock
 async def test_get_health_statistics_marks_error_and_skips_cache_on_failure(tmp_path: Path):
     client, cache, http_client = _client(tmp_path)

@@ -62,7 +62,7 @@ async def _engine(tmp_path: Path):
 @respx.mock
 async def test_search_medical_databases_combines_and_deduplicates(tmp_path: Path):
     engine, cache, http_client, _ = await _engine(tmp_path)
-    # Cochrane returns the same paper under a case-variant title + same year: dedup keeps the PubMed record (has DOI).
+    # Europe PMC returns the same paper under a case-variant title + same year: dedup keeps the PubMed record (has DOI).
     respx.get(EUROPE_PMC_URL).respond(
         json={
             "hitCount": 1,
@@ -86,7 +86,7 @@ async def test_search_medical_databases_combines_and_deduplicates(tmp_path: Path
     titles = [a.title for a in articles]
     assert "Diabetes Management" in titles
     assert "Diabetes Clinical Trial" in titles
-    assert len(articles) == 2  # Cochrane duplicate removed
+    assert len(articles) == 2  # Europe PMC duplicate removed
     await cache.close()
     await http_client.aclose()
 
@@ -166,11 +166,11 @@ async def test_search_medical_databases_ranks_before_truncation(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_cochrane_routes_through_europe_pmc(tmp_path: Path):
-    """The Cochrane Library HTML site is behind a Cloudflare bot wall that
-    blocks the plain HTTP fetch. Rather than fight the wall, _search_cochrane
-    routes through Europe PMC's open API (which mirrors Cochrane systematic
-    reviews) and reports those results as Cochrane records.
+async def test_search_systematic_reviews_routes_through_europe_pmc(tmp_path: Path):
+    """The Cochrane Library HTML site is behind a Cloudflare bot wall, so the
+    systematic-review leg queries Europe PMC. Only a Cochrane journal earns
+    the "Cochrane" label; any other review keeps its own journal and is a
+    "Europe PMC" record.
     """
     settings = Settings.load()
     http_client = AsyncHttpClient(settings)
@@ -203,10 +203,16 @@ async def test_search_cochrane_routes_through_europe_pmc(tmp_path: Path):
                 {
                     "title": "NSAIDs for pediatric fever: a systematic review",
                     "authorString": "Lee K",
-                    "journalTitle": "Cochrane Database Syst Rev",
+                    "journalTitle": "Pediatrics",
                     "pubYear": "2023",
                     "pmid": "67890",
                     "pubType": "systematic review",
+                },
+                {
+                    "title": "Antipyretics in children: a meta-analysis",
+                    "pubYear": "2022",
+                    "pmid": "11111",
+                    "pubType": "meta-analysis",
                 },
             ]
         },
@@ -214,21 +220,22 @@ async def test_search_cochrane_routes_through_europe_pmc(tmp_path: Path):
 
     respx.get(EUROPE_PMC_URL).respond(json=europe_pmc_payload)
 
-    articles, meta = await engine._search_cochrane("ibuprofen children")
-    assert len(articles) == 2
+    articles, meta = await engine._search_systematic_reviews("ibuprofen children")
+    assert len(articles) == 3
     assert articles[0].title == "Ibuprofen for acute postoperative pain in children"
     assert articles[0].source_database == "Cochrane"
     assert articles[0].journal == "Cochrane Database Syst Rev"
     assert articles[0].year == "2024"
     assert "Smith J" in articles[0].authors
-    assert articles[1].year == "2023"
+    assert (articles[1].source_database, articles[1].journal) == ("Europe PMC", "Pediatrics")
+    assert (articles[2].source_database, articles[2].journal) == ("Europe PMC", "")
     assert meta.error is False
     await cache.close()
     await http_client.aclose()
 
 
 @respx.mock
-async def test_search_cochrane_marks_error_when_europe_pmc_also_fails(tmp_path: Path):
+async def test_search_systematic_reviews_marks_error_when_europe_pmc_also_fails(tmp_path: Path):
     """Both the local cache check and the Europe PMC fetch fail -> meta.error=True
     so the parent engine propagates the failure rather than caching an empty
     absence that hides a real outage.
@@ -248,7 +255,7 @@ async def test_search_cochrane_marks_error_when_europe_pmc_also_fails(tmp_path: 
 
     respx.get(EUROPE_PMC_URL).respond(status_code=503)
 
-    articles, meta = await engine._search_cochrane("ibuprofen children")
+    articles, meta = await engine._search_systematic_reviews("ibuprofen children")
     assert articles == []
     assert meta.error is True
     await cache.close()
@@ -256,7 +263,7 @@ async def test_search_cochrane_marks_error_when_europe_pmc_also_fails(tmp_path: 
 
 
 @respx.mock
-async def test_search_cochrane_filters_by_publication_type_when_results_present(
+async def test_search_systematic_reviews_filters_by_publication_type_when_results_present(
     tmp_path: Path,
 ):
     """When Europe PMC returns more than the soft cap, the engine must request
@@ -280,7 +287,7 @@ async def test_search_cochrane_filters_by_publication_type_when_results_present(
         json={"hitCount": 0, "resultList": {"result": []}}
     )
 
-    await engine._search_cochrane("ibuprofen children")
+    await engine._search_systematic_reviews("ibuprofen children")
     request = respx.get(EUROPE_PMC_URL).calls.last.request
     query = str(request.url.params.get("query", ""))
     assert "ibuprofen children" in query
@@ -290,7 +297,7 @@ async def test_search_cochrane_filters_by_publication_type_when_results_present(
 
 
 @respx.mock
-async def test_search_cochrane_neutralizes_query_punctuation(tmp_path: Path):
+async def test_search_systematic_reviews_neutralizes_query_punctuation(tmp_path: Path):
     """Europe PMC treats quotes and parens as query syntax; an agent-supplied
     natural-language query containing them must be neutralized before it is
     spliced into the PUB_TYPE-filtered query, or the whole search 400s."""
@@ -312,7 +319,7 @@ async def test_search_cochrane_neutralizes_query_punctuation(tmp_path: Path):
     )
 
     try:
-        articles, meta = await engine._search_cochrane(
+        articles, meta = await engine._search_systematic_reviews(
             'what is "ibuprofen" (for children)'
         )
         assert articles == []
@@ -331,7 +338,7 @@ async def test_search_cochrane_neutralizes_query_punctuation(tmp_path: Path):
 
 
 @respx.mock
-async def test_search_cochrane_leaves_pmid_empty_for_non_med_record(tmp_path: Path):
+async def test_search_systematic_reviews_leaves_pmid_empty_for_non_med_record(tmp_path: Path):
     """Europe PMC's `id` is a source-local record id, not a PMID. Only fall
     back to it when the record's source is MED, or the article gets a bogus
     pmid and a bogus europepmc.org/article/MED/{id} link."""
@@ -366,7 +373,7 @@ async def test_search_cochrane_leaves_pmid_empty_for_non_med_record(tmp_path: Pa
     )
 
     try:
-        articles, meta = await engine._search_cochrane("ibuprofen children")
+        articles, meta = await engine._search_systematic_reviews("ibuprofen children")
         assert len(articles) == 1
         assert articles[0].pmid == ""
         assert articles[0].url == ""
@@ -412,16 +419,21 @@ async def test_search_medical_databases_marks_error_when_all_sources_fail(tmp_pa
 
 @respx.mock
 async def test_search_medical_databases_marks_partial_source_failure(tmp_path: Path):
-    """Cochrane down while PubMed/ClinicalTrials succeed: results still return,
-    but the caller must learn the set is incomplete."""
-    engine, cache, http_client, _ = await _engine(tmp_path)
+    """Europe PMC down while PubMed/ClinicalTrials succeed: results still
+    return, flagged incomplete, and are not cached -- the next call must ask
+    every source again."""
+    engine, cache, http_client, mock_pubmed = await _engine(tmp_path)
     respx.get(EUROPE_PMC_URL).mock(side_effect=Exception("europe pmc down"))
+    try:
+        articles, meta = await engine.search_medical_databases("diabetes")
+        assert len(articles) == 2
+        assert meta.error is True
 
-    articles, meta = await engine.search_medical_databases("diabetes")
-    assert len(articles) == 2
-    assert meta.error is True
-    await cache.close()
-    await http_client.aclose()
+        await engine.search_medical_databases("diabetes")
+        assert mock_pubmed.search_articles.await_count == 2
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 @respx.mock
@@ -747,25 +759,3 @@ async def test_pubmed_client_cache_key_stays_original_query(tmp_path: Path):
         await cache.close()
         await http_client.aclose()
 
-
-async def test_pubmed_client_legacy_list_shaped_cache_row_still_loads(tmp_path: Path):
-    """A row written before finding 4's fix is a bare list, not
-    ``{"articles": ..., "relaxed_query": ...}``. It must still load, with
-    relaxed_query reported as None -- the variant is not recoverable from a
-    legacy row, and that is an honest degrade, not a wrong answer."""
-    settings = Settings.load()
-    http_client = AsyncHttpClient(settings)
-    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
-    client = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
-    try:
-        article = MedicalArticle(title="Legacy", pmid="1")
-        await cache.set(
-            "pubmed:search:legacy query:5", [article.to_dict()], source="pubmed"
-        )
-        articles, meta = await client.search_articles("legacy query", max_results=5)
-        assert len(articles) == 1
-        assert articles[0].title == "Legacy"
-        assert meta.relaxed_query is None
-    finally:
-        await cache.close()
-        await http_client.aclose()

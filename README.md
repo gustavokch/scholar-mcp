@@ -213,10 +213,7 @@ The `journal_impact` signal reads `src/scholar_mcp/data/scimago_sjr.json`, gener
 
 `scholar-mcp` includes native medical intelligence tools backed by openFDA, RxNav, WHO Global Health Observatory, ClinicalTrials.gov, PubMed, and AAP clinical guidelines with persistent SQLite caching and cross-source deduplication.
 
-Install with the optional `medical` extra to enable browser-based scraping fallbacks for Cochrane and AAP portals:
-```bash
-pip install 'scholar-mcp[medical]'
-```
+The AAP guideline and Brazilian MoH (BVS) searches fall back to a headless browser (`camoufox`) when a plain HTTP request hits a Cloudflare or 403 block. `camoufox` is a core dependency, so no extra install is needed; `pip install 'scholar-mcp[medical]'` is kept as a no-op alias for older setups. Set `ENABLE_BROWSER_FALLBACK=false` to turn the fallback off. Cochrane is not a browser target: `search_medical_databases` reaches its reviews through the Europe PMC API.
 
 ### Medical Tool Suite
 
@@ -236,7 +233,8 @@ pip install 'scholar-mcp[medical]'
 | `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
 | `search_brazil_moh_guidelines` | BVS / iAHx & gov.br | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS, PCDT guidelines, and "Saúde de A a Z" surveillance manuals from SVSA and guias-e-manuais publication trees. Supported `collection` options: `all` (default), `brisa`, `pcdt`, and `az`. |
 | `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
-| `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
+| `search_clinical_trials` | ClinicalTrials.gov | Search registered trials. Optional `intervention` and `condition` go to `query.intr` / `query.cond`; with an `intervention`, only trials that give it are kept. |
+| `search_medical_databases` | PubMed, ClinicalTrials.gov, Europe PMC | Cross-database search of PubMed, ClinicalTrials.gov and Europe PMC systematic reviews/meta-analyses with fuzzy deduplication. A review is labelled "Cochrane" only when its journal is a Cochrane title. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
 

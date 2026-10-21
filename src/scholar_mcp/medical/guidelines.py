@@ -35,23 +35,64 @@ KNOWN_GUIDELINE_JOURNALS = [
     "recommendations",
 ]
 
-ORG_EXTRACTION_PATTERNS = [
-    r"(American|European|National|International|World|Global).*?"
-    r"(Association|College|Society|Academy|Institute|Foundation|Organization|Committee|Ministry)(?:\s+of\s+[A-Za-z]+)?",
-    r"(World Health Organization|WHO)",
-    r"(Centers for Disease Control|CDC)",
-    r"(National Institutes of Health|NIH)",
-]
+# Guideline bodies matched by name: (display name, full names, acronyms).
+# Full names match case-insensitively; acronyms only in capitals and as whole
+# tokens, so "who", "accuracy" and "Canada" never count. A token boundary
+# admits a slash, so a joint "AHA/ACC/ADA" title names all three.
+KNOWN_ORGANIZATIONS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("American Academy of Pediatrics",
+     ("american academy of pediatrics", "american academy pediatric"), ("AAP",)),
+    ("World Health Organization", ("world health organization",), ("WHO",)),
+    ("Centers for Disease Control and Prevention",
+     ("centers for disease control and prevention", "centers for disease control"), ("CDC",)),
+    ("National Institutes of Health", ("national institutes of health",), ("NIH",)),
+    ("American Heart Association", ("american heart association",), ("AHA",)),
+    ("American College of Cardiology", ("american college of cardiology",), ("ACC",)),
+    ("American Diabetes Association", ("american diabetes association",), ("ADA",)),
+    ("American College of Physicians", ("american college of physicians",), ("ACP",)),
+    ("American College of Chest Physicians", ("american college of chest physicians",), ()),
+    ("European Society of Cardiology", ("european society of cardiology",), ("ESC",)),
+    ("Infectious Diseases Society of America",
+     ("infectious diseases society of america",), ("IDSA",)),
+    ("American College of Obstetricians and Gynecologists",
+     ("american college of obstetricians and gynecologists",), ("ACOG",)),
+    ("US Preventive Services Task Force",
+     ("us preventive services task force", "u.s. preventive services task force"), ("USPSTF",)),
+    ("National Institute for Health and Care Excellence",
+     ("national institute for health and care excellence",), ("NICE",)),
+    ("Endocrine Society", ("endocrine society",), ()),
+)
 
-ORG_ABBREVIATIONS = {
-    "aap": ["american academy of pediatrics", "american academy pediatric"],
-    "who": ["world health organization"],
-    "cdc": ["centers for disease control"],
-    "aha": ["american heart association"],
-    "acc": ["american college of cardiology"],
-    "ada": ["american diabetes association"],
-    "acp": ["american college of physicians"],
-}
+
+def _full_name_re(name: str) -> re.Pattern[str]:
+    return re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+
+
+def _acronym_re(acronym: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![A-Za-z0-9]){re.escape(acronym)}(?![A-Za-z0-9])")
+
+
+_KNOWN_ORG_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = tuple(
+    (display, tuple(map(_full_name_re, names)) + tuple(map(_acronym_re, acronyms)))
+    for display, names, acronyms in KNOWN_ORGANIZATIONS
+)
+
+# Bodies outside the table: a capitalised name, case-sensitive so
+# "worldwide, the practices..." never starts one, and confined to name words
+# so it cannot run across a clause. The "of ..." tail keeps "European Society
+# of Cardiology" whole and stops before document words ("... Medicine
+# Clinical Practice Guideline", "Consensus Statement").
+_NAME_WORD = (
+    r"(?!(?:Guidelines?|Guidance|Consensus|Statement|Recommendations?|Update|Report"
+    r"|Position|Expert|Clinical\s+Practice)\b)[A-Z][\w'-]*"
+)
+_GENERIC_ORG_RE = re.compile(
+    r"\b(?:American|European|National|International|World|Global|Canadian|British)"
+    r"\s+(?:[A-Z][\w'-]*\s+){0,8}?"
+    r"(?:Association|College|Society|Academy|Institute|Foundation|Organi[sz]ation"
+    r"|Committee|Ministry|Federation|Council|Physicians)\b"
+    rf"(?:\s+(?:of|on|for)(?:\s+(?:the\s+|and\s+)?{_NAME_WORD})+)?"
+)
 
 MIN_SCORE_THRESHOLD = 2.5
 LAYER_THRESHOLD = 5
@@ -68,26 +109,89 @@ def _is_aap_journal(journal: str) -> bool:
     return journal.strip().lower().startswith("pediatrics")
 
 
+def _organizations_in(text: str) -> list[str]:
+    """Bodies named in ``text``, in order of first mention: table bodies by
+    display name, then capitalised names in spans no table body touches
+    ("ACC ... American College of Cardiology Solution Set Oversight
+    Committee" names the ACC once). Overlapping table matches keep the
+    longest, so "American College of Physicians" never counts inside
+    "American College of Chest Physicians"."""
+    # (start, end, priority, name); priority 0 = table body, 1 = generic.
+    hits: list[tuple[int, int, int, str]] = []
+    for display, patterns in _KNOWN_ORG_PATTERNS:
+        for pat in patterns:
+            hits.extend((m.start(), m.end(), 0, display) for m in pat.finditer(text))
+    hits.extend(
+        (m.start(), m.end(), 1, " ".join(m.group(0).split()))
+        for m in _GENERIC_ORG_RE.finditer(text)
+    )
+    hits.sort(key=lambda h: (h[2], h[0] - h[1], h[0]))
+    kept: list[tuple[int, int, int, str]] = []
+    for hit in hits:
+        if not any(hit[0] < k[1] and hit[1] > k[0] for k in kept):
+            kept.append(hit)
+    names: list[str] = []
+    for *_, name in sorted(kept):
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def extract_organization(article: MedicalArticle) -> str:
-    org = "Unknown Organization"
-    if article.journal:
-        org = article.journal
+    """The issuing body(ies) named in the title, else in the abstract, joined
+    with " / " for a joint guideline. Falls back to the journal, then
+    "Unknown Organization"."""
+    for text in (article.title, article.abstract):
+        names = _organizations_in(text or "")
+        if names:
+            return " / ".join(names)
+    return article.journal or "Unknown Organization"
 
-    # Search in abstract for prominent organizational patterns
-    if article.abstract:
-        for pat in ORG_EXTRACTION_PATTERNS:
-            match = re.search(pat, article.abstract, flags=re.IGNORECASE)
-            if match:
-                return match.group(0).strip()
 
-    # Search in title
-    if org == "Unknown Organization" and article.title:
-        for pat in ORG_EXTRACTION_PATTERNS:
-            match = re.search(pat, article.title, flags=re.IGNORECASE)
-            if match:
-                return match.group(0).strip()
+def organization_matches(organization: str, text: str) -> bool:
+    """True when ``text`` names ``organization``, with the extraction's rules:
+    word-bounded full names, capital-only acronyms."""
+    wanted = organization.strip()
+    lowered = wanted.lower()
+    for display, names, acronyms in KNOWN_ORGANIZATIONS:
+        if lowered == display.lower() or lowered in names or lowered in (
+            a.lower() for a in acronyms
+        ):
+            patterns = [_full_name_re(display), *map(_full_name_re, names),
+                        *map(_acronym_re, acronyms)]
+            return any(p.search(text) for p in patterns)
+    if wanted.isupper():
+        return bool(_acronym_re(wanted).search(text))
+    return bool(_full_name_re(wanted).search(text))
 
-    return org
+
+_DOI_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/")
+_REPORT_TAIL_RE = re.compile(r"\ba report of the\b.*$", re.IGNORECASE | re.DOTALL)
+
+
+def guideline_key(title: str) -> str:
+    """Core guideline title: lowercased, without the simultaneous-publication
+    "A Report of the ..." tail or punctuation."""
+    core = _REPORT_TAIL_RE.sub("", title.lower())
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", core)).strip()
+
+
+def same_guideline(
+    title_a: str, title_b: str, doi_a: str | None = None, doi_b: str | None = None
+) -> bool:
+    """One guideline published twice (JACC and Circulation): same DOI, same
+    title key, or one key of at least 40 characters prefixing the other."""
+    norm_a = _DOI_PREFIX_RE.sub("", (doi_a or "").strip().lower())
+    norm_b = _DOI_PREFIX_RE.sub("", (doi_b or "").strip().lower())
+    if norm_a and norm_a == norm_b:
+        return True
+    key_a, key_b = guideline_key(title_a), guideline_key(title_b)
+    if not key_a or not key_b:
+        return False
+    if key_a == key_b:
+        return True
+    shorter, longer = sorted((key_a, key_b), key=len)
+    return len(shorter) >= 40 and longer.startswith(shorter)
 
 
 def calculate_guideline_score(
@@ -124,21 +228,6 @@ def calculate_guideline_score(
     )
 
 
-def resolve_organization_aliases(organization: str) -> list[str]:
-    org_lower = organization.lower().strip()
-    aliases = {org_lower}
-
-    # Abbreviation given -> add its full-name expansions.
-    aliases.update(ORG_ABBREVIATIONS.get(org_lower, []))
-
-    # Full name given -> add the abbreviation it expands from.
-    for abbrev, full_names in ORG_ABBREVIATIONS.items():
-        if org_lower in full_names or any(org_lower in fn or fn in org_lower for fn in full_names):
-            aliases.add(abbrev)
-
-    return list(aliases)
-
-
 class GuidelinesEngine:
     def __init__(
         self,
@@ -155,7 +244,9 @@ class GuidelinesEngine:
         query: str,
         organization: str | None = None,
     ) -> tuple[list[ClinicalGuideline], CacheMetadata]:
-        cache_key = f"guidelines:v2:{query}:{organization}"
+        # v3: older rows hold DateCompleted years, substring-matched
+        # organisations ("who" in running text) and journal-duplicate copies.
+        cache_key = f"guidelines:v3:{query}:{organization}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [ClinicalGuideline.from_dict(d) for d in cached_data], meta
@@ -233,21 +324,32 @@ class GuidelinesEngine:
 
         # Filter by organization if specified
         if organization:
-            aliases = resolve_organization_aliases(organization)
-
+            requested_aap = organization_matches(organization, "AAP")
             filtered_candidates: list[tuple[MedicalArticle, bool, bool]] = []
             for art, has_pub, from_kw in candidates:
-                extracted_org = extract_organization(art).lower()
-                art_text = f"{extracted_org} {art.title.lower()} {art.abstract.lower()} {art.journal.lower()}"
-                if any(alias in art_text for alias in aliases):
+                art_text = f"{extract_organization(art)}\n{art.title}\n{art.abstract}\n{art.journal}"
+                if organization_matches(organization, art_text):
                     filtered_candidates.append((art, has_pub, from_kw))
                     continue
                 # AAP policy statements carry collective authors ("COMMITTEE
                 # ON INFECTIOUS DISEASES") and no "AAP" string anywhere, but
                 # they publish in Pediatrics — the journal is the org signal.
-                if "aap" in aliases and _is_aap_journal(art.journal):
+                if requested_aap and _is_aap_journal(art.journal):
                     filtered_candidates.append((art, has_pub, from_kw))
             candidates = filtered_candidates
+
+        # One guideline published in two journals is one candidate. The merge
+        # runs after the organisation filter, so the kept copy is the first
+        # (Layer 1, NCBI relevance order) copy that passed it.
+        unique_candidates: list[tuple[MedicalArticle, bool, bool]] = []
+        for cand in candidates:
+            art = cand[0]
+            if not any(
+                same_guideline(art.title, kept.title, art.doi, kept.doi)
+                for kept, _, _ in unique_candidates
+            ):
+                unique_candidates.append(cand)
+        candidates = unique_candidates
 
         # Score and build guidelines
         guidelines: list[ClinicalGuideline] = []

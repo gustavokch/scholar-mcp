@@ -537,10 +537,99 @@ async def test_get_drug_by_ndc_404_non_json_body_is_absence_not_error(tmp_path: 
     drug, meta = await client.get_drug_by_ndc("99999-999")
     assert drug is None
     assert meta.error is False
-    assert route.call_count == 2  # quoted + unquoted variants both tried
+    assert route.call_count == 1
 
     await cache.close()
     await http_client.aclose()
+
+
+def _search_params(route) -> list[str]:
+    return [call.request.url.params["search"] for call in route.calls]
+
+
+@respx.mock
+async def test_get_drug_by_ndc_rejects_label_without_that_ndc(tmp_path: Path):
+    """openFDA can return a label whose NDCs differ from the request (the
+    old unquoted fallback matched any labeler's '…-2412'). It must not be
+    returned or cached as the answer."""
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(json=_label_payload("Torsemide", ndc="72162-2412"))
+    try:
+        drug, meta = await client.get_drug_by_ndc("0591-2412")
+        assert drug is None
+        assert meta.error is False
+        assert _search_params(route) == ['openfda.product_ndc:"0591-2412"']
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_resolves_package_ndc(tmp_path: Path):
+    client, cache, http_client = await _make_client(tmp_path)
+    payload = _label_payload("ZITUVIMET", ndc="70771-1859")
+    payload["results"][0]["openfda"]["package_ndc"] = ["70771-1859-6", "70771-1859-8"]
+    route = respx.get(FDA_URL).respond(json=payload)
+    try:
+        drug, _ = await client.get_drug_by_ndc("70771-1859-6")
+        assert drug is not None
+        assert drug.openfda.brand_name == ["ZITUVIMET"]
+        assert _search_params(route) == ['openfda.package_ndc:"70771-1859-6"']
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("ndc", "expected"),
+    [
+        # 10 digits: every 4-4-2 / 5-3-2 / 5-4-1 reading.
+        ("7077118596", ["7077-1185-96", "70771-185-96", "70771-1859-6"]),
+        # 11-digit billing form: only the readings whose padding zero exists.
+        ("70771185906", ["70771-1859-6"]),
+        ("70771-1859-06", ["70771-1859-6"]),
+        ("00591241201", ["0591-2412-01", "00591-2412-1"]),
+    ],
+)
+@respx.mock
+async def test_get_drug_by_ndc_unhyphenated_queries_every_reading(tmp_path: Path, ndc, expected):
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, json={"error": {"code": "NOT_FOUND"}})
+    try:
+        await client.get_drug_by_ndc(ndc)
+        assert _search_params(route) == [
+            " OR ".join(f'openfda.package_ndc:"{c}"' for c in expected)
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_never_sends_unquoted_clause(tmp_path: Path):
+    """A quoted miss must not fall back to the unquoted field query."""
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(status_code=404, json={"error": {"code": "NOT_FOUND"}})
+    try:
+        await client.get_drug_by_ndc("0591-2412")
+        assert _search_params(route) == ['openfda.product_ndc:"0591-2412"']
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_drug_by_ndc_non_ndc_input_sends_nothing(tmp_path: Path):
+    client, cache, http_client = await _make_client(tmp_path)
+    route = respx.get(FDA_URL).respond(json=_label_payload("Advil"))
+    try:
+        drug, meta = await client.get_drug_by_ndc("ibuprofen")
+        assert drug is None
+        assert meta.error is False
+        assert route.call_count == 0
+    finally:
+        await cache.close()
+        await http_client.aclose()
 
 
 def test_label_names_drug_ignores_product_descriptor_words():
