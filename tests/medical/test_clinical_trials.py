@@ -251,6 +251,47 @@ async def test_search_clinical_trials_keeps_trials_that_give_the_intervention(tm
 
 
 @pytest.mark.parametrize(
+    ("intervention", "expected_intr", "expected"),
+    [
+        # Dose and route words are dropped; a salt form still names the drug.
+        ("metformin 500 mg", "metformin", ["NCT3", "NCT4", "NCT1"]),
+        ("oral metformin", "metformin", ["NCT3", "NCT4", "NCT1"]),
+        ("metformin hydrochloride", "metformin hydrochloride", ["NCT3", "NCT4", "NCT1"]),
+        # No fetched trial names it: keep the fetched trials (UNKNOWN last)
+        # instead of caching an empty answer for the whole TTL.
+        ("Fortamet", "Fortamet", ["NCT2", "NCT3", "NCT4", "NCT1"]),
+    ],
+)
+@respx.mock
+async def test_search_clinical_trials_over_specific_intervention_keeps_hits(
+    tmp_path: Path, intervention: str, expected_intr: str, expected: list[str]
+):
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    client = ClinicalTrialsClient(http_client=http_client, cache=cache, settings=settings)
+    try:
+        route = respx.get(CT_URL).respond(
+            json={
+                "studies": [
+                    _study("NCT1", "UNKNOWN", [{"name": "Metformin Hydrochloride"}]),
+                    _study("NCT2", "COMPLETED", [{"name": "Insulin"}]),
+                    _study("NCT3", "RECRUITING", [{"name": "Glucophage", "otherNames": ["metformin"]}]),
+                    _study("NCT4", "COMPLETED", [{"name": "Metformin"}]),
+                ]
+            }
+        )
+        articles, _ = await client.search_clinical_trials(
+            "gestational diabetes", limit=5, intervention=intervention
+        )
+        assert route.calls.last.request.url.params["query.intr"] == expected_intr
+        assert [a.nct_id for a in articles] == expected
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
     ("input_query", "max_terms", "expected"),
     [
         ("", 10, ""),

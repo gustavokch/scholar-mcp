@@ -25,6 +25,26 @@ CT_INTERVENTION_POOL = 50
 _TERM_STOPWORDS = ENGLISH_STOPWORDS | {"vs", "versus"}
 _WORD_RE = re.compile(r"[\w'-]+")
 
+# Dose and route words around a drug name ("metformin 500 mg", "intravenous
+# tranexamic acid"): ClinicalTrials.gov intervention names rarely carry them,
+# so they are dropped from query.intr and from the intervention match.
+_DOSE_TOKEN_RE = re.compile(r"\d[\d.,]*(?:mg|mcg|µg|ug|g|ml|iu|%)?(?:/\w+)?", re.IGNORECASE)
+_DOSE_ROUTE_WORDS = frozenset({
+    "mg", "mcg", "µg", "ug", "g", "ml", "iu", "unit", "units",
+    "intravenous", "iv", "oral", "orally", "intramuscular", "im", "subcutaneous",
+    "sc", "topical", "inhaled", "intranasal", "sublingual", "rectal",
+})
+
+
+def _bare_intervention(intervention: str) -> str:
+    """``intervention`` without dose and route words; unchanged when
+    nothing else is left."""
+    kept = [
+        t for t in intervention.split()
+        if t.lower() not in _DOSE_ROUTE_WORDS and not _DOSE_TOKEN_RE.fullmatch(t)
+    ]
+    return " ".join(kept) or intervention
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,17 +80,29 @@ def _residual_term(query: str, intervention: str | None, condition: str | None) 
     return _cap_query_terms(" ".join(kept))
 
 
-def _names_intervention(study: dict[str, Any], intervention: str) -> bool:
-    """True when one of the study's interventions (name or other name) is
-    ``intervention`` as a whole phrase."""
-    pattern = re.compile(
-        r"\b" + r"\s+".join(map(re.escape, intervention.split())) + r"\b", re.IGNORECASE
+def _phrase_re(text: str) -> re.Pattern[str]:
+    return re.compile(
+        r"\b" + r"\s+".join(map(re.escape, text.split())) + r"\b", re.IGNORECASE
     )
+
+
+def _names_intervention(study: dict[str, Any], intervention: str) -> bool:
+    """True when one of the study's interventions (name or other name)
+    contains ``intervention`` as a whole phrase, or is itself a whole phrase
+    inside it: "metformin" matches "Metformin Hydrochloride", and
+    "metformin 500 mg" or "intravenous tranexamic acid" match "Metformin"
+    and "Tranexamic Acid". Names under 3 characters only match the first
+    way."""
+    wanted = _phrase_re(intervention)
     arms = (study.get("protocolSection") or {}).get("armsInterventionsModule") or {}
     for iv in arms.get("interventions") or []:
-        names = [iv.get("name") or "", *(iv.get("otherNames") or [])]
-        if any(pattern.search(n) for n in names):
-            return True
+        for name in (iv.get("name") or "", *(iv.get("otherNames") or [])):
+            if not name.strip():
+                continue
+            if wanted.search(name):
+                return True
+            if len(name.strip()) >= 3 and _phrase_re(name).search(intervention):
+                return True
     return False
 
 
@@ -127,13 +159,17 @@ class ClinicalTrialsClient:
         query.term, which ANDs every word. With them, they go to query.intr
         and query.cond and only the query's remaining words, stopwords
         removed, go to query.term. An ``intervention`` also keeps only
-        trials whose interventions name it, with status UNKNOWN last.
+        trials whose interventions name it (``_names_intervention``), with
+        status UNKNOWN last; when no fetched trial names it, the fetched
+        trials are kept, so an over-specific intervention never turns hits
+        into a cached empty answer.
         """
-        intervention = (intervention or "").strip() or None
+        raw_intervention = (intervention or "").strip()
+        intervention = _bare_intervention(raw_intervention) if raw_intervention else None
         condition = (condition or "").strip() or None
         structured = bool(intervention or condition)
         term = (
-            _residual_term(query, intervention, condition)
+            _residual_term(query, raw_intervention, condition)
             if structured
             else _cap_query_terms(query)
         )
@@ -169,7 +205,8 @@ class ClinicalTrialsClient:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         if intervention:
-            studies = [s for s in studies if _names_intervention(s, intervention)]
+            named = [s for s in studies if _names_intervention(s, intervention)]
+            studies = named or studies
             # Stable: API relevance order holds within each group.
             studies.sort(key=_is_unknown_status)
         articles = [_study_to_article(s) for s in studies[:limit]]
