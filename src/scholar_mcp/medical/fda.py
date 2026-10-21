@@ -171,6 +171,67 @@ def _label_names_drug(drug: DrugLabel, query: str) -> bool:
     )
 
 
+# Segment lengths of each 10-digit package NDC configuration (labeler-
+# product-package) and of the matching product NDC.
+_PACKAGE_SPLITS = ((4, 4, 2), (5, 3, 2), (5, 4, 1))
+_PRODUCT_SPLITS = ((4, 4), (5, 3), (5, 4))
+
+
+def _split_digits(digits: str, lengths: tuple[int, ...]) -> str:
+    parts, start = [], 0
+    for n in lengths:
+        parts.append(digits[start:start + n])
+        start += n
+    return "-".join(parts)
+
+
+def _unpad_11(digits: str) -> list[str]:
+    """10-digit package NDCs for an 11-digit (5-4-2) billing NDC: the
+    padding zero sits at the head of whichever segment was short."""
+    out = []
+    if digits[0] == "0":
+        out.append(_split_digits(digits[1:], (4, 4, 2)))
+    if digits[5] == "0":
+        out.append(_split_digits(digits[:5] + digits[6:], (5, 3, 2)))
+    if digits[9] == "0":
+        out.append(_split_digits(digits[:9] + digits[10:], (5, 4, 1)))
+    return out
+
+
+def _ndc_candidates(ndc: str) -> tuple[str, list[str]] | None:
+    """Map a user-supplied NDC to (openFDA field, hyphenated candidates).
+
+    openFDA stores product NDCs as 4-4/5-3/5-4 and package NDCs as
+    4-4-2/5-3-2/5-4-1, and only matches the exact hyphenated string.
+    Returns None for input that is not an NDC.
+    """
+    value = ndc.strip()
+    segments = value.split("-")
+    if not all(s.isdigit() for s in segments):
+        return None
+    digits = "".join(segments)
+    if len(segments) == 3:
+        if tuple(map(len, segments)) == (5, 4, 2):
+            return "package_ndc", _unpad_11(digits) or [value]
+        return "package_ndc", [value]
+    if len(segments) == 2:
+        return "product_ndc", [value]
+    if len(segments) != 1:
+        return None
+    if len(digits) == 10:
+        return "package_ndc", [_split_digits(digits, s) for s in _PACKAGE_SPLITS]
+    if len(digits) == 11:
+        candidates = _unpad_11(digits)
+        return ("package_ndc", candidates) if candidates else None
+    product = [_split_digits(digits, s) for s in _PRODUCT_SPLITS if sum(s) == len(digits)]
+    return ("product_ndc", product) if product else None
+
+
+def _label_holds_ndc(drug: DrugLabel, field: str, candidates: list[str]) -> bool:
+    held = getattr(drug.openfda, field)
+    return any(c in held for c in candidates)
+
+
 def _parse_drug_label(raw: dict[str, Any]) -> DrugLabel:
     openfda_raw = raw.get("openfda", {})
     openfda = OpenFDAData.from_dict(openfda_raw)
@@ -334,64 +395,47 @@ class FDAClient:
         self,
         ndc: str,
     ) -> tuple[DrugLabel | None, CacheMetadata]:
-        cache_key = f"fda:ndc:{ndc}"
+        """Look up the label whose openFDA record holds this exact NDC.
+
+        Only quoted, fielded queries are sent: an unquoted
+        ``openfda.product_ndc:0591-2412`` is tokenised on the hyphen and
+        matches any labeler's ``…-2412``. Every hit is re-checked against
+        the candidate NDCs before it is returned.
+        """
+        parsed = _ndc_candidates(ndc)
+        if parsed is None:
+            return None, CacheMetadata(cached=False, cache_age=0)
+        field, candidates = parsed
+
+        cache_key = f"fda:ndc:v2:{','.join(candidates)}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached:
             if cached_data is not None:
                 return DrugLabel.from_dict(cached_data), meta
             return None, meta
 
-        errored = False
-
+        search = " OR ".join(f'openfda.{field}:"{c}"' for c in candidates)
         try:
             resp = await self.http_client.get(
                 FDA_LABEL_URL,
-                params={"search": f'openfda.product_ndc:"{ndc}"', "limit": "1"},
+                params={"search": search, "limit": "5"},
                 ok_statuses={404},
             )
             if resp is None:
                 raise FetchError("fda ndc request failed")
             # A 404 here is "no such label" — genuine absence, not an error.
             # Skip body parsing: a proxy/CDN error page is not JSON.
-            if resp.status_code == 404:
-                results = []
-            else:
-                data = resp.json()
-                results = data.get("results", [])
-            if results:
-                drug = _parse_drug_label(results[0])
-                await self.cache.set(cache_key, drug.to_dict(), source="fda")
-                return drug, CacheMetadata(cached=False, cache_age=0)
+            results = [] if resp.status_code == 404 else resp.json().get("results", [])
         except Exception:
-            logger.warning("FDA exact NDC lookup failed for %r", ndc, exc_info=True)
-            errored = True
-
-        # Try fallback query without exact quotes
-        try:
-            resp = await self.http_client.get(
-                FDA_LABEL_URL,
-                params={"search": f"openfda.product_ndc:{ndc}", "limit": "1"},
-                ok_statuses={404},
-            )
-            if resp is None:
-                raise FetchError("fda ndc fallback request failed")
-            if resp.status_code == 404:
-                results = []
-            else:
-                data = resp.json()
-                results = data.get("results", [])
-            if results:
-                drug = _parse_drug_label(results[0])
-                await self.cache.set(cache_key, drug.to_dict(), source="fda")
-                return drug, CacheMetadata(cached=False, cache_age=0)
-        except Exception:
-            logger.warning("FDA fallback NDC lookup failed for %r", ndc, exc_info=True)
-            errored = True
-
-        # Only a genuine "no such label" answer is worth caching; caching a
-        # fetch failure would suppress the lookup for the whole TTL.
-        if errored:
+            # Caching a fetch failure would suppress the lookup for the whole TTL.
+            logger.warning("FDA NDC lookup failed for %r", ndc, exc_info=True)
             return None, CacheMetadata(cached=False, cache_age=0, error=True)
+
+        for raw in results:
+            drug = _parse_drug_label(raw)
+            if _label_holds_ndc(drug, field, candidates):
+                await self.cache.set(cache_key, drug.to_dict(), source="fda")
+                return drug, CacheMetadata(cached=False, cache_age=0)
 
         await self.cache.set(cache_key, None, source="fda")
         return None, CacheMetadata(cached=False, cache_age=0)

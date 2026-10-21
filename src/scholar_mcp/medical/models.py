@@ -8,6 +8,7 @@ class OpenFDAData:
     generic_name: list[str] = field(default_factory=list)
     manufacturer_name: list[str] = field(default_factory=list)
     product_ndc: list[str] = field(default_factory=list)
+    package_ndc: list[str] = field(default_factory=list)
     substance_name: list[str] = field(default_factory=list)
     route: list[str] = field(default_factory=list)
     dosage_form: list[str] = field(default_factory=list)
