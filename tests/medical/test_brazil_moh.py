@@ -2393,6 +2393,101 @@ async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
         await http_client.aclose()
 
 
+_EMPTY_BVS_PAYLOAD = json.dumps(
+    {"diaServerResponse": [{"response": {"docs": []}}]}
+)
+_DENGUE_BVS_PAYLOAD = json.dumps(
+    {
+        "diaServerResponse": [
+            {
+                "response": {
+                    "docs": [
+                        {"id": "1", "ti": "Manejo da dengue",
+                         "pais_publicacao": "^eBrasil", "da": "202401",
+                         "ur": ["https://bvsms.saude.gov.br/x.pdf"]},
+                    ]
+                }
+            }
+        ]
+    }
+)
+
+
+async def _browser_engine(tmp_path):
+    settings = Settings(
+        cache_ttl_seconds=3600,
+        enable_browser_fallback=True,
+        brazil_browser_fallback=True,
+        request_timeout=5,
+    )
+    http_client = AsyncHttpClient(
+        settings, max_retries=2, backoff_base=0.01, min_429_wait=0.0
+    )
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    return BrazilMoHEngine(http_client, cache, settings), cache, http_client
+
+
+async def test_camoufox_search_tries_relaxed_query_when_strict_is_empty(
+    tmp_path, monkeypatch
+):
+    """A multi-token AND query returns no documents; the OR-relaxed query
+    runs in the same browser session instead of the tier reporting failure."""
+    engine, cache, http_client = await _browser_engine(tmp_path)
+    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        content_script=[_EMPTY_BVS_PAYLOAD, _DENGUE_BVS_PAYLOAD],
+    )
+    try:
+        docs = await engine._camoufox_search(
+            "strict query", 10, None, fallback_composed="relaxed query"
+        )
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert attempts == [True]
+        assert len(urls) == 2
+        assert "strict%20query" in urls[0]
+        assert "relaxed%20query" in urls[1]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_skips_relaxed_query_when_strict_has_docs(
+    tmp_path, monkeypatch
+):
+    engine, cache, http_client = await _browser_engine(tmp_path)
+    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, _DENGUE_BVS_PAYLOAD
+    )
+    try:
+        docs = await engine._camoufox_search(
+            "strict query", 10, None, fallback_composed="relaxed query"
+        )
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert len(urls) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_returns_empty_when_both_queries_are_empty(
+    tmp_path, monkeypatch
+):
+    engine, cache, http_client = await _browser_engine(tmp_path)
+    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch, _EMPTY_BVS_PAYLOAD
+    )
+    try:
+        docs = await engine._camoufox_search(
+            "strict query", 10, None, fallback_composed="relaxed query"
+        )
+        assert docs == []
+        assert attempts == [True]
+        assert len(urls) == 2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_pcdt_error_does_not_launch_browser_when_bvs_healthy(tmp_path, monkeypatch):
     """The browser tier answers BVS failures (CDN 403s), not a PCDT outage.
     A PCDT error with a healthy BVS that legitimately returned zero records
@@ -3781,18 +3876,44 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_reads_once_when_the_goto_was_not_aborted(
+async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
     tmp_path, monkeypatch
 ):
-    """Without an abort nothing says the interstitial is mid-challenge: a
-    shield page is classified at once, not waited on for the whole budget."""
+    """Live BVS answers a clean goto with the 403 interstitial and swaps in
+    the payload once the challenge clears; reading once would classify the
+    interstitial as a block and lose the search."""
     engine, cache, http_client = await _camoufox_engine(tmp_path)
     _attempts, _urls, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch,
+        content_script=[_BVS_INTERSTITIAL, _BVS_INTERSTITIAL, _bvs_payload()],
+    )
+    try:
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert sleeps == [500, 500]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
+    tmp_path, monkeypatch
+):
+    """A persistent block page costs one shield-clear budget, once: the
+    relaxed query is not tried against a page that never became a payload."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_SHIELD_CLEAR_MS
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _attempts, urls, _exits, sleeps = _install_fake_camoufox(
         monkeypatch, content_script=[_BVS_INTERSTITIAL]
     )
     try:
-        assert await engine._camoufox_search("dengue", 10, None) == []
-        assert sleeps == []
+        docs = await engine._camoufox_search(
+            "dengue", 10, None, fallback_composed="dengue OR manejo"
+        )
+        assert docs == []
+        assert sum(sleeps) == _CAMOUFOX_SHIELD_CLEAR_MS
+        assert len(urls) == 1
     finally:
         await cache.close()
         await http_client.aclose()

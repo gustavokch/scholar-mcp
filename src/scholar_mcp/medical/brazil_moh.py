@@ -144,16 +144,17 @@ CACHE_SCHEMA = "v3"
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
 # caller's own timeout. The total ceiling comes from
-# ``settings.brazil_browser_timeout_s`` (45 s by default). The navigation gets
+# ``settings.brazil_browser_timeout_s`` (150 s by default). The navigation gets
 # ``min(this cap, ceiling left after launch)``, so the cap has to sit above the
 # ceiling for the ceiling to be what ends a slow Solr response or a long Bunny
 # CDN challenge; at 30 s it cut navigations short and those requests failed.
-_CAMOUFOX_NAV_TIMEOUT_MS = 90000
+_CAMOUFOX_NAV_TIMEOUT_MS = 300000
 
-# How long, after an aborted goto, the tier keeps reading for the shield
-# interstitial to hand back the payload. Not measured against BVS: it is the
-# 20 s the AAP Cloudflare challenge (observed ~10 s) is given. The navigation
-# budget and the tier's outer wait_for(effective_ceiling) still bound it.
+# How long the tier keeps reading for the shield interstitial to hand back the
+# payload, after a clean or an aborted goto alike. Measured against live BVS:
+# a clean goto lands on the 403 interstitial and the JSON replaces it about
+# 12 s later. The navigation budget and the tier's outer
+# wait_for(effective_ceiling) still bound it.
 _CAMOUFOX_SHIELD_CLEAR_MS = 20000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
@@ -1459,6 +1460,13 @@ class BrazilMoHEngine:
                 all_composed,
                 self._overfetch_count(clamped, chain_start),
                 ceiling=self._browser_ceiling(chain_start),
+                fallback_composed=(
+                    _build_query(
+                        query, norm_collection, operator="OR", title_scoped=False
+                    )
+                    if len(tokens) >= 2
+                    else None
+                ),
             )
             if docs:
                 browser_records = [
@@ -1625,7 +1633,11 @@ class BrazilMoHEngine:
         return min(float(self.settings.brazil_browser_timeout_s), max(remaining, 0.0))
 
     async def _camoufox_search(
-        self, composed: str, count: int, ceiling: float | None
+        self,
+        composed: str,
+        count: int,
+        ceiling: float | None,
+        fallback_composed: str | None = None,
     ) -> list[dict[str, Any]]:
         """Last-resort rendered fetch of the BVS JSON search payload.
 
@@ -1648,6 +1660,11 @@ class BrazilMoHEngine:
         below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
         Camoufox launch needs tens of seconds, so a doomed ceiling would only
         burn startup time.
+
+        ``fallback_composed`` is tried in the same browser session when the
+        first query yields no documents. The strict AND query returns nothing
+        for a multi-token query, and the browser tier otherwise has no relaxed
+        stage the way the HTTP stages do.
         """
         if ceiling is not None and ceiling <= 0:
             logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
@@ -1668,30 +1685,14 @@ class BrazilMoHEngine:
             logger.warning("camoufox unavailable; BVS browser fallback disabled")
             return []
 
-        target = (
-            f"{BVS_SEARCH_URL}?q={urllib.parse.quote(composed)}"
-            f"&output=json&count={count}"
-        )
+        targets = [
+            f"{BVS_SEARCH_URL}?q={urllib.parse.quote(q)}&output=json&count={count}"
+            for q in (composed, fallback_composed)
+            if q
+        ]
 
-        async def _run() -> list[dict[str, Any]]:
-            launch_start = time.monotonic()
-            async with AsyncCamoufox(headless=True) as browser:
-                launch_elapsed = time.monotonic() - launch_start
-                nav_budget_s = max(effective_ceiling - launch_elapsed, 0.0)
-                nav_timeout_ms = min(
-                    _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
-                )
-                page = await browser.new_page()
-                aborted = await goto_tolerant(page, target, nav_timeout_ms)
-                # An aborted goto means the shield is mid-challenge: keep
-                # reading until the payload replaces its interstitial. A clean
-                # goto keeps the single read, so a block page is classified at
-                # once instead of waited on.
-                content = await read_content_settled(
-                    page,
-                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms) if aborted else 0,
-                    ready=lambda html: not _bvs_shield_pending(html),
-                )
+        def _docs_from_content(content: str) -> list[dict[str, Any]] | None:
+            """Parsed docs, or ``None`` when the page is not a JSON payload."""
             text = _browser_payload_text(content)
             try:
                 data = json.loads(text)
@@ -1705,8 +1706,40 @@ class BrazilMoHEngine:
                     logger.info("brazil_moh: BVS origin returned an error page")
                 else:
                     logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
-                return []
+                return None
             return _extract_docs(data)
+
+        async def _run() -> list[dict[str, Any]]:
+            launch_start = time.monotonic()
+            async with AsyncCamoufox(headless=True) as browser:
+                page = await browser.new_page()
+                for index, target in enumerate(targets):
+                    nav_budget_s = max(
+                        effective_ceiling - (time.monotonic() - launch_start), 0.0
+                    )
+                    nav_timeout_ms = min(
+                        _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
+                    )
+                    await goto_tolerant(page, target, nav_timeout_ms)
+                    # The shield answers the first request with a 403 interstitial
+                    # and swaps in the payload once its challenge clears, with or
+                    # without an aborted goto: keep reading for the budget.
+                    content = await read_content_settled(
+                        page,
+                        min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
+                        ready=lambda html: not _bvs_shield_pending(html),
+                    )
+                    docs = _docs_from_content(content)
+                    if docs is None:
+                        return []
+                    if docs:
+                        if index:
+                            logger.info(
+                                "brazil_moh: OR-relaxed browser query returned %d docs",
+                                len(docs),
+                            )
+                        return docs
+            return []
 
         try:
             return await asyncio.wait_for(_run(), timeout=effective_ceiling)
