@@ -144,11 +144,11 @@ CACHE_SCHEMA = "v3"
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
 # caller's own timeout. The total ceiling comes from
-# ``settings.brazil_browser_timeout_s`` (45 s by default). The navigation gets
+# ``settings.brazil_browser_timeout_s`` (150 s by default). The navigation gets
 # ``min(this cap, ceiling left after launch)``, so the cap has to sit above the
 # ceiling for the ceiling to be what ends a slow Solr response or a long Bunny
 # CDN challenge; at 30 s it cut navigations short and those requests failed.
-_CAMOUFOX_NAV_TIMEOUT_MS = 90000
+_CAMOUFOX_NAV_TIMEOUT_MS = 300000
 
 # How long the tier keeps reading for the shield interstitial to hand back the
 # payload, after a clean or an aborted goto alike. Measured against live BVS:

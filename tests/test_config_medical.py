@@ -69,14 +69,14 @@ def test_brazil_timeout_defaults_leave_room_for_browser_tier():
     settings = Settings.load()
     assert settings.brazil_stage_timeout_s == 45.0
     assert settings.brazil_request_timeout_s == 45.0
-    assert settings.brazil_chain_timeout_s == 120.0
-    assert settings.brazil_browser_timeout_s == 45.0
+    assert settings.brazil_chain_timeout_s == 300.0
+    assert settings.brazil_browser_timeout_s == 150.0
     assert settings.brazil_stage_timeout_s > 43.0
     assert settings.brazil_request_timeout_s >= settings.brazil_stage_timeout_s
-    # Two stages at full ceiling still leave the browser tier its useful floor.
+    # Two stages at full ceiling still leave the browser tier its full ceiling.
     assert (
         settings.brazil_chain_timeout_s - 2 * settings.brazil_stage_timeout_s
-        >= 20.0
+        >= settings.brazil_browser_timeout_s
     )
 
 
