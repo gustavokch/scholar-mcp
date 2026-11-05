@@ -119,6 +119,23 @@ def test_organization_filter_matches_acronyms_as_capitalised_tokens_only():
     assert organization_matches("American Heart Association", "AHA guideline") is True
 
 
+def test_organization_filter_resolves_every_body_a_request_names():
+    """A request that writes a body out in full with its acronym, prefixes it,
+    or names a joint body stands for every table body it names; the text
+    must name one of them. Before, only an exact name or acronym resolved,
+    so these requests filtered out every candidate."""
+    assert organization_matches("American Academy of Pediatrics (AAP)", "AAP policy") is True
+    assert organization_matches("the American Heart Association", "AHA guideline") is True
+    assert organization_matches("ACC/AHA", "2022 AHA/ACC/HFSA Guideline") is True
+    assert organization_matches("aha, acc", "ACC expert consensus") is True
+    assert organization_matches("ACC/AHA", "Diagnostic accuracy of troponin") is False
+    # A part outside the table stands for itself.
+    assert organization_matches("AHA/HFSA", "HFSA position statement") is True
+    assert organization_matches("AHA/HFSA", "ESC guideline") is False
+    # A blank request names nothing and filters nothing.
+    assert organization_matches("  ", "ESC guideline") is True
+
+
 @respx.mock
 async def test_search_clinical_guidelines_layers(tmp_path: Path):
     settings = Settings.load()
@@ -682,3 +699,37 @@ def test_aap_journal_signal_matches_pediatrics_family():
     assert _is_aap_journal("Pediatrics (Evanston)")
     assert not _is_aap_journal("JAMA Pediatrics")
     assert not _is_aap_journal("Lancet")
+
+
+@respx.mock
+async def test_aap_org_filter_accepts_full_name_with_acronym(tmp_path: Path):
+    """organization="American Academy of Pediatrics (AAP)" is the AAP: the
+    Pediatrics journal signal keeps a collective-author policy statement, as
+    it does for organization="AAP"."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+
+    respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["2002"]}})
+    respx.get(EFETCH_URL).respond(
+        content=(
+            "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>2002</PMID>"
+            "<Article><Journal><Title>Pediatrics</Title></Journal>"
+            "<ArticleTitle>Clinical practice guideline for infectious diseases</ArticleTitle>"
+            "<Abstract><AbstractText>Guideline recommendations.</AbstractText></Abstract>"
+            "<AuthorList><CollectiveName>COMMITTEE ON INFECTIOUS DISEASES</CollectiveName>"
+            "</AuthorList></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+        ).encode()
+    )
+
+    try:
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "infectious diseases", organization="American Academy of Pediatrics (AAP)"
+        )
+        assert meta.error is False
+        assert [g.pmid for g in guidelines] == ["2002"]
+    finally:
+        await cache.close()
+        await http_client.aclose()

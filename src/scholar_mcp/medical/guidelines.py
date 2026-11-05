@@ -148,21 +148,42 @@ def extract_organization(article: MedicalArticle) -> str:
     return article.journal or "Unknown Organization"
 
 
+# A request can write a body out with its acronym or name a joint body:
+# "American Academy of Pediatrics (AAP)", "ACC/AHA".
+_REQUEST_SPLIT_RE = re.compile(r"[/,;()]")
+
+
+def _request_patterns(organization: str) -> list[re.Pattern[str]]:
+    """Patterns for the bodies ``organization`` names. Each "/", ",", ";" or
+    parenthesis-separated part stands for every table body the extraction's
+    rules find in it ("the American Heart Association") or whose acronym it
+    is in any case ("aap"); a part that names no table body stands for
+    itself, as an acronym when it is in capitals."""
+    patterns: list[re.Pattern[str]] = []
+    for part in filter(None, (p.strip() for p in _REQUEST_SPLIT_RE.split(organization))):
+        lowered = part.lower()
+        known = [
+            body_patterns
+            for (_, _, acronyms), (_, body_patterns) in zip(
+                KNOWN_ORGANIZATIONS, _KNOWN_ORG_PATTERNS
+            )
+            if lowered in (a.lower() for a in acronyms)
+            or any(p.search(part) for p in body_patterns)
+        ]
+        if known:
+            for body_patterns in known:
+                patterns.extend(body_patterns)
+        else:
+            patterns.append(_acronym_re(part) if part.isupper() else _full_name_re(part))
+    return patterns
+
+
 def organization_matches(organization: str, text: str) -> bool:
-    """True when ``text`` names ``organization``, with the extraction's rules:
-    word-bounded full names, capital-only acronyms."""
-    wanted = organization.strip()
-    lowered = wanted.lower()
-    for display, names, acronyms in KNOWN_ORGANIZATIONS:
-        if lowered == display.lower() or lowered in names or lowered in (
-            a.lower() for a in acronyms
-        ):
-            patterns = [_full_name_re(display), *map(_full_name_re, names),
-                        *map(_acronym_re, acronyms)]
-            return any(p.search(text) for p in patterns)
-    if wanted.isupper():
-        return bool(_acronym_re(wanted).search(text))
-    return bool(_full_name_re(wanted).search(text))
+    """True when ``text`` names a body ``organization`` names, with the
+    extraction's rules: word-bounded full names, capital-only acronyms. A
+    blank request names no body and matches every text."""
+    patterns = _request_patterns(organization)
+    return not patterns or any(p.search(text) for p in patterns)
 
 
 _DOI_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/")
