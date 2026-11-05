@@ -424,7 +424,7 @@ class WHOClient:
             [r.to_dict() for r in final_records],
             source="who",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return final_records, CacheMetadata(cached=False, cache_age=0)
 
     async def get_child_health_statistics(
         self,
@@ -466,7 +466,7 @@ class WHOClient:
             [r.to_dict() for r in final_records],
             source="child_health",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return final_records, CacheMetadata(cached=False, cache_age=0)
 
     async def _fetch_latest_slices(
         self,
