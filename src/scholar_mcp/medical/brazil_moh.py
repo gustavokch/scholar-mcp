@@ -138,7 +138,8 @@ MAX_FULL_TEXT_CHARS = 600_000
 # 30 days (config.cache_ttl_brazil_moh), so an un-bumped key is a month of
 # wrong answers. v2: has_full_text (B4) + 600k bodies with total_chars (B3).
 # v3: origin (position prior scoped to BVS records).
-CACHE_SCHEMA = "v3"
+# v4: PCDT heading keywords change catalog ranking.
+CACHE_SCHEMA = "v4"
 
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:

@@ -516,3 +516,24 @@ async def test_missing_seed_is_an_outage_not_a_partial_catalog(tmp_path, monkeyp
         assert cache_meta.cached is False
     finally:
         await cache.close()
+
+
+def test_seed_catalog_carries_heading_keywords():
+    catalog = load_seed_catalog()
+    ist = catalog["pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis"]
+    assert "sifilis" in ist["keywords"].split()
+
+
+@pytest.mark.asyncio
+async def test_pcdt_search_finds_the_umbrella_protocol_by_condition(tmp_path):
+    """ENARE 2025 Q028: the syphilis rules live in the IST protocol, whose
+    title never says sífilis."""
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings)
+    try:
+        results, _ = await engine.search("sifilis PCDT", limit=6)
+        ids = [r.record_id for r in results]
+        assert "pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis" in ids
+    finally:
+        await cache.close()

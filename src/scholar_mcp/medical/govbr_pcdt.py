@@ -42,18 +42,45 @@ PCDT_LETTERS = (
 # letter cut off here with pages still queued is an incomplete crawl.
 MAX_PAGES_PER_LETTER = 25
 
+KEYWORDS_PATH = Path(__file__).resolve().parent.parent / "data" / "govbr_pcdt_keywords.json"
+
+
+def _load_keywords() -> dict[str, str]:
+    """Per-protocol keywords from section headings (scripts/build_pcdt_keywords.py)."""
+    if not KEYWORDS_PATH.exists():
+        return {}
+    try:
+        with KEYWORDS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load PCDT keywords: %s", exc)
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def load_seed_catalog() -> dict[str, dict[str, Any]]:
-    """Load the bundled pre-scraped PCDT catalog."""
+    """Load the bundled pre-scraped PCDT catalog, with heading keywords.
+
+    Umbrella protocols name none of their conditions in the title, and
+    _score_item reads ``keywords``; the keyword file is built offline by
+    scripts/build_pcdt_keywords.py and kept apart from the crawled seed so a
+    re-crawl never drops it.
+    """
     seed_path = Path(__file__).resolve().parent.parent / "data" / "govbr_pcdt_catalog.json"
     if not seed_path.exists():
         logger.warning("PCDT seed catalog not found at %s", seed_path)
         return {}
     try:
         with seed_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            catalog = json.load(f)
     except Exception as exc:
         logger.warning("Failed to load PCDT seed catalog: %s", exc)
         return {}
+    keywords = _load_keywords()
+    for rid, row in catalog.items():
+        if isinstance(row, dict) and rid in keywords and not row.get("keywords"):
+            row["keywords"] = keywords[rid]
+    return catalog
 
 
 @functools.lru_cache(maxsize=1)
