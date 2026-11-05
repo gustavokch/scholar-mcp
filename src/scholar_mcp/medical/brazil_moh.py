@@ -144,16 +144,17 @@ CACHE_SCHEMA = "v3"
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
 # one navigation, hard total ceiling so a hung browser cannot outlive the
 # caller's own timeout. The total ceiling comes from
-# ``settings.brazil_browser_timeout_s`` (45 s by default). The navigation gets
+# ``settings.brazil_browser_timeout_s`` (150 s by default). The navigation gets
 # ``min(this cap, ceiling left after launch)``, so the cap has to sit above the
 # ceiling for the ceiling to be what ends a slow Solr response or a long Bunny
 # CDN challenge; at 30 s it cut navigations short and those requests failed.
-_CAMOUFOX_NAV_TIMEOUT_MS = 90000
+_CAMOUFOX_NAV_TIMEOUT_MS = 300000
 
-# How long, after an aborted goto, the tier keeps reading for the shield
-# interstitial to hand back the payload. Not measured against BVS: it is the
-# 20 s the AAP Cloudflare challenge (observed ~10 s) is given. The navigation
-# budget and the tier's outer wait_for(effective_ceiling) still bound it.
+# How long the tier keeps reading for the shield interstitial to hand back the
+# payload, after a clean or an aborted goto alike. Measured against live BVS:
+# a clean goto lands on the 403 interstitial and the JSON replaces it about
+# 12 s later. The navigation budget and the tier's outer
+# wait_for(effective_ceiling) still bound it.
 _CAMOUFOX_SHIELD_CLEAR_MS = 20000
 
 # A Camoufox launch needs tens of seconds; below this floor the browser
@@ -1055,13 +1056,20 @@ class BrazilMoHEngine:
         """Over-fetch window for one BVS stage, adaptive to the chain budget.
 
         Full window is ``min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)``.
-        When the chain has burned over half its budget (slow origin), the
+        When the chain has burned over half its HTTP share (slow origin), the
         remaining stages shrink to ``min(clamped * 3, 60)``: a huge window
         against a sick Solr endpoint only buys latency, and the client-side
         ranker cannot lift what the server never returns in time. The window
         is adaptive from the chain start, so the title-scoped first stage
         already shrinks when the PCDT/A-Z phase has burned over half the
-        chain budget.
+        HTTP share.
+
+        The HTTP share is the chain budget minus the browser tier's ceiling
+        when that tier is enabled: the ceiling is sized for a browser launch,
+        not for HTTP stages, and measuring against the whole chain put the
+        threshold (150 s of a 300 s chain) past the point three 45 s stages
+        can reach. A ceiling that fills the chain leaves no share to measure,
+        so the whole chain is used.
         """
         full = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
         if chain_start is None:
@@ -1069,8 +1077,13 @@ class BrazilMoHEngine:
         chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return full
+        http_share = chain_budget
+        if self.settings.enable_browser_fallback and self.settings.brazil_browser_fallback:
+            browser_ceiling = max(float(self.settings.brazil_browser_timeout_s), 0.0)
+            if browser_ceiling < chain_budget:
+                http_share = chain_budget - browser_ceiling
         elapsed = time.monotonic() - chain_start
-        if elapsed < chain_budget / 2:
+        if elapsed < http_share / 2:
             return full
         return min(clamped * 3, 60)
 
@@ -1676,20 +1689,20 @@ class BrazilMoHEngine:
         async def _run() -> list[dict[str, Any]]:
             launch_start = time.monotonic()
             async with AsyncCamoufox(headless=True) as browser:
-                launch_elapsed = time.monotonic() - launch_start
-                nav_budget_s = max(effective_ceiling - launch_elapsed, 0.0)
+                page = await browser.new_page()
+                nav_budget_s = max(
+                    effective_ceiling - (time.monotonic() - launch_start), 0.0
+                )
                 nav_timeout_ms = min(
                     _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
                 )
-                page = await browser.new_page()
-                aborted = await goto_tolerant(page, target, nav_timeout_ms)
-                # An aborted goto means the shield is mid-challenge: keep
-                # reading until the payload replaces its interstitial. A clean
-                # goto keeps the single read, so a block page is classified at
-                # once instead of waited on.
+                await goto_tolerant(page, target, nav_timeout_ms)
+                # The shield answers the first request with a 403 interstitial
+                # and swaps in the payload once its challenge clears, with or
+                # without an aborted goto: keep reading for the budget.
                 content = await read_content_settled(
                     page,
-                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms) if aborted else 0,
+                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
                     ready=lambda html: not _bvs_shield_pending(html),
                 )
             text = _browser_payload_text(content)

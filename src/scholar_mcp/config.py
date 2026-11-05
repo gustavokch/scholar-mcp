@@ -122,9 +122,9 @@ class Settings:
     # browser tier enforce it directly -- stages receive min(brazil_stage_timeout_s,
     # chain budget left), and the browser tier receives min(brazil_browser_timeout_s,
     # chain budget left). PCDT plus BVS stages cannot exceed this bound.
-    # 120 s keeps two full-ceiling stages from starving the camoufox tier
-    # (>= 20 s useful floor) that follows them. <= 0 disables the bound.
-    brazil_chain_timeout_s: float = 120.0
+    # 300 s keeps two full-ceiling stages (2 x 45 s) from starving the camoufox
+    # tier (150 s) that follows them. <= 0 disables the bound.
+    brazil_chain_timeout_s: float = 300.0
     # Per-mirror ceiling inside the scihub tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
     scihub_mirror_timeout_s: float = 12.0
@@ -140,14 +140,15 @@ class Settings:
     # Hard ceiling on the BVS browser tier. It is the last stage of an already
     # staged chain, so the effective ceiling is the smaller of this and the
     # chain budget still left when the tier starts (see _browser_ceiling).
-    # 45 s because camoufox startup plus Bunny CDN challenge execution on
-    # pesquisa.bvsalud.org runs 15 s-25 s; 30 s cut off legitimate searches.
-    brazil_browser_timeout_s: float = 45.0
+    # 150 s because a camoufox launch plus page creation took 30-70 s on a
+    # loaded machine, and the Bunny CDN challenge needs about 12 s more on
+    # pesquisa.bvsalud.org; 45 s cut off legitimate searches.
+    brazil_browser_timeout_s: float = 150.0
     # Whole-call ceiling for get_brazil_moh_full_text network work (record
     # lookup plus PDF fetch). Published alongside brazil_chain_timeout_s so
     # the caller honors two ceilings instead of one blanket timeout: the
     # search chain (stages + browser tier) and one document fetch are
-    # different budgets, and the 45 s browser tier must never be served
+    # different budgets, and the 150 s browser tier must never be served
     # into a 20 s blanket and read as a backend failure.
     brazil_fulltext_timeout_s: float = 30.0
     # Byte cap on a fetched PDF before it is handed to pypdf. The parse runs
@@ -294,11 +295,11 @@ class Settings:
             brazil_max_concurrent=_int_env("BRAZIL_MAX_CONCURRENT", 2),
             brazil_breaker_threshold=_int_env("BRAZIL_BREAKER_THRESHOLD", 2),
             brazil_breaker_cooldown_s=_float_env("BRAZIL_BREAKER_COOLDOWN_S", 60.0),
-            brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 120.0),
+            brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 300.0),
             scihub_mirror_timeout_s=_float_env("SCIHUB_MIRROR_TIMEOUT_S", 12.0),
             scihub_tier_timeout_s=_float_env("SCIHUB_TIER_TIMEOUT_S", 20.0),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
-            brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 45.0),
+            brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 150.0),
             brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),
             brazil_pdf_max_bytes=_int_env("BRAZIL_PDF_MAX_BYTES", 40_000_000),
             enable_browser_fallback=_bool(
