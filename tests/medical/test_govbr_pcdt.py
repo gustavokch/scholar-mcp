@@ -555,3 +555,33 @@ async def test_pcdt_word_in_query_does_not_bury_rows_without_the_token(tmp_path)
         assert len(only) == 3
     finally:
         await cache.close()
+
+
+def test_keyword_only_match_scores_below_the_same_title_match():
+    """Heading keywords are broad, so a keyword hit sits in a lower tier than
+    a title hit of the same shape, and never adds to a row that already
+    matches on title, slug or description."""
+    from scholar_mcp.medical.govbr_pcdt import _score_item, normalize_text, tokenize_portuguese
+
+    def score(query, item):
+        return _score_item(tokenize_portuguese(query), normalize_text(query), item)
+
+    by_title = {"title": "Manejo da infecção pelo HIV", "slug": "manejo-hiv"}
+    by_keyword = {"title": "Atenção Integral às Pessoas com IST", "slug": "ist",
+                  "keywords": "sifilis hiv"}
+    assert 0 < score("hiv", by_keyword) < score("hiv", by_title)
+    assert 0 < score("hiv sifilis", by_keyword) < score("hiv manejo", by_title)
+    both = {**by_title, "keywords": "sifilis"}
+    assert score("hiv sifilis", both) == score("hiv sifilis", by_title)
+
+
+async def test_hiv_search_ranks_every_hiv_titled_protocol_above_keyword_rows(tmp_path):
+    """The IST protocol carries "hiv" among its heading keywords; it must not
+    push an HIV-titled protocol (PrEP, 2026-11-05 review) out of the top six."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        results, _ = await engine.search("hiv", limit=6)
+        assert len(results) == 6
+        assert all("hiv" in normalize_text(r.title) for r in results)
+    finally:
+        await cache.close()

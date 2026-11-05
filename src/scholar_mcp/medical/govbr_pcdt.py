@@ -204,15 +204,20 @@ def parse_letter_page(
     return items, next_urls
 
 
+# Keyword-only matches score in a lower tier: heading keywords are broad
+# (dozens of words per protocol), so a keyword hit must never tie a title,
+# slug or description hit of the same shape.
+KEYWORD_ONLY_FACTOR = 0.7
+
+
 def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) -> float:
     """Compute matching score between query and catalog item."""
-    extra = f"{item.get('description', '')} {item.get('keywords', '')}".strip()
-    return score_item(
-        query_tokens,
-        query_norm,
-        item.get("title", ""),
-        item.get("slug", ""),
-        extra,
+    title, slug = item.get("title", ""), item.get("slug", "")
+    score = score_item(query_tokens, query_norm, title, slug, item.get("description", ""))
+    if score or not item.get("keywords"):
+        return score
+    return KEYWORD_ONLY_FACTOR * score_item(
+        query_tokens, query_norm, title, slug, item["keywords"]
     )
 
 
@@ -242,6 +247,7 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         source="brazil-moh",
         origin="govbr_catalog",
         abstract=item.get("description", ""),
+        keywords=item.get("keywords", ""),
         country="Brasil",
         languages=["pt"],
         collections=item.get("collections") or ["PCDT"],

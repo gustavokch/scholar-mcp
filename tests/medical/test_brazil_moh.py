@@ -4007,3 +4007,111 @@ async def test_shield_block_html_200_does_not_reset_the_breaker(tmp_path: Path):
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+# --- PCDT heading keywords on the search_guidelines path ---------------------
+# zimqa calls search_guidelines(collection="all"): the topic gate and the final
+# ranker must read the catalog keywords that GovBrPCDTEngine.search matched on,
+# or an umbrella protocol found by its section headings is dropped again.
+
+IST_PCDT = "pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis"
+
+
+async def _engine_with_catalogs(tmp_path: Path):
+    """``_engine`` with the bundled PCDT and A-Z catalogs left in place."""
+    settings = dataclasses.replace(Settings.load(), brazil_browser_fallback=False)
+    http_client = AsyncHttpClient(settings, backoff_base=0.01)
+    _pin_fast_limiter(http_client, rate_per_sec=100.0)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    engine = BrazilMoHEngine(http_client=http_client, cache=cache, settings=settings)
+    return engine, cache, http_client
+
+
+def test_brazil_guideline_roundtrips_keywords():
+    restored = BrazilGuideline.from_dict(BrazilGuideline(keywords="sifilis hpv").to_dict())
+    assert restored.keywords == "sifilis hpv"
+
+
+def test_topic_gate_ignores_the_pcdt_token_and_reads_keywords():
+    """"pcdt" is in no pool row's text; left in, frequency zero made it the
+    sole discriminating term and emptied the pool. "sifilis" is only in the
+    umbrella protocol's keywords."""
+    pool = [
+        _g("Atenção Integral às Pessoas com IST", record_id="ist", keywords="sifilis hpv"),
+        _g("Doença de Chagas", record_id="chagas"),
+        _g("Doença de Crohn", record_id="crohn"),
+    ]
+
+    assert [r.record_id for r in _topic_filtered(pool, "sifilis doenca PCDT")] == ["ist"]
+    # Alone, the token is still the query.
+    assert _topic_filtered(pool, "PCDT") == []
+
+
+def test_ranker_puts_a_keyword_match_below_a_title_match():
+    from scholar_mcp.medical.ranking import rank_brazil_guidelines
+
+    by_keyword = _g("Atenção Integral às Pessoas com IST", record_id="kw",
+                    keywords="sifilis", has_full_text=True)
+    by_title = _g("Sífilis congênita", record_id="title", has_full_text=True)
+    unmatched = _g("Doença de Chagas", record_id="none", has_full_text=True)
+
+    ranked = rank_brazil_guidelines([unmatched, by_keyword, by_title], "sifilis")
+
+    assert [r.record_id for r in ranked] == ["title", "kw", "none"]
+
+
+@respx.mock
+async def test_bvs_outage_sifilis_pcdt_serves_the_ist_protocol(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=httpx.ConnectError("down")
+        )
+        records, meta = await engine.search_guidelines("sifilis PCDT", collection="all")
+        assert IST_PCDT in [r.record_id for r in records]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_bvs_outage_chagas_pcdt_serves_the_chagas_protocol(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            side_effect=httpx.ConnectError("down")
+        )
+        records, meta = await engine.search_guidelines("chagas PCDT", collection="all")
+        assert "pcdt-doenca-de-chagas" in [r.record_id for r in records]
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_bvs_sifilis_titles_leave_the_ist_protocol_in_the_result(tmp_path: Path):
+    """With BVS healthy, rows titled "sífilis" outrank the IST protocol, but
+    its heading keywords keep it inside the default limit. Without them it
+    had no lexical signal and fell behind the BVS over-fetch tail, which
+    scores on its position prior alone."""
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        docs = [
+            _bvs_doc(record_id="biblio-sifilis-1", title="Manual técnico para o diagnóstico da sífilis"),
+            _bvs_doc(record_id="biblio-sifilis-2", title="Sífilis: estratégias para diagnóstico no Brasil"),
+        ] + [
+            _bvs_doc(record_id=f"biblio-other-{i}", title=f"Relatório de gestão {i}")
+            for i in range(8)
+        ]
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(docs))
+        )
+        records, meta = await engine.search_guidelines("sifilis PCDT", collection="all")
+        ids = [r.record_id for r in records]
+        assert {"biblio-sifilis-1", "biblio-sifilis-2", IST_PCDT} <= set(ids)
+        assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()

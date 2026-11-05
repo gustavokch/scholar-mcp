@@ -426,8 +426,9 @@ def _candidate_terms(record: BrazilGuideline) -> set[str]:
     """The record text the topic gate matches on.
 
     Deliberately the same fields ``rank_brazil_guidelines`` scores -- both
-    titles, the abstract, and the DeCS descriptors. Keying on the title alone
-    would drop a record that names the topic only in its body.
+    titles, the abstract, the DeCS descriptors and the catalog keywords.
+    Keying on the title alone would drop a record that names the topic only
+    in its body (or, for an umbrella PCDT, only in its section headings).
     """
     return set(
         tokenize_portuguese(
@@ -437,6 +438,7 @@ def _candidate_terms(record: BrazilGuideline) -> set[str]:
                     record.title_en or "",
                     record.abstract or "",
                     *(record.mesh_subjects or []),
+                    record.keywords or "",
                 ]
             )
         )
@@ -484,6 +486,10 @@ def _topic_filtered(
     # become the sole discriminating term, and empty every pool -- "dengue AND
     # manejo" would drop the dengue guides it names.
     terms = [t for t in tokenize_portuguese(query) if t not in _SOLR_BOOLEAN_WORDS]
+    # Every gov.br catalog row is a protocol, so "pcdt" names no topic; absent
+    # from the pool it would become the sole discriminator and empty it.
+    if "pcdt" in terms and len(set(terms)) > 1:
+        terms = [t for t in terms if t != "pcdt"]
     if not records or not terms:
         return records
 
