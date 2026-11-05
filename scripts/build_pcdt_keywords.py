@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Build the PCDT keyword index from each protocol's section headings.
 
 The PCDT catalog search matches titles, slugs, descriptions and keywords
@@ -7,7 +6,8 @@ cover in the title: "Atenção Integral às Pessoas com Infecções Sexualmente
 Transmissíveis" holds the syphilis chapter, so a search for the condition
 misses it. This script reads every seed PCDT's full text, keeps the words of
 its numbered all-caps section headings, drops words found in the headings of
-more than MAX_DF of the protocols or already in the title, and writes
+more than MAX_DF of the protocols, already in the title, in STOPWORDS or
+shorter than MIN_TOKEN_LEN (acronyms excepted), and writes
 src/scholar_mcp/data/govbr_pcdt_keywords.json ({record_id: "kw kw ..."}; protocols
 with no surviving word get no row).
 
@@ -20,30 +20,56 @@ Usage:
 
 import argparse
 import asyncio
-from collections import Counter
 import json
-from pathlib import Path
 import re
 import sys
 import tempfile
+from collections import Counter
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from scholar_mcp.config import Settings  # noqa: E402
-from scholar_mcp.medical.brazil_moh import MAX_FULL_TEXT_CHARS, BrazilMoHEngine  # noqa: E402
-from scholar_mcp.medical.govbr_common import tokenize_portuguese  # noqa: E402
-from scholar_mcp.utils.http import AsyncHttpClient  # noqa: E402
-from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager  # noqa: E402
+from scholar_mcp.config import Settings
+from scholar_mcp.medical.brazil_moh import MAX_FULL_TEXT_CHARS, BrazilMoHEngine
+from scholar_mcp.medical.govbr_common import tokenize_portuguese
+from scholar_mcp.utils.http import AsyncHttpClient
+from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 
 DATA_DIR = REPO_ROOT / "src" / "scholar_mcp" / "data"
 SEED_PATH = DATA_DIR / "govbr_pcdt_catalog.json"
 DEFAULT_OUTPUT = DATA_DIR / "govbr_pcdt_keywords.json"
 MAX_DF = 0.10           # drop words in the headings of more than 10% of protocols
 MAX_TOKENS = 60         # rarest words first, so a long protocol cannot match everything
-MIN_TOKEN_LEN = 3       # 2-letter tokens are table and drop-cap noise ("tb", "ni", "so")
+MIN_TOKEN_LEN = 4       # shorter tokens are split-word fragments ("ape", "pes") ...
+MIN_ACRONYM_LEN = 3     # ... unless an acronym (see _is_acronym); 2 letters never ("tb", "ni")
 MAX_FAILED_SHARE = 0.2
 CONCURRENCY = 4
+
+# Words that name a document part or a care process, not a condition, and
+# heading noise. Each kind matched unrelated queries from the 2026-10-30
+# traces: "esquema" put colangite and distonias in an HIV search, and
+# "atendimento" / "conduta" took 55 keyword-only pool slots over 334 queries.
+STOPWORDS = frozenset({
+    # English words from bilingual PDFs
+    "the", "and", "of", "in", "for", "with", "not", "non", "disorders", "uninfected",
+    # care-process words
+    "esquema", "esquemas", "historico", "alteracoes", "farmaco", "pos",
+    "acompanhamento", "paciente", "pacientes", "medicamento", "medicamentos",
+    "medicamentoso", "tratamento", "diagnostico", "monitoramento", "atendimento",
+    "conduta", "consulta", "equipe", "especialistas", "terapia", "terapeutica",
+    "terapeuticas", "clinico", "clinicas", "exames", "abordagem", "fluxo",
+    # population words
+    "pessoa", "pessoas", "crianca", "criancas", "adolescentes", "adultos",
+    # document-part and method words
+    "escopo", "elaboracao", "material", "suplementar", "diretrizes",
+    "recomendacoes", "evidencia", "evidencias", "referencia", "reuniao",
+    "informacoes", "apresentacao", "finalidade", "buscas", "embase", "lilacs",
+    "analise", "resultados", "pesquisa", "metodologicas", "anexos", "outros",
+    "outras", "ecr", "erc", "bvs", "sus",
+    # split-word fragments and table cells that pass the acronym rule
+    "est", "tos", "doe", "ane", "mas", "sim", "uso", "iii",
+})
 
 # A numbered, all-caps section heading: "5. SÍFILIS ADQUIRIDA", "10.6. DIP".
 _HEADING = re.compile(
@@ -56,6 +82,18 @@ _HEADING = re.compile(
 def extract_headings(text: str) -> list[str]:
     """Numbered all-caps heading lines, in document order."""
     return [h.strip() for h in _HEADING.findall(text or "")]
+
+
+def _is_acronym(token: str, headings: list[str]) -> bool:
+    """A short token stands alone in plain capitals in one of the headings.
+
+    "HIV", "(DIP)" and "HIV/AIDS" qualify; "PÓS" (the folded token is "pos")
+    and digit mixes ("DM0") do not.
+    """
+    if len(token) < MIN_ACRONYM_LEN or not token.isalpha():
+        return False
+    word = re.compile(rf"(?<!\w){token.upper()}(?!\w)")
+    return any(word.search(h) for h in headings)
 
 
 def build_keywords(headings: dict[str, list[str]], titles: dict[str, str]) -> dict[str, str]:
@@ -73,7 +111,8 @@ def build_keywords(headings: dict[str, list[str]], titles: dict[str, str]) -> di
         ranked = sorted(
             (
                 t for t in toks
-                if len(t) >= MIN_TOKEN_LEN and t != "pcdt" and df[t] <= limit
+                if (len(t) >= MIN_TOKEN_LEN or _is_acronym(t, headings[rid]))
+                and t != "pcdt" and t not in STOPWORDS and df[t] <= limit
                 and t not in title and not t.isdigit()
             ),
             key=lambda t: (df[t], t),
@@ -98,7 +137,7 @@ async def fetch_headings(seed: dict) -> tuple[dict[str, list[str]], list[str]]:
             try:
                 async with sem:
                     payload, _ = await engine.get_full_text(rid, max_chars=MAX_FULL_TEXT_CHARS)
-            except Exception as exc:  # one bad protocol must not lose the run
+            except Exception as exc:  # noqa: BLE001 -- one bad protocol must not lose the run
                 print(f"{rid}: fetch raised {type(exc).__name__}: {exc}", flush=True)
                 failed.append(rid)
                 return

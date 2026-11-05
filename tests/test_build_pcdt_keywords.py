@@ -59,3 +59,19 @@ def test_build_keywords_reports_a_cut_row(script, monkeypatch, capsys):
     kw = script.build_keywords({"pcdt-a": ["ALFA BETA GAMA DELTA"]}, {})
     assert kw["pcdt-a"].split() == ["alfa", "beta"]
     assert "pcdt-a: cut at 2 keywords, dropped 2" in capsys.readouterr().out
+
+
+def test_build_keywords_drops_generic_words_and_keeps_acronyms(script):
+    # 19 filler protocols keep the df ceiling (10%) above one.
+    headings = {f"pcdt-{i}": ["INTRODUÇÃO"] for i in range(19)}
+    headings["pcdt-ist"] = [
+        "ESQUEMA DE TRATAMENTO", "PSYCHIATRIC DISORDERS IN HIV-EXPOSED UNINFECTED",
+        "HIV/AIDS", "DOENÇA INFLAMATÓRIA PÉLVICA (DIP)", "PÓS-EXPOSIÇÃO",
+        "CLASSIFICAÇÃO EST ATÍSTICA", "DM0 E DM1",
+    ]
+    ist = set(script.build_keywords(headings, {})["pcdt-ist"].split())
+    # Acronyms stand alone in plain capitals; 4+ letter words pass on length.
+    assert {"hiv", "aids", "dip", "doenca", "inflamatoria", "pelvica", "exposicao"} <= ist
+    # Generic and English words, the folded "PÓS", a split-word fragment and
+    # a digit mix are dropped.
+    assert not ist & {"esquema", "tratamento", "disorders", "uninfected", "pos", "est", "dm0"}
