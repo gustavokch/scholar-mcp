@@ -537,3 +537,21 @@ async def test_pcdt_search_finds_the_umbrella_protocol_by_condition(tmp_path):
         assert "pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis" in ids
     finally:
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_pcdt_word_in_query_does_not_bury_rows_without_the_token(tmp_path):
+    """Every row is a PCDT, so "pcdt" in a query must not reorder rows: a row
+    that matches the condition but carries no "pcdt" token (a seed row missing
+    from the keyword file, an extended-corpus manual) still surfaces."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        chagas, _ = await engine.search("chagas PCDT", limit=6)
+        assert "pcdt-doenca-de-chagas" in [r.record_id for r in chagas]
+        tb, _ = await engine.search("tuberculose PCDT", limit=6)
+        assert "ms-manual-tuberculose-2019" in [r.record_id for r in tb]
+        # A query that is only "PCDT" keeps matching.
+        only, _ = await engine.search("PCDT", limit=3)
+        assert len(only) == 3
+    finally:
+        await cache.close()

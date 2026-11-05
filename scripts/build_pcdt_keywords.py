@@ -8,7 +8,8 @@ Transmissíveis" holds the syphilis chapter, so a search for the condition
 misses it. This script reads every seed PCDT's full text, keeps the words of
 its numbered all-caps section headings, drops words found in the headings of
 more than MAX_DF of the protocols or already in the title, and writes
-src/scholar_mcp/data/govbr_pcdt_keywords.json ({record_id: "pcdt kw kw ..."}).
+src/scholar_mcp/data/govbr_pcdt_keywords.json ({record_id: "kw kw ..."}; protocols
+with no surviving word get no row).
 
 Offline use only (network: one PDF fetch per protocol). Refuses to write when
 more than MAX_FAILED_SHARE of the fetches fail.
@@ -39,14 +40,15 @@ DATA_DIR = REPO_ROOT / "src" / "scholar_mcp" / "data"
 SEED_PATH = DATA_DIR / "govbr_pcdt_catalog.json"
 DEFAULT_OUTPUT = DATA_DIR / "govbr_pcdt_keywords.json"
 MAX_DF = 0.10           # drop words in the headings of more than 10% of protocols
-MAX_TOKENS = 40         # rarest words first, so a long protocol cannot match everything
+MAX_TOKENS = 60         # rarest words first, so a long protocol cannot match everything
+MIN_TOKEN_LEN = 3       # 2-letter tokens are table and drop-cap noise ("tb", "ni", "so")
 MAX_FAILED_SHARE = 0.2
 CONCURRENCY = 4
 
 # A numbered, all-caps section heading: "5. SÍFILIS ADQUIRIDA", "10.6. DIP".
 _HEADING = re.compile(
     r"^\s*\d{1,2}(?:\.\d{1,2}){0,2}\.?\s+"
-    r"([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-ZÁÉÍÓÚÂÊÔÃÕÇ0-9 ,:/()\-–]{2,90})\s*$",
+    r"([A-ZÁÀÉÍÓÚÂÊÔÃÕÇ][A-ZÁÀÉÍÓÚÂÊÔÃÕÇ0-9 ,:/()\-–]{2,90})\s*$",
     re.MULTILINE,
 )
 
@@ -57,20 +59,29 @@ def extract_headings(text: str) -> list[str]:
 
 
 def build_keywords(headings: dict[str, list[str]], titles: dict[str, str]) -> dict[str, str]:
-    """``{record_id: "pcdt kw ..."}``. "pcdt" leads every row because every
-    row is one: a query naming the document type then matches on the
-    condition alone."""
+    """``{record_id: "kw ..."}``; protocols with no surviving word are omitted.
+
+    No "pcdt" token: every row is one, and the search engine strips the word
+    from queries (a token on each row would tie them all against rows without it).
+    """
     tokens = {rid: set(tokenize_portuguese(" ".join(hs))) for rid, hs in headings.items()}
     df = Counter(t for toks in tokens.values() for t in toks)
     limit = max(1, int(MAX_DF * len(tokens)))
     out: dict[str, str] = {}
     for rid, toks in tokens.items():
         title = set(tokenize_portuguese(titles.get(rid, "")))
-        keep = sorted(
-            (t for t in toks if df[t] <= limit and t not in title and not t.isdigit()),
+        ranked = sorted(
+            (
+                t for t in toks
+                if len(t) >= MIN_TOKEN_LEN and t != "pcdt" and df[t] <= limit
+                and t not in title and not t.isdigit()
+            ),
             key=lambda t: (df[t], t),
-        )[:MAX_TOKENS]
-        out[rid] = " ".join(["pcdt", *keep])
+        )
+        if len(ranked) > MAX_TOKENS:
+            print(f"{rid}: cut at {MAX_TOKENS} keywords, dropped {len(ranked) - MAX_TOKENS}", flush=True)
+        if ranked:
+            out[rid] = " ".join(ranked[:MAX_TOKENS])
     return out
 
 
@@ -84,8 +95,13 @@ async def fetch_headings(seed: dict) -> tuple[dict[str, list[str]], list[str]]:
         engine = BrazilMoHEngine(AsyncHttpClient(settings), cache, settings)
 
         async def one(rid: str) -> None:
-            async with sem:
-                payload, _ = await engine.get_full_text(rid, max_chars=MAX_FULL_TEXT_CHARS)
+            try:
+                async with sem:
+                    payload, _ = await engine.get_full_text(rid, max_chars=MAX_FULL_TEXT_CHARS)
+            except Exception as exc:  # one bad protocol must not lose the run
+                print(f"{rid}: fetch raised {type(exc).__name__}: {exc}", flush=True)
+                failed.append(rid)
+                return
             if payload.get("status") != "success" or payload.get("abstract_fallback"):
                 failed.append(rid)
                 return

@@ -24,9 +24,11 @@ def test_extract_headings_takes_numbered_all_caps_lines(script):
         "5.1 Sífilis em gestantes\n"
         "10.6. DOENÇA INFLAMATÓRIA PÉLVICA (DIP)\n"
         "Em 2021, 3 casos.\n"
+        "5. ATENÇÃO À SAÚDE\n"
     )
     assert script.extract_headings(text) == [
         "INTRODUÇÃO", "SÍFILIS ADQUIRIDA", "DOENÇA INFLAMATÓRIA PÉLVICA (DIP)",
+        "ATENÇÃO À SAÚDE",
     ]
 
 
@@ -34,14 +36,26 @@ def test_build_keywords_drops_common_and_title_words(script):
     # 20 protocols: "introducao" and "tratamento" sit in every one, so they
     # exceed the 10% document-frequency ceiling (2 of 20).
     headings = {f"pcdt-{i}": ["INTRODUÇÃO", "TRATAMENTO"] for i in range(18)}
-    headings["pcdt-ist"] = ["INTRODUÇÃO", "TRATAMENTO", "SÍFILIS ADQUIRIDA", "INFECÇÃO PELO HPV"]
+    headings["pcdt-ist"] = [
+        "INTRODUÇÃO", "TRATAMENTO", "SÍFILIS ADQUIRIDA", "INFECÇÃO PELO HPV", "HIV E TB", "PCDT",
+    ]
     headings["pcdt-celiaca"] = ["INTRODUÇÃO", "TRATAMENTO", "DOENÇA CELÍACA"]
     titles = {"pcdt-ist": "Atenção Integral às Pessoas com IST",
               "pcdt-celiaca": "Doença Celíaca"}
     kw = script.build_keywords(headings, titles)
     ist = kw["pcdt-ist"].split()
-    assert ist[0] == "pcdt"
-    assert {"sifilis", "adquirida", "infeccao", "hpv"} <= set(ist)
+    assert {"sifilis", "adquirida", "infeccao", "hpv", "hiv"} <= set(ist)
     assert "introducao" not in ist and "tratamento" not in ist
-    # Title words add nothing: the scorer already reads the title.
-    assert kw["pcdt-celiaca"] == "pcdt"
+    # No "pcdt" token: the search strips it from queries instead.
+    assert "pcdt" not in ist
+    # Two-letter tokens are table noise; three-letter acronyms stay.
+    assert "tb" not in ist
+    # Title words and common words add nothing; a row with no word left is omitted.
+    assert set(kw) == {"pcdt-ist"}
+
+
+def test_build_keywords_reports_a_cut_row(script, monkeypatch, capsys):
+    monkeypatch.setattr(script, "MAX_TOKENS", 2)
+    kw = script.build_keywords({"pcdt-a": ["ALFA BETA GAMA DELTA"]}, {})
+    assert kw["pcdt-a"].split() == ["alfa", "beta"]
+    assert "pcdt-a: cut at 2 keywords, dropped 2" in capsys.readouterr().out

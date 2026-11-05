@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 import urllib.parse
 
@@ -360,6 +361,12 @@ class GovBrPCDTEngine:
         query_tokens = tokenize_portuguese(query)
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
+
+        # Every row here is a PCDT, so "pcdt" carries no signal; beside other
+        # words it only dilutes the token ratio of rows that lack the token.
+        if "pcdt" in query_tokens and len(query_tokens) > 1:
+            query_tokens = [t for t in query_tokens if t != "pcdt"]
+            query_norm = " ".join(re.sub(r"\bpcdt\b", " ", query_norm).split())
 
         cache_key = f"govbr_pcdt_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)
