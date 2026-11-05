@@ -71,6 +71,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Rank before truncate**: `search_medical_databases` and `search_medical_journals` re-rank the deduplicated candidate pool before slicing to 20/15, instead of truncating first (PR #6, #7).
 - **Journal search ranks on raw query**: `search_medical_journals` ranks against the user's original query, not the `[Journal]`-filter-expanded PubMed search term (PR #6, #7).
 - Tokenizer (`_tokenize`) now guards against `None` input.
+- **WHO statistics never cache a partial answer**: `get_health_statistics` and `get_child_health_statistics` wrote their result to the cache whenever at least one indicator answered, so one failed indicator fetch (or a failed indicator lookup that a name variation recovered) served the incomplete set for the whole 7-day WHO TTL. A result with a failed request is now returned with `error=True` and not cached, as `search_medical_databases` does.
 
 ## [1.0.0] — 2026-08-28
 

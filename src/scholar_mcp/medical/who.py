@@ -407,8 +407,10 @@ class WHOClient:
         all_records.sort(key=lambda r: r.time_dim, reverse=True)
         final_records = all_records[:limit]
 
-        if errored and not final_records:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed lookup must never be served from cache for the whole TTL:
+        # return what the other indicators found, flagged, without writing it.
+        if errored:
+            return final_records, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
@@ -462,8 +464,10 @@ class WHOClient:
         all_records.sort(key=lambda r: r.time_dim, reverse=True)
         final_records = all_records[:limit]
 
-        if errored and not final_records:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed lookup must never be served from cache for the whole TTL:
+        # return what the other indicators found, flagged, without writing it.
+        if errored:
+            return final_records, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,

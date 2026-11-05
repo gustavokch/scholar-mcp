@@ -187,6 +187,74 @@ async def test_get_child_health_statistics_marks_error_on_failure(tmp_path: Path
         await http_client.aclose()
 
 
+@respx.mock
+async def test_get_health_statistics_does_not_cache_a_partial_result(tmp_path: Path):
+    """One of two indicators fails: the other's rows come back, flagged, and
+    are not cached -- the next call must ask for both again instead of
+    serving the incomplete answer for the whole TTL."""
+    client, cache, http_client = _client(tmp_path)
+    try:
+        respx.get(f"{GHO_BASE}/Indicator").respond(
+            json={
+                "value": [
+                    {"IndicatorCode": "WHOSIS_000001", "IndicatorName": "Life expectancy at birth (years)"},
+                    {"IndicatorCode": "WHOSIS_000015", "IndicatorName": "Life expectancy at age 60 (years)"},
+                ]
+            }
+        )
+        respx.get(f"{GHO_BASE}/WHOSIS_000001").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2020", "NumericValue": 78.5}]}
+        )
+        # A 404 fails the fetch without the retry ladder's backoff.
+        failing = respx.get(f"{GHO_BASE}/WHOSIS_000015").respond(status_code=404)
+
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert [r.indicator_code for r in records] == ["WHOSIS_000001"]
+        assert meta.error is True
+
+        after_first = failing.call_count
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert failing.call_count > after_first
+        assert meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_child_health_statistics_does_not_cache_a_partial_result(tmp_path: Path):
+    """Same rule for the child-health panel: one failed indicator keeps the
+    answer out of the cache."""
+    from scholar_mcp.medical.who import (
+        WHO_CHILD_HEALTH_INDICATORS,
+        select_child_indicators,
+    )
+
+    client, cache, http_client = _client(tmp_path)
+    codes = select_child_indicators("zzz")  # matches nothing -> the whole panel
+    assert len(codes) == len(WHO_CHILD_HEALTH_INDICATORS) >= 2
+    ok_code, failing_code = codes[0], codes[1]
+    try:
+        respx.get(f"{GHO_BASE}/{ok_code}").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2021", "NumericValue": 6.2}]}
+        )
+        failing = respx.get(f"{GHO_BASE}/{failing_code}").respond(status_code=404)
+        for code in codes[2:]:
+            respx.get(f"{GHO_BASE}/{code}").respond(json={"value": []})
+
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert [r.indicator_code for r in records] == [ok_code]
+        assert meta.error is True
+
+        after_first = failing.call_count
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert failing.call_count > after_first
+        assert meta.cached is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 # --- Indicator name matching ------------------------------------------------
 #
 # The GHO filter used to be one literal substring test over the whole query:
