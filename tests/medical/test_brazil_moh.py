@@ -4115,3 +4115,161 @@ async def test_bvs_sifilis_titles_leave_the_ist_protocol_in_the_result(tmp_path:
     finally:
         await cache.close()
         await http_client.aclose()
+
+
+# --- PCDT floor and doc-type token at the merge -------------------------------
+# GovBrPCDTEngine finds the IST protocol for "sifilis" (keyword tier), but the
+# merged ranking scored it ~0.45 against 0.65-0.77 for BVS rows with a lexical
+# match and cut it from the default limit. A strong engine hit is now pinned.
+
+
+def _sifilis_bvs_docs(n: int = 4) -> list[dict]:
+    return [
+        _bvs_doc(
+            record_id=f"biblio-sifilis-{i}",
+            title=f"Sífilis: estratégias de diagnóstico {i}",
+            mh=["Sífilis"],
+            ab="Sífilis na gestação e sífilis congênita.",
+        )
+        for i in range(n)
+    ]
+
+
+@respx.mock
+async def test_ist_protocol_survives_four_sifilis_bvs_rows(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(_sifilis_bvs_docs()))
+        )
+        for query in ("sifilis PCDT", "sifilis"):
+            records, meta = await engine.search_guidelines(query, limit=6, collection="all")
+            assert IST_PCDT in [r.record_id for r in records], query
+            assert len(records) <= 6
+            assert meta.error is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_pcdt_engine_scores_sifilis_to_the_ist_protocol_above_the_floor(tmp_path: Path):
+    from scholar_mcp.medical.brazil_moh import PCDT_FLOOR_SCORE
+
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        for query in ("sifilis", "sifilis PCDT"):
+            records, _ = await engine.pcdt_engine.search(query, limit=6)
+            scores = {r.record_id: r.score for r in records}
+            assert scores[IST_PCDT] >= PCDT_FLOOR_SCORE, (query, scores[IST_PCDT])
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_bvs_compositions_carry_no_pcdt_token(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response([]))
+        )
+        # Two topic words make the OR-title stage run as well.
+        for query in ("sifilis PCDT", "sifilis gestante PCDT"):
+            route.calls.reset()
+            await engine.search_guidelines(query, limit=6, collection="all")
+            sent = [c.request.url.params["q"] for c in route.calls]
+            assert sent, query
+            assert not any("pcdt" in q.lower() for q in sent), sent
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_pcdt_token_does_not_fragment_the_search_cache(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(_sifilis_bvs_docs()))
+        )
+        first, _ = await engine.search_guidelines("sifilis PCDT", limit=6, collection="all")
+        second, second_meta = await engine.search_guidelines("sifilis", limit=6, collection="all")
+        assert second_meta.cached is True
+        assert route.call_count == 1
+        assert [r.record_id for r in second] == [r.record_id for r in first]
+        # The pin is part of the cached row: a hit keeps the protocol too.
+        assert IST_PCDT in [r.record_id for r in second]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def _stub_pcdt_rows(engine, rows: list[BrazilGuideline]) -> None:
+    async def _rows(*args, **kwargs):
+        return list(rows), CacheMetadata(cached=False, cache_age=0, error=False)
+
+    engine.pcdt_engine.search = _rows
+
+
+def _pcdt_row(record_id: str, score: float) -> BrazilGuideline:
+    return BrazilGuideline(
+        title="Protocolo sem relação", record_id=record_id, origin="govbr_catalog",
+        has_full_text=True, year="2020", score=score,
+    )
+
+
+@respx.mock
+async def test_weak_pcdt_hits_are_not_pinned(tmp_path: Path):
+    """Below the floor the result is what it was without the PCDT row."""
+    respx.get(url__startswith=BVS_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json=_bvs_response(_sifilis_bvs_docs(8)))
+    )
+    ids = {}
+    for name, rows in (("weak", [_pcdt_row("pcdt-weak", 0.49)]), ("none", [])):
+        (tmp_path / name).mkdir()
+        engine, cache, http_client = await _engine_with_catalogs(tmp_path / name)
+        try:
+            _stub_pcdt_rows(engine, rows)
+            records, _ = await engine.search_guidelines("sifilis", limit=6, collection="all")
+            ids[name] = [r.record_id for r in records]
+        finally:
+            await cache.close()
+            await http_client.aclose()
+    assert "pcdt-weak" not in ids["weak"]
+    assert ids["weak"] == ids["none"]
+    assert len(ids["weak"]) == 6
+
+
+@respx.mock
+async def test_pinned_pcdt_hits_never_exceed_the_limit(tmp_path: Path):
+    engine, cache, http_client = await _engine_with_catalogs(tmp_path)
+    try:
+        _stub_pcdt_rows(engine, [_pcdt_row(f"pcdt-strong-{i}", 0.9) for i in range(10)])
+        respx.get(url__startswith=BVS_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json=_bvs_response(_sifilis_bvs_docs(8)))
+        )
+        for limit in (1, 3, 6):
+            records, _ = await engine.search_guidelines(
+                "sifilis", limit=limit, collection="all"
+            )
+            assert len(records) == limit
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_finalize_records_pins_replace_the_lowest_ranked_unpinned_rows():
+    rows = [
+        BrazilGuideline(title=f"Sífilis {i}", record_id=f"bvs-{i}", origin="bvs",
+                        has_full_text=True, year="2026")
+        for i in range(4)
+    ] + [_pcdt_row("pcdt-pin", 0.6)]
+
+    kept, rerank_in = BrazilMoHEngine._finalize_records(
+        rows, "sifilis", None, 3, pinned=frozenset({"pcdt-pin"})
+    )
+
+    ids = [r.record_id for r in kept]
+    assert len(ids) == 3 and rerank_in == 5
+    # The pin displaces the lowest-ranked unpinned row; the rest keep order.
+    assert ids == ["bvs-0", "bvs-1", "pcdt-pin"]

@@ -82,6 +82,7 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.bvs_guard import BvsGuard
 from scholar_mcp.medical.govbr_az import GovBrAZEngine
+from scholar_mcp.medical.govbr_common import strip_pcdt_token
 from scholar_mcp.medical.govbr_pcdt import GOVBR_HEADERS, GovBrPCDTEngine
 from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
 from scholar_mcp.medical.passages import DEFAULT_SERVING_CHARS, serve_body
@@ -138,8 +139,18 @@ MAX_FULL_TEXT_CHARS = 600_000
 # 30 days (config.cache_ttl_brazil_moh), so an un-bumped key is a month of
 # wrong answers. v2: has_full_text (B4) + 600k bodies with total_chars (B3).
 # v3: origin (position prior scoped to BVS records).
-# v4: PCDT heading keywords change catalog ranking.
-CACHE_SCHEMA = "v4"
+# v4: PCDT heading keywords change catalog ranking. v5: PCDT floor; the cached
+# search row now carries the pinned ids.
+CACHE_SCHEMA = "v5"
+
+# A PCDT-engine hit at or above this engine score is kept in the final slice.
+# The merge ranks catalog rows on lexical coverage alone, so a protocol found
+# only through its heading keywords (engine score 0.56-0.63: 0.7 x the 0.80
+# and 0.90 tiers) scores ~0.45 against 0.65-0.77 for BVS rows with a lexical
+# match, and fell out of the default limit. 0.5 sits above every partial
+# token match (0.5 x ratio, or 0.7 x that for keywords), so only matches
+# carrying the whole query qualify.
+PCDT_FLOOR_SCORE = 0.5
 
 # Camoufox (anti-detection Firefox) fetches the JSON search payload with the
 # browser fingerprint the CDN shield accepts. Mirrors the pediatrics scraper:
@@ -485,11 +496,13 @@ def _topic_filtered(
     # topic. Left in, they carry frequency zero against any Portuguese record,
     # become the sole discriminating term, and empty every pool -- "dengue AND
     # manejo" would drop the dengue guides it names.
-    terms = [t for t in tokenize_portuguese(query) if t not in _SOLR_BOOLEAN_WORDS]
     # Every gov.br catalog row is a protocol, so "pcdt" names no topic; absent
     # from the pool it would become the sole discriminator and empty it.
-    if "pcdt" in terms and len(set(terms)) > 1:
-        terms = [t for t in terms if t != "pcdt"]
+    terms = [
+        t
+        for t in tokenize_portuguese(strip_pcdt_token(query))
+        if t not in _SOLR_BOOLEAN_WORDS
+    ]
     if not records or not terms:
         return records
 
@@ -1124,6 +1137,7 @@ class BrazilMoHEngine:
         query: str,
         since_year: int | None,
         clamped: int,
+        pinned: frozenset[str] | set[str] = frozenset(),
     ) -> tuple[list[BrazilGuideline], int]:
         """Filter by ``since_year``, rank, then slice to ``clamped``.
 
@@ -1131,10 +1145,17 @@ class BrazilMoHEngine:
         so the cache can hold one unfiltered row per (collection, limit,
         query) and still reproduce the exact per-``since_year`` result --
         filtering before ranking, as ``_apply_since_year`` requires.
+
+        ``pinned`` holds the record ids of strong PCDT-engine hits (see
+        ``PCDT_FLOOR_SCORE``). A pinned row ranked below the slice replaces
+        the lowest-ranked unpinned row; the kept rows stay in ranked order.
         """
         filtered = BrazilMoHEngine._apply_since_year(records, since_year)
-        ranked = rank_brazil_guidelines(filtered, query)[:clamped]
-        return ranked, len(filtered)
+        ranked = rank_brazil_guidelines(filtered, query)
+        floor = [g for g in ranked if g.record_id in pinned][:clamped]
+        rest = [g for g in ranked if g.record_id not in pinned][: clamped - len(floor)]
+        kept = {id(g) for g in (*floor, *rest)}
+        return [g for g in ranked if id(g) in kept], len(filtered)
 
     def _search_meta(
         self,
@@ -1301,7 +1322,14 @@ class BrazilMoHEngine:
         # filters alone would return arbitrary top-of-index documents dressed
         # as matches for terms that were never searched. Stopword stripping
         # widens this: "sobre a" now lands here rather than being searched.
-        tokens = _usable_tokens(query)
+        #
+        # ``topic`` is the query without the doc-type word "pcdt": every
+        # stage below searches, caches and ranks on it. Sent to BVS, the word
+        # matches unrelated reports that merely mention a PCDT; as a ranking
+        # term it only dilutes lexical coverage. ``query`` stays the caller's
+        # words for diagnostics.
+        topic = strip_pcdt_token(query)
+        tokens = _usable_tokens(topic)
         if (query or "").strip() and not tokens:
             logger.info("brazil_moh query %r has no searchable tokens", query)
             return [], CacheMetadata(
@@ -1318,7 +1346,7 @@ class BrazilMoHEngine:
         # serves every ``since_year`` instead of fragmenting the 30-day
         # cache per distinct year requested.
         title_composed = _build_query(
-            query,
+            topic,
             norm_collection,
             operator="AND",
             title_scoped=True,
@@ -1331,10 +1359,11 @@ class BrazilMoHEngine:
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             cached_records, _ = self._finalize_records(
-                [BrazilGuideline.from_dict(item) for item in cached_data],
-                query,
+                [BrazilGuideline.from_dict(item) for item in cached_data["records"]],
+                topic,
                 since_year,
                 clamped,
+                frozenset(cached_data["pinned"]),
             )
             hit_meta = self._finalize_search(
                 _SearchOutcome(
@@ -1367,8 +1396,14 @@ class BrazilMoHEngine:
             cached=False, cache_age=0, error=True, error_kind="timeout", timeout=True
         )
         (pcdt_records, pcdt_meta), (az_records, az_meta) = await asyncio.gather(
-            self._stage("govbr_pcdt", self.pcdt_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
-            self._stage("govbr_az", self.az_engine.search(query, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
+            self._stage("govbr_pcdt", self.pcdt_engine.search(topic, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
+            self._stage("govbr_az", self.az_engine.search(topic, limit=clamped), ([], stage_error_meta), chain_start=chain_start),
+        )
+        # Taken before ranking, which overwrites ``score`` in place.
+        pinned = frozenset(
+            r.record_id
+            for r in pcdt_records
+            if r.record_id and (r.score or 0.0) >= PCDT_FLOOR_SCORE
         )
         errored_any = pcdt_meta.error or az_meta.error
         # Kept apart from errored_any: a browser-tier success clears the BVS
@@ -1389,7 +1424,7 @@ class BrazilMoHEngine:
         # the tokens; for a single token that is the strict composition. Both
         # consumers only run when `tokens` is non-empty.
         all_composed: str | None = (
-            _build_query(query, norm_collection, operator="OR", title_scoped=False)
+            _build_query(topic, norm_collection, operator="OR", title_scoped=False)
             if tokens
             else None
         )
@@ -1426,7 +1461,7 @@ class BrazilMoHEngine:
             and not self._bvs_unavailable(state)
         ):
             or_title_composed = _build_query(
-                query, norm_collection, operator="OR", title_scoped=True
+                topic, norm_collection, operator="OR", title_scoped=True
             )
             or_title_records, or_title_errored = await self._bvs_stage(
                 "title-scoped-or",
@@ -1509,13 +1544,13 @@ class BrazilMoHEngine:
             # Gate on topic first: an empty result is a truthful "not
             # covered", while four unrelated syndromes read as Brazilian
             # evidence downstream.
-            on_topic = _topic_filtered(local_records, query)
+            on_topic = _topic_filtered(local_records, topic)
             if on_topic:
                 # Same filter-rank-slice order as every other exit: slicing
                 # first would hand the caller fewer rows than it asked for
                 # whenever `since_year` drops a high-ranked old document.
                 ranked_local, rerank_in_local = self._finalize_records(
-                    on_topic, query, since_year, clamped
+                    on_topic, topic, since_year, clamped, pinned
                 )
                 local_meta = self._finalize_search(
                     _SearchOutcome(
@@ -1571,7 +1606,7 @@ class BrazilMoHEngine:
         # the `count` over-fetched candidates and discard the rest in BVS
         # order, defeating the over-fetch.
         records, rerank_in = self._finalize_records(
-            merged_records, query, since_year, clamped
+            merged_records, topic, since_year, clamped, pinned
         )
 
         # A partial retrieval is never cached. A chain with any errored stage
@@ -1589,7 +1624,10 @@ class BrazilMoHEngine:
         if not errored_any:
             await self.cache.set(
                 cache_key,
-                [record.to_dict() for record in merged_records],
+                {
+                    "records": [record.to_dict() for record in merged_records],
+                    "pinned": sorted(pinned),
+                },
                 source="brazil_moh",
             )
             # Per-id record rows for the full-text open path. A cold

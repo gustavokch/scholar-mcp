@@ -5,6 +5,7 @@ from scholar_mcp.medical.govbr_common import (
     normalize_text,
     score_item,
     strip_document_extension,
+    strip_pcdt_token,
     tokenize_portuguese,
 )
 
@@ -165,3 +166,18 @@ def test_score_item_still_matches_the_slug_without_its_extension():
         "",
     )
     assert score == 1.0
+
+
+def test_strip_pcdt_token_drops_the_word_beside_other_words():
+    assert strip_pcdt_token("sifilis PCDT") == "sifilis"
+    assert strip_pcdt_token("pcdt de sífilis na gestante") == "de sífilis na gestante"
+
+
+def test_strip_pcdt_token_keeps_a_query_that_is_only_the_token():
+    assert strip_pcdt_token("PCDT") == "PCDT"
+    assert strip_pcdt_token("pcdt de") == "pcdt de"
+    assert strip_pcdt_token("") == ""
+
+
+def test_strip_pcdt_token_leaves_words_that_only_contain_it():
+    assert strip_pcdt_token("pcdts sifilis") == "pcdts sifilis"

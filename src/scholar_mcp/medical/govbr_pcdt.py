@@ -10,7 +10,6 @@ import functools
 import json
 import logging
 from pathlib import Path
-import re
 from typing import Any
 import urllib.parse
 
@@ -24,6 +23,7 @@ from scholar_mcp.medical.govbr_common import (  # noqa: F401  (re-exported)
     derive_item_urls,
     normalize_text,
     score_item,
+    strip_pcdt_token,
     tokenize_portuguese,
 )
 from scholar_mcp.medical.models import BrazilGuideline, has_retrievable_body
@@ -363,16 +363,11 @@ class GovBrPCDTEngine:
         limit: int = 10,
     ) -> tuple[list[BrazilGuideline], CacheMetadata]:
         """Search PCDT catalog by clinical condition or keyword."""
+        query = strip_pcdt_token(query)
         query_norm = normalize_text(query)
         query_tokens = tokenize_portuguese(query)
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
-
-        # Every row here is a PCDT, so "pcdt" carries no signal; beside other
-        # words it only dilutes the token ratio of rows that lack the token.
-        if "pcdt" in query_tokens and len(query_tokens) > 1:
-            query_tokens = [t for t in query_tokens if t != "pcdt"]
-            query_norm = " ".join(re.sub(r"\bpcdt\b", " ", query_norm).split())
 
         cache_key = f"govbr_pcdt_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)
