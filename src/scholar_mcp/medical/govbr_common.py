@@ -86,6 +86,22 @@ def tokenize_portuguese(text: str | None) -> list[str]:
     ]
 
 
+_PCDT_TOKEN_RE = re.compile(r"\bpcdt\b", re.IGNORECASE)
+
+
+def strip_pcdt_token(query: str) -> str:
+    """Drop the word "pcdt" from a query that carries other words.
+
+    Every gov.br catalog row is a protocol, so the word names a document type,
+    not a topic: beside other words it only dilutes a catalog row's token
+    ratio, and sent to BVS it matches unrelated reports that merely mention a
+    PCDT. A query that is only the word (or the word and stopwords) is
+    returned unchanged: it is the whole request.
+    """
+    stripped = " ".join(_PCDT_TOKEN_RE.sub(" ", query).split())
+    return stripped if tokenize_portuguese(stripped) else query
+
+
 def score_item(
     query_tokens: list[str],
     query_norm: str,
