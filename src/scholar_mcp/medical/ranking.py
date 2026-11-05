@@ -204,7 +204,8 @@ def rank_brazil_guidelines(
       Gov.br catalog keywords join the secondary side for the same reason:
       an umbrella PCDT names its conditions only in its section headings,
       and secondary text weighs half of the title, so a keyword-only match
-      never outranks a title match of equal coverage.
+      scores below a title match of equal coverage on the lexical score
+      (recency can still reorder them).
 
     The position prior applies to BVS records only, ranked by their order
     among the BVS records in the input: BVS returns a single relevance-sorted
