@@ -280,7 +280,9 @@ async def test_get_health_statistics_does_not_cache_a_partial_result(tmp_path: P
         after_first = failing.call_count
         records, meta = await client.get_health_statistics("life expectancy", country="USA")
         assert failing.call_count > after_first
+        assert [r.indicator_code for r in records] == ["WHOSIS_000001"]
         assert meta.cached is False
+        assert meta.error is True
     finally:
         await cache.close()
         await http_client.aclose()
@@ -314,7 +316,46 @@ async def test_get_child_health_statistics_does_not_cache_a_partial_result(tmp_p
         after_first = failing.call_count
         records, meta = await client.get_child_health_statistics("zzz", country="USA")
         assert failing.call_count > after_first
+        assert [r.indicator_code for r in records] == [ok_code]
         assert meta.cached is False
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_health_statistics_does_not_cache_a_variation_recovered_lookup(tmp_path: Path):
+    """The primary indicator lookup fails and a name variation finds an
+    indicator. The primary term could have matched a closer indicator, so the
+    answer is flagged and not cached."""
+    client, cache, http_client = _client(tmp_path)
+
+    def found():
+        return respx.MockResponse(
+            json={"value": [{"IndicatorCode": "WHS9_86", "IndicatorName": "Exclusive breastfeeding"}]}
+        )
+
+    try:
+        indicator_route = respx.get(f"{GHO_BASE}/Indicator")
+        # A 404 fails the primary lookup without the retry ladder's backoff.
+        indicator_route.side_effect = [
+            respx.MockResponse(status_code=404), found(),
+            respx.MockResponse(status_code=404), found(),
+        ]
+        respx.get(f"{GHO_BASE}/WHS9_86").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2021", "NumericValue": 0.42}]}
+        )
+
+        records, meta = await client.get_health_statistics("breastfeeding", country="USA")
+        assert [r.indicator_code for r in records] == ["WHS9_86"]
+        assert meta.error is True
+
+        records, meta = await client.get_health_statistics("breastfeeding", country="USA")
+        assert indicator_route.call_count == 4
+        assert [r.indicator_code for r in records] == ["WHS9_86"]
+        assert meta.cached is False
+        assert meta.error is True
     finally:
         await cache.close()
         await http_client.aclose()
