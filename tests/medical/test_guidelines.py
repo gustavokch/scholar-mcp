@@ -9,6 +9,7 @@ from scholar_mcp.medical.guidelines import (
     calculate_guideline_score,
     extract_organization,
     organization_matches,
+    same_guideline,
 )
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
@@ -458,10 +459,11 @@ async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(t
         await http_client.aclose()
 
 
-def _guideline_record(pmid: str, journal: str, title: str, doi: str) -> str:
+def _guideline_record(pmid: str, journal: str, title: str, doi: str, year: str = "") -> str:
+    issue = f"<JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>" if year else ""
     return (
         f"<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID>"
-        f"<Article><Journal><Title>{journal}</Title></Journal>"
+        f"<Article><Journal>{issue}<Title>{journal}</Title></Journal>"
         f"<ArticleTitle>{title}</ArticleTitle>"
         "<Abstract><AbstractText>Evidence-based recommendation and consensus "
         "for blood pressure management.</AbstractText></Abstract>"
@@ -511,6 +513,58 @@ async def test_search_clinical_guidelines_merges_simultaneous_publications(tmp_p
         guidelines, meta = await engine.search_clinical_guidelines("hypertension", organization="ACC")
         assert meta.error is False
         assert [g.pmid for g in guidelines] == ["701"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_same_guideline_never_merges_two_editions():
+    """A title match is one guideline only when the copies appeared within a
+    year of each other: simultaneous copies can straddle a year end, but a
+    2011 guideline and its 2019 update are two editions."""
+    original = "Clinical Practice Guideline: Tonsillectomy in Children"
+    update = f"{original} (Update)"
+    assert same_guideline(original, update, year_a="2011", year_b="2019") is False
+    assert same_guideline(original, original, year_a="2011", year_b="2019") is False
+    assert same_guideline(original, original, year_a="2017", year_b="2018") is True
+    assert same_guideline(original, update, year_a="2019", year_b="") is True
+    # One DOI is one publication, whatever the stated years.
+    assert same_guideline(
+        original, update, "10.1/x", "10.1/X", year_a="2011", year_b="2019"
+    ) is True
+
+
+@respx.mock
+async def test_search_clinical_guidelines_keeps_both_editions_of_a_guideline(tmp_path: Path):
+    """The 2011 guideline and its 2019 update share a title prefix. Merging
+    them kept whichever came first in relevance order, often the superseded
+    edition; both must stay."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    title = "Clinical Practice Guideline: Tonsillectomy in Children"
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["901", "902"]}})
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet>"
+                + _guideline_record(
+                    "901", "Otolaryngology--Head and Neck Surgery", title,
+                    "10.1177/0194599810389949", year="2011",
+                )
+                + _guideline_record(
+                    "902", "Otolaryngology--Head and Neck Surgery", f"{title} (Update)",
+                    "10.1177/0194599818801757", year="2019",
+                )
+                + "</PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines("tonsillectomy children")
+        assert meta.error is False
+        assert sorted(g.pmid for g in guidelines) == ["901", "902"]
     finally:
         await cache.close()
         await http_client.aclose()

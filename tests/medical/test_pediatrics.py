@@ -256,6 +256,26 @@ async def test_search_aap_guidelines_combines_and_dedups(tmp_path: Path):
     await http_client.aclose()
 
 
+def test_dedupe_guidelines_keeps_both_editions():
+    """Two AAP items with one title a year apart or less are one guideline;
+    the same title six years apart is a new edition and stays."""
+    from scholar_mcp.medical.models import PediatricGuideline
+    from scholar_mcp.medical.pediatrics import _dedupe_guidelines
+
+    title = "Recommendations for Prevention and Control of Influenza in Children"
+
+    def item(year: str) -> PediatricGuideline:
+        return PediatricGuideline(
+            title=title, organization="AAP", url="", source="aap-policy", year=year
+        )
+
+    assert [g.year for g in _dedupe_guidelines([item("2018"), item("2024")])] == [
+        "2018", "2024",
+    ]
+    assert [g.year for g in _dedupe_guidelines([item("2023"), item("2024")])] == ["2023"]
+    assert [g.year for g in _dedupe_guidelines([item(""), item("2024")])] == [""]
+
+
 @respx.mock
 async def test_search_aap_guidelines_pubmed_rows_take_category_from_title(tmp_path: Path):
     """PubMed-backed AAP rows were all labelled "Policy Statement". The

@@ -167,6 +167,7 @@ def organization_matches(organization: str, text: str) -> bool:
 
 _DOI_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/")
 _REPORT_TAIL_RE = re.compile(r"\ba report of the\b.*$", re.IGNORECASE | re.DOTALL)
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
 
 def guideline_key(title: str) -> str:
@@ -176,15 +177,31 @@ def guideline_key(title: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", core)).strip()
 
 
+def _pub_year(year: str | None) -> int | None:
+    match = _YEAR_RE.search(year or "")
+    return int(match.group(0)) if match else None
+
+
 def same_guideline(
-    title_a: str, title_b: str, doi_a: str | None = None, doi_b: str | None = None
+    title_a: str,
+    title_b: str,
+    doi_a: str | None = None,
+    doi_b: str | None = None,
+    year_a: str | None = None,
+    year_b: str | None = None,
 ) -> bool:
-    """One guideline published twice (JACC and Circulation): same DOI, same
-    title key, or one key of at least 40 characters prefixing the other."""
+    """One guideline published twice (JACC and Circulation): same DOI, or same
+    title key or one key of at least 40 characters prefixing the other. A
+    title match needs the two years, when both are known, at most one apart:
+    simultaneous copies can straddle a year end, but a 2011 guideline and its
+    2019 "(Update)" are two editions."""
     norm_a = _DOI_PREFIX_RE.sub("", (doi_a or "").strip().lower())
     norm_b = _DOI_PREFIX_RE.sub("", (doi_b or "").strip().lower())
     if norm_a and norm_a == norm_b:
         return True
+    pub_a, pub_b = _pub_year(year_a), _pub_year(year_b)
+    if pub_a is not None and pub_b is not None and abs(pub_a - pub_b) > 1:
+        return False
     key_a, key_b = guideline_key(title_a), guideline_key(title_b)
     if not key_a or not key_b:
         return False
@@ -345,7 +362,7 @@ class GuidelinesEngine:
         for cand in candidates:
             art = cand[0]
             if not any(
-                same_guideline(art.title, kept.title, art.doi, kept.doi)
+                same_guideline(art.title, kept.title, art.doi, kept.doi, art.year, kept.year)
                 for kept, _, _ in unique_candidates
             ):
                 unique_candidates.append(cand)

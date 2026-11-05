@@ -174,7 +174,10 @@ def _dedupe_guidelines(items: list[PediatricGuideline]) -> list[PediatricGuideli
     """First copy of each guideline (see ``same_guideline``)."""
     unique: list[PediatricGuideline] = []
     for g in items:
-        if not any(same_guideline(g.title, kept.title) for kept in unique):
+        if not any(
+            same_guideline(g.title, kept.title, year_a=g.year, year_b=kept.year)
+            for kept in unique
+        ):
             unique.append(g)
     return unique
 
