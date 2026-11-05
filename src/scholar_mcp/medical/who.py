@@ -249,6 +249,25 @@ def _safe_float(value: Any, default: float | None = 0.0) -> float | None:
         return default
 
 
+# GHO disaggregates rows by DimNType/DimN pairs (SEX, AGEGROUP, ...); the
+# legacy top-level "Sex"/"AgeGroup" fields are absent from live rows.
+_SEX_LABELS = {"SEX_BTSX": "Both sexes", "SEX_FMLE": "Female", "SEX_MLE": "Male"}
+_AGGREGATE_SEXES = frozenset({"", "Both sexes"})
+
+# Rows fetched per indicator. Ordered by TimeDim desc, so this covers every
+# slice of the latest years.
+_GHO_ROWS = "50"
+
+
+def _row_dims(row: dict[str, Any]) -> dict[str, str]:
+    dims: dict[str, str] = {}
+    for i in (1, 2, 3):
+        dim_type, dim = row.get(f"Dim{i}Type"), row.get(f"Dim{i}")
+        if dim_type and dim:
+            dims[str(dim_type)] = str(dim)
+    return dims
+
+
 def _parse_indicator_record(
     row: dict[str, Any],
     code: str,
@@ -264,8 +283,12 @@ def _parse_indicator_record(
     low = _safe_float(row.get("Low"), default=0.0)
     high = _safe_float(row.get("High"), default=0.0)
     unit = str(row.get("Unit") or "")
-    sex = str(row.get("Sex") or "")
-    age_group = str(row.get("AgeGroup") or extract_age_group(name))
+    dims = _row_dims(row)
+    sex_code = dims.get("SEX", "")
+    sex = _SEX_LABELS.get(sex_code, sex_code) or str(row.get("Sex") or "")
+    age_group = (
+        dims.get("AGEGROUP") or str(row.get("AgeGroup") or "") or extract_age_group(name)
+    )
     comments = str(row.get("Comments") or "")
     date = str(row.get("Date") or "")
 
@@ -288,6 +311,16 @@ def _parse_indicator_record(
     )
 
 
+def _latest_first(records: list[WHOIndicatorRecord]) -> list[WHOIndicatorRecord]:
+    """Newest year first; within a year the aggregate (both sexes / no sex
+    split) leads, so a ``limit`` cap keeps it over the per-sex values."""
+    return sorted(
+        records,
+        key=lambda r: (r.time_dim, r.sex in _AGGREGATE_SEXES),
+        reverse=True,
+    )
+
+
 class WHOClient:
     def __init__(
         self,
@@ -305,7 +338,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"who:{indicator}:{country}:{limit}"
+        cache_key = f"who:v2:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
@@ -372,40 +405,14 @@ class WHOClient:
             name = ind.get("IndicatorName", "")
             if not code:
                 continue
-
-            params: dict[str, str] = {
-                "$format": "json",
-                "$top": "50",
-            }
-            if country:
-                params["$filter"] = f"SpatialDim eq '{country}'"
-
             try:
-                resp = await self.http_client.get(
-                    f"{WHO_API_BASE}/{code}",
-                    params=params,
-                )
-                if resp is None:
-                    raise FetchError("who record request failed")
-                rows = resp.json().get("value", [])
-                # Deduplicate by SpatialDim keeping most recent TimeDim
-                by_spatial: dict[str, dict[str, Any]] = {}
-                for row in rows:
-                    spatial = row.get("SpatialDim") or "Global"
-                    time_dim = str(row.get("TimeDim") or "")
-                    if spatial not in by_spatial or time_dim > str(by_spatial[spatial].get("TimeDim") or ""):
-                        by_spatial[spatial] = row
-
-                for r in by_spatial.values():
-                    all_records.append(_parse_indicator_record(r, code, name))
+                all_records.extend(await self._fetch_latest_slices(code, name, country))
             except Exception:
                 logger.warning("WHO record fetch failed for %r", code, exc_info=True)
                 errored = True
                 continue
 
-        # Sort by TimeDim desc
-        all_records.sort(key=lambda r: r.time_dim, reverse=True)
-        final_records = all_records[:limit]
+        final_records = _latest_first(all_records)[:limit]
 
         if errored and not final_records:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
@@ -423,7 +430,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"child_health:{indicator}:{country}:{limit}"
+        cache_key = f"child_health:v2:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
@@ -432,26 +439,12 @@ class WHOClient:
         errored = False
 
         for code in select_child_indicators(indicator):
-            params: dict[str, str] = {
-                "$format": "json",
-                "$top": str(limit),
-            }
-            if country:
-                params["$filter"] = f"SpatialDim eq '{country}'"
-
             try:
-                resp = await self.http_client.get(
-                    f"{WHO_API_BASE}/{code}",
-                    params=params,
-                )
-                if resp is None:
-                    raise FetchError("who child-health record request failed")
-                rows = resp.json().get("value", [])
-                for row in rows:
-                    record = _parse_indicator_record(
-                        row, code, WHO_CHILD_HEALTH_INDICATORS.get(code, "")
+                all_records.extend(
+                    await self._fetch_latest_slices(
+                        code, WHO_CHILD_HEALTH_INDICATORS.get(code, ""), country
                     )
-                    all_records.append(record)
+                )
             except Exception:
                 logger.warning(
                     "WHO child-health record fetch failed for %r", code, exc_info=True
@@ -459,8 +452,7 @@ class WHOClient:
                 errored = True
                 continue
 
-        all_records.sort(key=lambda r: r.time_dim, reverse=True)
-        final_records = all_records[:limit]
+        final_records = _latest_first(all_records)[:limit]
 
         if errored and not final_records:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
@@ -471,3 +463,32 @@ class WHOClient:
             source="child_health",
         )
         return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
+
+    async def _fetch_latest_slices(
+        self,
+        code: str,
+        name: str,
+        country: str | None,
+    ) -> list[WHOIndicatorRecord]:
+        """The latest year of each (country, Dim1, Dim2, Dim3) slice of one
+        GHO indicator. Raises on fetch failure."""
+        params: dict[str, str] = {
+            "$format": "json",
+            "$orderby": "TimeDim desc",
+            "$top": _GHO_ROWS,
+        }
+        if country:
+            params["$filter"] = f"SpatialDim eq '{country}'"
+        resp = await self.http_client.get(f"{WHO_API_BASE}/{code}", params=params)
+        if resp is None:
+            raise FetchError("who record request failed")
+        latest: dict[tuple[str, ...], dict[str, Any]] = {}
+        for row in resp.json().get("value", []):
+            key = (
+                str(row.get("SpatialDim") or "Global"),
+                *(str(row.get(f"Dim{i}") or "") for i in (1, 2, 3)),
+            )
+            time_dim = str(row.get("TimeDim") or "")
+            if key not in latest or time_dim > str(latest[key].get("TimeDim") or ""):
+                latest[key] = row
+        return [_parse_indicator_record(r, code, name) for r in latest.values()]

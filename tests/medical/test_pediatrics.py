@@ -256,6 +256,68 @@ async def test_search_aap_guidelines_combines_and_dedups(tmp_path: Path):
     await http_client.aclose()
 
 
+def test_dedupe_guidelines_keeps_both_editions():
+    """Two AAP items with one title a year apart or less are one guideline;
+    the same title six years apart is a new edition and stays."""
+    from scholar_mcp.medical.models import PediatricGuideline
+    from scholar_mcp.medical.pediatrics import _dedupe_guidelines
+
+    title = "Recommendations for Prevention and Control of Influenza in Children"
+
+    def item(year: str) -> PediatricGuideline:
+        return PediatricGuideline(
+            title=title, organization="AAP", url="", source="aap-policy", year=year
+        )
+
+    assert [g.year for g in _dedupe_guidelines([item("2018"), item("2024")])] == [
+        "2018", "2024",
+    ]
+    assert [g.year for g in _dedupe_guidelines([item("2023"), item("2024")])] == ["2023"]
+    assert [g.year for g in _dedupe_guidelines([item(""), item("2024")])] == [""]
+
+
+@respx.mock
+async def test_search_aap_guidelines_pubmed_rows_take_category_from_title(tmp_path: Path):
+    """PubMed-backed AAP rows were all labelled "Policy Statement". The
+    category now comes from the title marker; a title without one gets none.
+    Two copies of one guideline (title differing only by the "A Report of
+    the ..." tail) merge."""
+    from scholar_mcp.medical.models import MedicalArticle
+
+    engine, cache, http_client = await _engine(tmp_path)
+    engine.settings.enable_browser_fallback = False
+    respx.get(AAP_URL).respond(status_code=403)
+    core = "Evaluation and Management of Well-Appearing Febrile Infants 8 to 60 Days Old"
+    mock_pubmed = AsyncMock()
+    mock_pubmed.search_articles.return_value = (
+        [
+            MedicalArticle(
+                title=f"Clinical Practice Guideline: {core}",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="1",
+            ),
+            MedicalArticle(
+                title=f"Clinical Practice Guideline: {core}: A Report of the Subcommittee",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="2",
+            ),
+            MedicalArticle(
+                title="Febrile Infants: Fever Without a Source Guideline",
+                journal="Pediatrics", abstract="Guideline recommendations.", pmid="3",
+            ),
+        ],
+        CacheMetadata(cached=False, cache_age=0),
+    )
+    engine.pubmed = mock_pubmed
+    try:
+        guidelines, _ = await engine.search_aap_guidelines("febrile infant")
+        assert [(g.title, g.category) for g in guidelines] == [
+            (f"Clinical Practice Guideline: {core}", "Clinical Practice Guideline"),
+            ("Febrile Infants: Fever Without a Source Guideline", ""),
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @respx.mock
 async def test_search_pediatric_literature_keeps_journal_filter_when_relaxing(tmp_path: Path):
     from scholar_mcp.medical.pubmed import MedicalPubMedClient

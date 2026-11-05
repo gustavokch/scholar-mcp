@@ -8,6 +8,7 @@ class OpenFDAData:
     generic_name: list[str] = field(default_factory=list)
     manufacturer_name: list[str] = field(default_factory=list)
     product_ndc: list[str] = field(default_factory=list)
+    package_ndc: list[str] = field(default_factory=list)
     substance_name: list[str] = field(default_factory=list)
     route: list[str] = field(default_factory=list)
     dosage_form: list[str] = field(default_factory=list)
@@ -195,6 +196,8 @@ class MedicalArticle:
     full_text: str | None = None
     source_database: str = "PubMed"
     score: float | None = None  # set by rank_medical_articles
+    study_type: str | None = None  # PubMed PublicationType list, "; "-joined
+    evidence_grade: str | None = None  # classify_evidence_grade over study_type
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

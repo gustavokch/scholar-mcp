@@ -70,7 +70,7 @@ RELAX_WINDOW_SIZES = (5, 4, 3)
 MAX_RELAX_EXTRA_CALLS = 3
 
 _WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
-# Query-language punctuation neutralized the same way _search_cochrane does
+# Query-language punctuation neutralized the same way _search_systematic_reviews does
 # (medical/databases.py): a stray quote or paren in an agent-supplied query
 # is E-utility syntax, not part of the topic.
 _QUERY_PUNCT_RE = re.compile(r'["()]')

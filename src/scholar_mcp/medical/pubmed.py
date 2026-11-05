@@ -7,6 +7,8 @@ from bs4 import BeautifulSoup
 from scholar_mcp.config import Settings
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.ranking import SOURCE_POSITION_WEIGHT, rank_medical_articles
+from scholar_mcp.models import PaperMetadata
+from scholar_mcp.providers.pubmed import PubMedProvider
 from scholar_mcp.query_relax import MAX_RELAX_EXTRA_CALLS, relax_ladder
 from scholar_mcp.utils.deduplication import deduplicate_papers
 from scholar_mcp.utils.http import AsyncHttpClient, FetchError
@@ -18,94 +20,34 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 logger = logging.getLogger(__name__)
 
 
+def _to_medical_article(paper: PaperMetadata) -> MedicalArticle:
+    return MedicalArticle(
+        title=paper.title,
+        authors=paper.authors,
+        journal=paper.venue,
+        year=paper.year,
+        abstract=paper.abstract,
+        pmid=paper.pmid,
+        pmc_id=re.sub(r"^PMC", "", paper.pmcid, flags=re.IGNORECASE) if paper.pmcid else None,
+        doi=paper.doi,
+        url=f"https://pubmed.ncbi.nlm.nih.gov/{paper.pmid}/",
+        source_database="PubMed",
+        study_type=paper.study_type,
+        evidence_grade=paper.evidence_grade,
+    )
+
+
 def parse_pubmed_xml(xml_text: str) -> list[MedicalArticle]:
+    """EFetch XML -> MedicalArticle via the core PubMed record parser, so the
+    medical tools read the publication year from PubDate (not the first
+    <Year>, which is DateCompleted) and the DOI/PMCID from the record's own
+    ArticleIdList (not a cited reference's)."""
     soup = BeautifulSoup(xml_text, "lxml-xml")
     articles: list[MedicalArticle] = []
-
-    for citation in soup.find_all("PubmedArticle"):
-        pmid_elem = citation.find("PMID")
-        if pmid_elem is None or not pmid_elem.get_text(strip=True):
-            continue
-        pmid = pmid_elem.get_text(strip=True)
-
-        title_elem = citation.find("ArticleTitle")
-        title = title_elem.get_text(" ", strip=True) if title_elem is not None else ""
-
-        # Extract abstract
-        abstract_texts = citation.find_all("AbstractText")
-        if abstract_texts:
-            abstract = " ".join(t.get_text(" ", strip=True) for t in abstract_texts if t.get_text(strip=True))
-        else:
-            abstract = ""
-
-        # Extract authors
-        authors: list[str] = []
-        for author in citation.find_all("Author"):
-            collective = author.find("CollectiveName")
-            if collective is not None and collective.get_text(strip=True):
-                authors.append(collective.get_text(strip=True))
-                continue
-            last = author.find("LastName")
-            fore = author.find("ForeName")
-            if last is not None:
-                if fore is not None:
-                    authors.append(f"{fore.get_text(strip=True)} {last.get_text(strip=True)}")
-                else:
-                    authors.append(last.get_text(strip=True))
-
-        # Extract journal title
-        journal = ""
-        journal_elem = citation.find("Journal")
-        if journal_elem is not None:
-            jt_elem = journal_elem.find("Title") or journal_elem.find("ISOAbbreviation")
-            if jt_elem is not None:
-                journal = jt_elem.get_text(strip=True)
-
-        # Extract DOI
-        doi = None
-        eloc = citation.find("ELocationID", EIdType="doi")
-        if eloc is not None and eloc.get_text(strip=True):
-            doi = eloc.get_text(strip=True)
-        else:
-            aid_doi = citation.find("ArticleId", IdType="doi")
-            if aid_doi is not None and aid_doi.get_text(strip=True):
-                doi = aid_doi.get_text(strip=True)
-
-        # Extract PMC ID
-        pmc_id = None
-        aid_pmc = citation.find("ArticleId", IdType="pmc")
-        if aid_pmc is not None and aid_pmc.get_text(strip=True):
-            pmc_id = re.sub(r"^PMC", "", aid_pmc.get_text(strip=True), flags=re.IGNORECASE)
-
-        # Extract publication year
-        year = ""
-        year_elem = citation.find("Year")
-        if year_elem is not None and year_elem.get_text(strip=True):
-            year = year_elem.get_text(strip=True)
-        else:
-            medline_date = citation.find("MedlineDate")
-            if medline_date is not None and medline_date.get_text(strip=True):
-                year_match = re.search(r"\b(19|20)\d{2}\b", medline_date.get_text(strip=True))
-                if year_match:
-                    year = year_match.group(0)
-
-        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
-        articles.append(
-            MedicalArticle(
-                title=title,
-                authors=authors,
-                journal=journal,
-                year=year,
-                abstract=abstract,
-                pmid=pmid,
-                pmc_id=pmc_id,
-                doi=doi,
-                url=url,
-                source_database="PubMed",
-            )
-        )
-
+    for record in soup.find_all(["PubmedArticle", "PubmedBookArticle"]):
+        paper = PubMedProvider.parse_record(record)
+        if paper is not None:
+            articles.append(_to_medical_article(paper))
     return articles
 
 
@@ -178,8 +120,9 @@ class MedicalPubMedClient:
         """
         # The cache key stays the original query: a relaxed hit is still the
         # answer to what the caller asked, and the key must not fan out per
-        # ladder step.
-        cache_key = f"pubmed:search:{query}:{max_results}"
+        # ladder step. v2: rows parsed before the core-parser delegation hold
+        # DateCompleted years and cited references' DOIs.
+        cache_key = f"pubmed:search:v2:{query}:{max_results}"
         if filters:
             filt_hash = hashlib.sha1(filters.encode()).hexdigest()[:12]
             cache_key = f"{cache_key}:f={filt_hash}"
@@ -189,21 +132,9 @@ class MedicalPubMedClient:
 
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
-            # Row shape carries the ladder's relaxed_query (finding 4): a
-            # bare list is a pre-change row (the variant that answered it is
-            # not recoverable), read as relaxed_query=None rather than
-            # bumping the key -- the variant is diagnostic, not load-bearing,
-            # so serving a legacy row without it is an honest degrade, not a
-            # wrong answer the way brazil_moh's has_full_text was.
-            if isinstance(cached_data, dict):
-                articles_data = cached_data.get("articles", [])
-                cached_relaxed_query = cached_data.get("relaxed_query")
-            else:
-                articles_data = cached_data
-                cached_relaxed_query = None
             return (
-                [MedicalArticle.from_dict(d) for d in articles_data],
-                dataclasses.replace(meta, relaxed_query=cached_relaxed_query),
+                [MedicalArticle.from_dict(d) for d in cached_data.get("articles", [])],
+                dataclasses.replace(meta, relaxed_query=cached_data.get("relaxed_query")),
             )
 
         idlist, errored = await self._esearch(_term(query), max_results)
@@ -232,7 +163,9 @@ class MedicalPubMedClient:
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
         if not idlist:
-            await self.cache.set(cache_key, [], source="pubmed")
+            await self.cache.set(
+                cache_key, {"articles": [], "relaxed_query": None}, source="pubmed"
+            )
             return [], CacheMetadata(cached=False, cache_age=0)
 
         fetch_params = {
