@@ -348,6 +348,62 @@ async def test_overfetch_shrinks_when_chain_half_burned(tmp_path: Path):
         await http_client.aclose()
 
 
+async def test_overfetch_shrink_excludes_the_browser_ceiling(tmp_path: Path):
+    """The browser tier's ceiling is not HTTP-stage time: with a 300 s chain
+    and a 150 s browser ceiling the HTTP stages share 150 s, so the window
+    shrinks past 75 s, not past 150 s (which three 45 s stages never reach)."""
+    engine, cache, http_client = await _engine(
+        tmp_path,
+        brazil_browser_fallback=True,
+        enable_browser_fallback=True,
+        brazil_chain_timeout_s=300.0,
+        brazil_browser_timeout_s=150.0,
+    )
+    try:
+        assert engine._overfetch_count(10, time.monotonic() - 70.0) == 100
+        assert engine._overfetch_count(10, time.monotonic() - 80.0) == 30
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_overfetch_shrink_uses_the_whole_chain_without_browser_tier(
+    tmp_path: Path,
+):
+    engine, cache, http_client = await _engine(
+        tmp_path,
+        brazil_browser_fallback=False,
+        brazil_chain_timeout_s=300.0,
+        brazil_browser_timeout_s=150.0,
+    )
+    try:
+        assert engine._overfetch_count(10, time.monotonic() - 80.0) == 100
+        assert engine._overfetch_count(10, time.monotonic() - 160.0) == 30
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_overfetch_shrink_uses_the_whole_chain_when_browser_ceiling_fills_it(
+    tmp_path: Path,
+):
+    """A browser ceiling at or above the chain leaves no HTTP share to
+    measure, so the half-chain rule applies unchanged."""
+    engine, cache, http_client = await _engine(
+        tmp_path,
+        brazil_browser_fallback=True,
+        enable_browser_fallback=True,
+        brazil_chain_timeout_s=100.0,
+        brazil_browser_timeout_s=150.0,
+    )
+    try:
+        assert engine._overfetch_count(10, time.monotonic() - 40.0) == 100
+        assert engine._overfetch_count(10, time.monotonic() - 60.0) == 30
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 # S2.1 — abstract guarantee ---------------------------------------------------
 
 

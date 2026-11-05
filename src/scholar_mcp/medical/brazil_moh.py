@@ -1056,13 +1056,20 @@ class BrazilMoHEngine:
         """Over-fetch window for one BVS stage, adaptive to the chain budget.
 
         Full window is ``min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)``.
-        When the chain has burned over half its budget (slow origin), the
+        When the chain has burned over half its HTTP share (slow origin), the
         remaining stages shrink to ``min(clamped * 3, 60)``: a huge window
         against a sick Solr endpoint only buys latency, and the client-side
         ranker cannot lift what the server never returns in time. The window
         is adaptive from the chain start, so the title-scoped first stage
         already shrinks when the PCDT/A-Z phase has burned over half the
-        chain budget.
+        HTTP share.
+
+        The HTTP share is the chain budget minus the browser tier's ceiling
+        when that tier is enabled: the ceiling is sized for a browser launch,
+        not for HTTP stages, and measuring against the whole chain put the
+        threshold (150 s of a 300 s chain) past the point three 45 s stages
+        can reach. A ceiling that fills the chain leaves no share to measure,
+        so the whole chain is used.
         """
         full = min(clamped * OVERFETCH_FACTOR, MAX_PAGE_SIZE)
         if chain_start is None:
@@ -1070,8 +1077,13 @@ class BrazilMoHEngine:
         chain_budget = float(self.settings.brazil_chain_timeout_s)
         if chain_budget <= 0:
             return full
+        http_share = chain_budget
+        if self.settings.enable_browser_fallback and self.settings.brazil_browser_fallback:
+            browser_ceiling = max(float(self.settings.brazil_browser_timeout_s), 0.0)
+            if browser_ceiling < chain_budget:
+                http_share = chain_budget - browser_ceiling
         elapsed = time.monotonic() - chain_start
-        if elapsed < chain_budget / 2:
+        if elapsed < http_share / 2:
             return full
         return min(clamped * 3, 60)
 
