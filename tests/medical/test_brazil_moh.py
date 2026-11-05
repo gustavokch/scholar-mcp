@@ -3,6 +3,7 @@ import dataclasses
 import json
 import logging
 import time
+import urllib.parse
 from unittest.mock import AsyncMock
 
 import httpx
@@ -2353,6 +2354,44 @@ async def test_search_guidelines_falls_back_to_camoufox_on_persistent_403(
         await http_client.aclose()
 
 
+async def test_shielded_search_navigates_the_all_field_query_once(
+    tmp_path, monkeypatch
+):
+    """The browser query is already the all-field OR, the broadest
+    composition: an empty payload is the answer, not a cue to re-send it."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    for sub in (engine.pcdt_engine, engine.az_engine):
+        monkeypatch.setattr(
+            sub,
+            "search",
+            AsyncMock(return_value=([], CacheMetadata(cached=False, cache_age=0, error=False))),
+        )
+    attempts, urls, _exits, _sleeps = _install_fake_camoufox(
+        monkeypatch,
+        json.dumps({"diaServerResponse": [{"response": {"docs": []}}]}),
+    )
+    try:
+        with respx.mock:
+            respx.get(url__startswith=BVS_SEARCH_URL).mock(
+                return_value=httpx.Response(403, text="shield")
+            )
+            records, _meta = await engine.search_guidelines(
+                "dengue hidratacao", limit=10
+            )
+        assert records == []
+        assert attempts == [True]
+        assert len(urls) == 1
+        sent = urllib.parse.parse_qs(urllib.parse.urlsplit(urls[0]).query)["q"]
+        assert sent == [
+            _build_query(
+                "dengue hidratacao", "all", operator="OR", title_scoped=False
+            )
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
     """A Bunny-shield redirect racing the goto aborts it with
     NS_BINDING_ABORTED; the JSON payload must still be read once the page
@@ -3781,18 +3820,42 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_reads_once_when_the_goto_was_not_aborted(
+async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
     tmp_path, monkeypatch
 ):
-    """Without an abort nothing says the interstitial is mid-challenge: a
-    shield page is classified at once, not waited on for the whole budget."""
+    """Live BVS answers a clean goto with the 403 interstitial and swaps in
+    the payload once the challenge clears; reading once would classify the
+    interstitial as a block and lose the search."""
     engine, cache, http_client = await _camoufox_engine(tmp_path)
     _attempts, _urls, _exits, sleeps = _install_fake_camoufox(
+        monkeypatch,
+        content_script=[_BVS_INTERSTITIAL, _BVS_INTERSTITIAL, _bvs_payload()],
+    )
+    try:
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert [d["ti"] for d in docs] == ["Manejo da dengue"]
+        assert sleeps == [500, 500]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
+    tmp_path, monkeypatch
+):
+    """A persistent block page costs one shield-clear budget and one
+    navigation, then the tier gives up."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_SHIELD_CLEAR_MS
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _attempts, urls, _exits, sleeps = _install_fake_camoufox(
         monkeypatch, content_script=[_BVS_INTERSTITIAL]
     )
     try:
-        assert await engine._camoufox_search("dengue", 10, None) == []
-        assert sleeps == []
+        docs = await engine._camoufox_search("dengue", 10, None)
+        assert docs == []
+        assert sum(sleeps) == _CAMOUFOX_SHIELD_CLEAR_MS
+        assert len(urls) == 1
     finally:
         await cache.close()
         await http_client.aclose()
