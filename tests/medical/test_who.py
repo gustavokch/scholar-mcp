@@ -252,6 +252,142 @@ async def test_get_child_health_statistics_marks_error_on_failure(tmp_path: Path
         await http_client.aclose()
 
 
+@respx.mock
+async def test_get_health_statistics_does_not_cache_a_partial_result(tmp_path: Path):
+    """One of two indicators fails: the other's rows come back, flagged, and
+    are not cached -- the next call must ask for both again instead of
+    serving the incomplete answer for the whole TTL."""
+    client, cache, http_client = _client(tmp_path)
+    try:
+        respx.get(f"{GHO_BASE}/Indicator").respond(
+            json={
+                "value": [
+                    {"IndicatorCode": "WHOSIS_000001", "IndicatorName": "Life expectancy at birth (years)"},
+                    {"IndicatorCode": "WHOSIS_000015", "IndicatorName": "Life expectancy at age 60 (years)"},
+                ]
+            }
+        )
+        respx.get(f"{GHO_BASE}/WHOSIS_000001").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2020", "NumericValue": 78.5}]}
+        )
+        # A 404 fails the fetch without the retry ladder's backoff.
+        failing = respx.get(f"{GHO_BASE}/WHOSIS_000015").respond(status_code=404)
+
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert [r.indicator_code for r in records] == ["WHOSIS_000001"]
+        assert meta.error is True
+
+        after_first = failing.call_count
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert failing.call_count > after_first
+        assert [r.indicator_code for r in records] == ["WHOSIS_000001"]
+        assert meta.cached is False
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_child_health_statistics_does_not_cache_a_partial_result(tmp_path: Path):
+    """Same rule for the child-health panel: one failed indicator keeps the
+    answer out of the cache."""
+    from scholar_mcp.medical.who import (
+        WHO_CHILD_HEALTH_INDICATORS,
+        select_child_indicators,
+    )
+
+    client, cache, http_client = _client(tmp_path)
+    codes = select_child_indicators("zzz")  # matches nothing -> the whole panel
+    assert len(codes) == len(WHO_CHILD_HEALTH_INDICATORS) >= 2
+    ok_code, failing_code = codes[0], codes[1]
+    try:
+        respx.get(f"{GHO_BASE}/{ok_code}").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2021", "NumericValue": 6.2}]}
+        )
+        failing = respx.get(f"{GHO_BASE}/{failing_code}").respond(status_code=404)
+        for code in codes[2:]:
+            respx.get(f"{GHO_BASE}/{code}").respond(json={"value": []})
+
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert [r.indicator_code for r in records] == [ok_code]
+        assert meta.error is True
+
+        after_first = failing.call_count
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert failing.call_count > after_first
+        assert [r.indicator_code for r in records] == [ok_code]
+        assert meta.cached is False
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_get_health_statistics_does_not_cache_a_variation_recovered_lookup(tmp_path: Path):
+    """The primary indicator lookup fails and a name variation finds an
+    indicator. The primary term could have matched a closer indicator, so the
+    answer is flagged and not cached."""
+    client, cache, http_client = _client(tmp_path)
+
+    def found():
+        return respx.MockResponse(
+            json={"value": [{"IndicatorCode": "WHS9_86", "IndicatorName": "Exclusive breastfeeding"}]}
+        )
+
+    try:
+        indicator_route = respx.get(f"{GHO_BASE}/Indicator")
+        # A 404 fails the primary lookup without the retry ladder's backoff.
+        indicator_route.side_effect = [
+            respx.MockResponse(status_code=404), found(),
+            respx.MockResponse(status_code=404), found(),
+        ]
+        respx.get(f"{GHO_BASE}/WHS9_86").respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2021", "NumericValue": 0.42}]}
+        )
+
+        records, meta = await client.get_health_statistics("breastfeeding", country="USA")
+        assert [r.indicator_code for r in records] == ["WHS9_86"]
+        assert meta.error is True
+
+        records, meta = await client.get_health_statistics("breastfeeding", country="USA")
+        assert indicator_route.call_count == 4
+        assert [r.indicator_code for r in records] == ["WHS9_86"]
+        assert meta.cached is False
+        assert meta.error is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_statistics_ignore_rows_cached_under_the_v2_keys(tmp_path: Path):
+    """`main` with #59 but without the partial-answer fix cached partial
+    answers under the v2 keys; the v3 keys leave those rows unread."""
+    client, cache, http_client = _client(tmp_path)
+    try:
+        await cache.set("who:v2:life expectancy:USA:10", [], source="who")
+        await cache.set("child_health:v2:zzz:USA:10", [], source="child_health")
+        respx.get(f"{GHO_BASE}/Indicator").respond(
+            json={"value": [{"IndicatorCode": "WHOSIS_000001", "IndicatorName": "Life expectancy at birth (years)"}]}
+        )
+        respx.get(url__startswith=GHO_BASE).respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2020", "NumericValue": 78.5}]}
+        )
+
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert meta.cached is False
+        assert records
+
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert meta.cached is False
+        assert records
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 # --- Indicator name matching ------------------------------------------------
 #
 # The GHO filter used to be one literal substring test over the whole query:

@@ -338,7 +338,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"who:v2:{indicator}:{country}:{limit}"
+        cache_key = f"who:v3:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
@@ -414,15 +414,17 @@ class WHOClient:
 
         final_records = _latest_first(all_records)[:limit]
 
-        if errored and not final_records:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed lookup must never be served from cache for the whole TTL:
+        # return what the other indicators found, flagged, without writing it.
+        if errored:
+            return final_records, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
             [r.to_dict() for r in final_records],
             source="who",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return final_records, CacheMetadata(cached=False, cache_age=0)
 
     async def get_child_health_statistics(
         self,
@@ -430,7 +432,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"child_health:v2:{indicator}:{country}:{limit}"
+        cache_key = f"child_health:v3:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
@@ -454,15 +456,17 @@ class WHOClient:
 
         final_records = _latest_first(all_records)[:limit]
 
-        if errored and not final_records:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed lookup must never be served from cache for the whole TTL:
+        # return what the other indicators found, flagged, without writing it.
+        if errored:
+            return final_records, CacheMetadata(cached=False, cache_age=0, error=True)
 
         await self.cache.set(
             cache_key,
             [r.to_dict() for r in final_records],
             source="child_health",
         )
-        return final_records, CacheMetadata(cached=False, cache_age=0, error=errored)
+        return final_records, CacheMetadata(cached=False, cache_age=0)
 
     async def _fetch_latest_slices(
         self,
