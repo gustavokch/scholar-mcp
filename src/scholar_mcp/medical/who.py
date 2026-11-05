@@ -338,7 +338,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"who:v2:{indicator}:{country}:{limit}"
+        cache_key = f"who:v3:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta
@@ -432,7 +432,7 @@ class WHOClient:
         country: str | None = None,
         limit: int = 10,
     ) -> tuple[list[WHOIndicatorRecord], CacheMetadata]:
-        cache_key = f"child_health:v2:{indicator}:{country}:{limit}"
+        cache_key = f"child_health:v3:{indicator}:{country}:{limit}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [WHOIndicatorRecord.from_dict(d) for d in cached_data], meta

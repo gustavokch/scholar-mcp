@@ -320,6 +320,33 @@ async def test_get_child_health_statistics_does_not_cache_a_partial_result(tmp_p
         await http_client.aclose()
 
 
+@respx.mock
+async def test_statistics_ignore_rows_cached_under_the_v2_keys(tmp_path: Path):
+    """`main` with #59 but without the partial-answer fix cached partial
+    answers under the v2 keys; the v3 keys leave those rows unread."""
+    client, cache, http_client = _client(tmp_path)
+    try:
+        await cache.set("who:v2:life expectancy:USA:10", [], source="who")
+        await cache.set("child_health:v2:zzz:USA:10", [], source="child_health")
+        respx.get(f"{GHO_BASE}/Indicator").respond(
+            json={"value": [{"IndicatorCode": "WHOSIS_000001", "IndicatorName": "Life expectancy at birth (years)"}]}
+        )
+        respx.get(url__startswith=GHO_BASE).respond(
+            json={"value": [{"SpatialDim": "USA", "TimeDim": "2020", "NumericValue": 78.5}]}
+        )
+
+        records, meta = await client.get_health_statistics("life expectancy", country="USA")
+        assert meta.cached is False
+        assert records
+
+        records, meta = await client.get_child_health_statistics("zzz", country="USA")
+        assert meta.cached is False
+        assert records
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 # --- Indicator name matching ------------------------------------------------
 #
 # The GHO filter used to be one literal substring test over the whole query:
