@@ -10,6 +10,7 @@ import functools
 import json
 import logging
 from pathlib import Path
+import re
 from typing import Any
 import urllib.parse
 
@@ -42,18 +43,45 @@ PCDT_LETTERS = (
 # letter cut off here with pages still queued is an incomplete crawl.
 MAX_PAGES_PER_LETTER = 25
 
+KEYWORDS_PATH = Path(__file__).resolve().parent.parent / "data" / "govbr_pcdt_keywords.json"
+
+
+def _load_keywords() -> dict[str, str]:
+    """Per-protocol keywords from section headings (scripts/build_pcdt_keywords.py)."""
+    if not KEYWORDS_PATH.exists():
+        return {}
+    try:
+        with KEYWORDS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.warning("Failed to load PCDT keywords: %s", exc)
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
 def load_seed_catalog() -> dict[str, dict[str, Any]]:
-    """Load the bundled pre-scraped PCDT catalog."""
+    """Load the bundled pre-scraped PCDT catalog, with heading keywords.
+
+    Umbrella protocols name none of their conditions in the title, and
+    _score_item reads ``keywords``; the keyword file is built offline by
+    scripts/build_pcdt_keywords.py and kept apart from the crawled seed so a
+    re-crawl never drops it.
+    """
     seed_path = Path(__file__).resolve().parent.parent / "data" / "govbr_pcdt_catalog.json"
     if not seed_path.exists():
         logger.warning("PCDT seed catalog not found at %s", seed_path)
         return {}
     try:
         with seed_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            catalog = json.load(f)
     except Exception as exc:
         logger.warning("Failed to load PCDT seed catalog: %s", exc)
         return {}
+    keywords = _load_keywords()
+    for rid, row in catalog.items():
+        if isinstance(row, dict) and rid in keywords and not row.get("keywords"):
+            row["keywords"] = keywords[rid]
+    return catalog
 
 
 @functools.lru_cache(maxsize=1)
@@ -176,15 +204,20 @@ def parse_letter_page(
     return items, next_urls
 
 
+# Keyword-only matches score in a lower tier: heading keywords are broad
+# (dozens of words per protocol), so a keyword hit must never tie a title,
+# slug or description hit of the same shape.
+KEYWORD_ONLY_FACTOR = 0.7
+
+
 def _score_item(query_tokens: list[str], query_norm: str, item: dict[str, Any]) -> float:
     """Compute matching score between query and catalog item."""
-    extra = f"{item.get('description', '')} {item.get('keywords', '')}".strip()
-    return score_item(
-        query_tokens,
-        query_norm,
-        item.get("title", ""),
-        item.get("slug", ""),
-        extra,
+    title, slug = item.get("title", ""), item.get("slug", "")
+    score = score_item(query_tokens, query_norm, title, slug, item.get("description", ""))
+    if score or not item.get("keywords"):
+        return score
+    return KEYWORD_ONLY_FACTOR * score_item(
+        query_tokens, query_norm, title, slug, item["keywords"]
     )
 
 
@@ -214,6 +247,7 @@ def _dict_to_guideline(item: dict[str, Any], score: float | None = None) -> Braz
         source="brazil-moh",
         origin="govbr_catalog",
         abstract=item.get("description", ""),
+        keywords=item.get("keywords", ""),
         country="Brasil",
         languages=["pt"],
         collections=item.get("collections") or ["PCDT"],
@@ -333,6 +367,12 @@ class GovBrPCDTEngine:
         query_tokens = tokenize_portuguese(query)
         if not query_norm or not query_tokens:
             return [], CacheMetadata(cached=False, cache_age=0, error=False)
+
+        # Every row here is a PCDT, so "pcdt" carries no signal; beside other
+        # words it only dilutes the token ratio of rows that lack the token.
+        if "pcdt" in query_tokens and len(query_tokens) > 1:
+            query_tokens = [t for t in query_tokens if t != "pcdt"]
+            query_norm = " ".join(re.sub(r"\bpcdt\b", " ", query_norm).split())
 
         cache_key = f"govbr_pcdt_search:{CACHE_SCHEMA}:{limit}:{query_norm}"
         cached_data, meta = await self.cache.get(cache_key)

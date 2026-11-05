@@ -201,6 +201,11 @@ def rank_brazil_guidelines(
       otherwise score on title alone. The cost is that a heavily-indexed
       record gets a larger secondary token set than a sparse one; it is
       bounded by the coverage cap and outweighed by the recall it buys.
+      Gov.br catalog keywords join the secondary side for the same reason:
+      an umbrella PCDT names its conditions only in its section headings,
+      and secondary text weighs half of the title, so a keyword-only match
+      scores below a title match of equal coverage on the lexical score
+      (recency can still reorder them).
 
     The position prior applies to BVS records only, ranked by their order
     among the BVS records in the input: BVS returns a single relevance-sorted
@@ -225,7 +230,7 @@ def rank_brazil_guidelines(
         tokenizer=tokenize_portuguese,
         text_fields=lambda g: (
             f"{g.title or ''} {g.title_en or ''}",
-            " ".join([g.abstract or "", *(g.mesh_subjects or [])]),
+            " ".join([g.abstract or "", *(g.mesh_subjects or []), g.keywords or ""]),
         ),
         position_weight=SOURCE_POSITION_WEIGHT,
         current_year=current_year,

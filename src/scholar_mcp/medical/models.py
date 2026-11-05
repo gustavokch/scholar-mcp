@@ -270,6 +270,9 @@ class BrazilGuideline:
     position prior), ``"govbr_catalog"`` for a gov.br PCDT/A-Z/extended
     catalog row (no relevance order). Empty on rows cached before the field
     existed; the search caches' ``CACHE_SCHEMA`` bump keeps those unread.
+    ``keywords`` carries a gov.br catalog row's keyword text (PCDT section
+    headings, curated extended-corpus terms); the topic gate and the ranker
+    read it beside the abstract. Empty for BVS records.
     """
 
     title: str = ""
@@ -289,6 +292,7 @@ class BrazilGuideline:
     languages: list[str] = field(default_factory=list)
     collections: list[str] = field(default_factory=list)
     mesh_subjects: list[str] = field(default_factory=list)
+    keywords: str = ""
     doi: str = ""
     score: float | None = None
 

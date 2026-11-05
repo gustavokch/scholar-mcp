@@ -516,3 +516,72 @@ async def test_missing_seed_is_an_outage_not_a_partial_catalog(tmp_path, monkeyp
         assert cache_meta.cached is False
     finally:
         await cache.close()
+
+
+def test_seed_catalog_carries_heading_keywords():
+    catalog = load_seed_catalog()
+    ist = catalog["pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis"]
+    assert "sifilis" in ist["keywords"].split()
+
+
+@pytest.mark.asyncio
+async def test_pcdt_search_finds_the_umbrella_protocol_by_condition(tmp_path):
+    """ENARE 2025 Q028: the syphilis rules live in the IST protocol, whose
+    title never says sífilis."""
+    settings = Settings()
+    cache = SQLiteCacheManager(db_path=tmp_path / "test.db", settings=settings)
+    engine = GovBrPCDTEngine(http_client=AsyncMock(), cache=cache, settings=settings)
+    try:
+        results, _ = await engine.search("sifilis PCDT", limit=6)
+        ids = [r.record_id for r in results]
+        assert "pcdt-atencao-integral-as-pessoas-com-infeccoes-sexualmente-transmissiveis" in ids
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_pcdt_word_in_query_does_not_bury_rows_without_the_token(tmp_path):
+    """Every row is a PCDT, so "pcdt" in a query must not reorder rows: a row
+    that matches the condition but carries no "pcdt" token (a seed row missing
+    from the keyword file, an extended-corpus manual) still surfaces."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        chagas, _ = await engine.search("chagas PCDT", limit=6)
+        assert "pcdt-doenca-de-chagas" in [r.record_id for r in chagas]
+        tb, _ = await engine.search("tuberculose PCDT", limit=6)
+        assert "ms-manual-tuberculose-2019" in [r.record_id for r in tb]
+        # A query that is only "PCDT" keeps matching.
+        only, _ = await engine.search("PCDT", limit=3)
+        assert len(only) == 3
+    finally:
+        await cache.close()
+
+
+def test_keyword_only_match_scores_below_the_same_title_match():
+    """Heading keywords are broad, so a keyword hit sits in a lower tier than
+    a title hit of the same shape, and never adds to a row that already
+    matches on title, slug or description."""
+    from scholar_mcp.medical.govbr_pcdt import _score_item, normalize_text, tokenize_portuguese
+
+    def score(query, item):
+        return _score_item(tokenize_portuguese(query), normalize_text(query), item)
+
+    by_title = {"title": "Manejo da infecção pelo HIV", "slug": "manejo-hiv"}
+    by_keyword = {"title": "Atenção Integral às Pessoas com IST", "slug": "ist",
+                  "keywords": "sifilis hiv"}
+    assert 0 < score("hiv", by_keyword) < score("hiv", by_title)
+    assert 0 < score("hiv sifilis", by_keyword) < score("hiv manejo", by_title)
+    both = {**by_title, "keywords": "sifilis"}
+    assert score("hiv sifilis", both) == score("hiv sifilis", by_title)
+
+
+async def test_hiv_search_ranks_every_hiv_titled_protocol_above_keyword_rows(tmp_path):
+    """The IST protocol carries "hiv" among its heading keywords; it must not
+    push an HIV-titled protocol (PrEP, 2026-11-05 review) out of the top six."""
+    engine, cache = _pcdt_engine(tmp_path)
+    try:
+        results, _ = await engine.search("hiv", limit=6)
+        assert len(results) == 6
+        assert all("hiv" in normalize_text(r.title) for r in results)
+    finally:
+        await cache.close()
