@@ -488,17 +488,23 @@ async def test_bvs_403_shield_exhausts_to_none(caplog):
 
 
 def test_pypdf_sees_fonttools():
-    """pypdf gates its fontTools code paths behind this flag at import time.
+    """pypdf gates its fontTools code paths behind a module-level flag.
 
-    Note: in pypdf 6.16 those paths are `Font.from_truetype_font_file` and
-    `_get_typographic_maps`, both on the *writer* side. Text extraction
-    (`pypdf._cmap`) does not use fontTools at all.
+    Recent pypdf releases read it while extracting text from CFF
+    (`/FontFile3`) fonts, so a missing fontTools silently degrades extraction.
+    The flag moved from `pypdf._font` (6.16) to `pypdf.generic._font` (6.21).
+    Both modules are private, so look in each instead of pinning one.
     """
-    from pypdf._font import HAS_FONTTOOLS
+    import importlib
 
-    assert HAS_FONTTOOLS is True
-
-
+    for module in ("pypdf.generic._font", "pypdf._font"):
+        try:
+            flag = importlib.import_module(module).HAS_FONTTOOLS
+        except ModuleNotFoundError:
+            continue
+        assert flag is True
+        return
+    raise AssertionError("no pypdf module exposes HAS_FONTTOOLS")
 
 
 @respx.mock

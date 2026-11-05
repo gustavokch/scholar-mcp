@@ -16,9 +16,9 @@ from scholar_mcp.utils.sqlite_cache import CacheMetadata, SQLiteCacheManager
 logger = logging.getLogger(__name__)
 
 # Cochrane Library's HTML search sits behind a Cloudflare bot wall that blocks
-# the plain HTTP fetch and even headless browsers. Europe PMC mirrors Cochrane
-# systematic reviews via an open REST API, so we route the "Cochrane" search
-# through Europe PMC and label results as Cochrane records.
+# the plain HTTP fetch and even headless browsers. The systematic-review leg
+# queries Europe PMC's open REST API instead; only records whose journal is a
+# Cochrane title are labelled Cochrane.
 EUROPE_PMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
 TOP_JOURNALS = [
@@ -54,9 +54,9 @@ class MedicalDatabasesEngine:
 
     @staticmethod
     def _europe_pmc_to_articles(payload: dict[str, Any]) -> list[MedicalArticle]:
-        """Map Europe PMC search result records to MedicalArticle shape,
-        tagging them as Cochrane records so the agent sees them under the
-        right source_database label.
+        """Map Europe PMC search result records to MedicalArticle shape. The
+        source label is "Cochrane" only for a Cochrane journal; every other
+        systematic review or meta-analysis is a "Europe PMC" record.
         """
         articles: list[MedicalArticle] = []
         for rec in payload.get("resultList", {}).get("result", []) or []:
@@ -78,29 +78,28 @@ class MedicalDatabasesEngine:
                 url = f"https://europepmc.org/article/PMC/{rec['pmcid']}"
             elif pmid:
                 url = f"https://europepmc.org/article/MED/{pmid}"
+            journal = rec.get("journalTitle") or ""
             articles.append(
                 MedicalArticle(
                     title=title,
                     authors=authors,
                     year=str(rec.get("pubYear") or ""),
-                    journal=rec.get("journalTitle") or "Cochrane Database Syst Rev",
+                    journal=journal,
                     abstract=(rec.get("abstractText") or "")[:300],
                     url=url,
                     pmid=pmid,
                     doi=rec.get("doi") or "",
-                    source_database="Cochrane",
+                    source_database="Cochrane" if "cochrane" in journal.lower() else "Europe PMC",
                 )
             )
         return articles
 
-    async def _search_cochrane(
+    async def _search_systematic_reviews(
         self,
         query: str,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        # Cochrane's HTML site is behind a Cloudflare bot wall; route the
-        # "Cochrane" search through Europe PMC's open REST API, which mirrors
-        # Cochrane systematic reviews. The pub_type filter keeps the result
-        # set close to what the user would have found on cochranelibrary.com.
+        # Systematic reviews and meta-analyses from Europe PMC's open REST
+        # API (Cochrane's own site is behind a Cloudflare bot wall).
         # Neutralize query-language punctuation first: a stray quote or paren
         # in an agent-supplied query is Europe PMC syntax, not part of the
         # topic, and would turn the whole search into a 400.
@@ -123,7 +122,7 @@ class MedicalDatabasesEngine:
             payload = resp.json()
         except Exception:
             logger.warning(
-                "Europe PMC (Cochrane) search failed for %r", query, exc_info=True
+                "Europe PMC systematic-review search failed for %r", query, exc_info=True
             )
             return [], CacheMetadata(cached=False, cache_age=0, error=True)
 
@@ -134,7 +133,10 @@ class MedicalDatabasesEngine:
         self,
         query: str,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
-        cache_key = f"medical_databases:{query}"
+        # v2: rows written before the PubMed parser delegation hold
+        # DateCompleted years and cited references' DOIs, and label every
+        # Europe PMC review "Cochrane".
+        cache_key = f"medical_databases:v2:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta
@@ -142,10 +144,10 @@ class MedicalDatabasesEngine:
         tasks = [
             self.pubmed.search_articles(query, max_results=5),
             self.clinical_trials.search_clinical_trials(query),
-            self._search_cochrane(query),
+            self._search_systematic_reviews(query),
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        pubmed_res, trials_res, cochrane_res = results
+        pubmed_res, trials_res, reviews_res = results
 
         papers: list[dict[str, Any]] = []
         errored = False
@@ -153,7 +155,7 @@ class MedicalDatabasesEngine:
         for name, res in (
             ("pubmed", pubmed_res),
             ("trials", trials_res),
-            ("cochrane", cochrane_res),
+            ("systematic_reviews", reviews_res),
         ):
             if isinstance(res, BaseException):
                 # gather returned the exception instead of a result
@@ -176,10 +178,15 @@ class MedicalDatabasesEngine:
         )
         final_articles = ranked[:20]
 
-        # A failed fetch that produced nothing must reach the caller as a
-        # failure rather than being cached as a genuine absence.
-        if errored and not final_articles:
-            return [], CacheMetadata(cached=False, cache_age=0, error=True)
+        # A failed leg must never be served from cache for the whole TTL:
+        # return what the other legs found, flagged, without writing it.
+        if errored:
+            return (
+                final_articles,
+                CacheMetadata(
+                    cached=False, cache_age=0, error=True, relaxed_query=relaxed_query
+                ),
+            )
 
         await self.cache.set(
             cache_key,
@@ -188,7 +195,7 @@ class MedicalDatabasesEngine:
         )
         return (
             final_articles,
-            CacheMetadata(cached=False, cache_age=0, error=errored, relaxed_query=relaxed_query),
+            CacheMetadata(cached=False, cache_age=0, relaxed_query=relaxed_query),
         )
 
     async def search_medical_journals(
@@ -196,8 +203,9 @@ class MedicalDatabasesEngine:
         query: str,
     ) -> tuple[list[MedicalArticle], CacheMetadata]:
         # v2: rows written before the journal filter survived relaxation hold
-        # unfiltered PubMed results.
-        cache_key = f"medical_journals:v2:{query}"
+        # unfiltered PubMed results. v3: rows written before the PubMed parser
+        # delegation hold DateCompleted years and cited references' DOIs.
+        cache_key = f"medical_journals:v3:{query}"
         cached_data, meta = await self.cache.get(cache_key)
         if meta.cached and cached_data is not None:
             return [MedicalArticle.from_dict(d) for d in cached_data], meta

@@ -213,10 +213,7 @@ The `journal_impact` signal reads `src/scholar_mcp/data/scimago_sjr.json`, gener
 
 `scholar-mcp` includes native medical intelligence tools backed by openFDA, RxNav, WHO Global Health Observatory, ClinicalTrials.gov, PubMed, and AAP clinical guidelines with persistent SQLite caching and cross-source deduplication.
 
-Install with the optional `medical` extra to enable browser-based scraping fallbacks for Cochrane and AAP portals:
-```bash
-pip install 'scholar-mcp[medical]'
-```
+The AAP guideline and Brazilian MoH (BVS) searches fall back to a headless browser (`camoufox`) when a plain HTTP request hits a Cloudflare or 403 block. `camoufox` is a core dependency, so no extra install is needed; `pip install 'scholar-mcp[medical]'` is kept as a no-op alias for older setups. Set `ENABLE_BROWSER_FALLBACK=false` to turn the fallback off. Cochrane is not a browser target: `search_medical_databases` reaches its reviews through the Europe PMC API.
 
 ### Medical Tool Suite
 
@@ -236,7 +233,8 @@ pip install 'scholar-mcp[medical]'
 | `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
 | `search_brazil_moh_guidelines` | BVS / iAHx & gov.br | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS, PCDT guidelines, and "Saúde de A a Z" surveillance manuals from SVSA and guias-e-manuais publication trees. Supported `collection` options: `all` (default), `brisa`, `pcdt`, and `az`. |
 | `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
-| `search_medical_databases` | PubMed, ClinicalTrials, Cochrane | Cross-database literature search with fuzzy deduplication and metadata preservation. |
+| `search_clinical_trials` | ClinicalTrials.gov | Search registered trials. Optional `intervention` and `condition` go to `query.intr` / `query.cond`; with an `intervention`, only trials that give it are kept, unless no fetched trial names it (then all fetched trials are kept). |
+| `search_medical_databases` | PubMed, ClinicalTrials.gov, Europe PMC | Cross-database search of PubMed, ClinicalTrials.gov and Europe PMC systematic reviews/meta-analyses with fuzzy deduplication. A review is labelled "Cochrane" only when its journal is a Cochrane title. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
 
@@ -286,8 +284,8 @@ All options are configured via environment variables:
 | `BRAZIL_MAX_CONCURRENT` | `2` | BVS search requests in flight at once across every concurrent search. The host limiter paces request starts (1 req/s) but does not bound how many are open while the host holds each for tens of seconds. Identical in-flight requests are shared. |
 | `BRAZIL_BREAKER_THRESHOLD` | `2` | Consecutive BVS timeouts/5xx that open the breaker. While open, searches skip BVS and answer from the gov.br catalogs at once (`error_kind` reports the outage). A shield outcome (a 403 or a block-HTML 200) neither trips nor resets it. |
 | `BRAZIL_BREAKER_COOLDOWN_S` | `60.0` | How long the BVS breaker stays open. After it, one further failure re-opens it and one success closes it. |
-| `BRAZIL_CHAIN_TIMEOUT_S` | `120.0` | Whole-chain ceiling (seconds) for `search_brazil_moh_guidelines`: bounds the PCDT stage, all BVS stages, and the camoufox browser tier together. Keep it at least `2 x BRAZIL_STAGE_TIMEOUT_S + 20` so two full-ceiling stages cannot starve the browser tier. `<= 0` disables the bound. |
-| `BRAZIL_BROWSER_TIMEOUT_S` | `45.0` | Hard ceiling (seconds) on the BVS camoufox browser fallback tier, further capped by the chain budget remaining when the tier starts. A Camoufox launch needs tens of seconds, so an effective ceiling below 20 s skips the tier outright: any value in `(0, 20)` disables the browser fallback entirely (logged at INFO on every call). |
+| `BRAZIL_CHAIN_TIMEOUT_S` | `300.0` | Whole-chain ceiling (seconds) for `search_brazil_moh_guidelines`: bounds the PCDT stage, all BVS stages, and the camoufox browser tier together. Keep it at least `2 x BRAZIL_STAGE_TIMEOUT_S + BRAZIL_BROWSER_TIMEOUT_S` so two full-ceiling stages cannot starve the browser tier. `<= 0` disables the bound. |
+| `BRAZIL_BROWSER_TIMEOUT_S` | `150.0` | Hard ceiling (seconds) on the BVS camoufox browser fallback tier, further capped by the chain budget remaining when the tier starts. A Camoufox launch plus page creation took 30-70 s on a loaded machine and the Bunny CDN challenge needs about 12 s more, so the default leaves room for both. An effective ceiling below 20 s skips the tier outright: any value in `(0, 20)` disables the browser fallback entirely (logged at INFO on every call). |
 | `BRAZIL_FULLTEXT_TIMEOUT_S` | `30.0` | Whole-call ceiling (seconds) for `get_brazil_moh_full_text` network work (record lookup plus PDF fetch), separate from `BRAZIL_CHAIN_TIMEOUT_S`. One deadline covers both phases and bounds the 5xx retry ladder inside each: no share is reserved for the PDF fetch, because cutting the lookup short would lose the record and the abstract fallback with it. A budget exhausted after the lookup succeeded still returns the abstract, flagged `abstract_fallback`. |
 | `ENABLE_BROWSER_FALLBACK` | `true` | Enable the last-resort camoufox (headless anti-detection Firefox) browser fallback for scraping. `ENABLE_PLAYWRIGHT_FALLBACK` still works as a legacy alias. |
 | `ENABLE_MEDICAL_TOOLS` | `true` | Master switch for medical MCP tools and persistent cache. |

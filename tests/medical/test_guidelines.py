@@ -8,6 +8,8 @@ from scholar_mcp.medical.guidelines import (
     GuidelinesEngine,
     calculate_guideline_score,
     extract_organization,
+    organization_matches,
+    same_guideline,
 )
 from scholar_mcp.medical.models import MedicalArticle
 from scholar_mcp.medical.pubmed import MedicalPubMedClient
@@ -53,6 +55,85 @@ def test_extract_organization():
         abstract="Official statement from the American Academy of Pediatrics on pediatric asthma care.",
     )
     assert "American Academy of Pediatrics" in extract_organization(article)
+
+
+def test_extract_organization_ignores_lowercase_who():
+    """'infants who present' is a pronoun, not the World Health Organization."""
+    article = MedicalArticle(
+        title="Clinical Practice Guideline: Febrile Infants 8 to 60 Days Old",
+        journal="Pediatrics",
+        abstract="This guideline addresses infants who present with fever without a source.",
+    )
+    assert extract_organization(article) == "Pediatrics"
+
+
+def test_extract_organization_does_not_run_across_a_clause():
+    """The old IGNORECASE pattern read 'Worldwide, the practices ... Committee'
+    as one organisation name."""
+    article = MedicalArticle(
+        title="Hospital diets",
+        journal="Clin Nutr",
+        abstract="Worldwide, the practices regarding hospital diets are heterogeneous. "
+        "The Committee reviewed the data.",
+    )
+    assert extract_organization(article) == "Clin Nutr"
+
+
+def test_extract_organization_names_every_body_of_a_joint_guideline():
+    article = MedicalArticle(
+        title="2025 AHA/ACC/AANP Guideline for the Prevention of High Blood Pressure",
+        journal="Circulation",
+    )
+    assert extract_organization(article) == (
+        "American Heart Association / American College of Cardiology"
+    )
+    article = MedicalArticle(
+        title="Official American Thoracic Society/Centers for Disease Control and "
+        "Prevention/Infectious Diseases Society of America Clinical Practice "
+        "Guidelines: Treatment of Drug-Susceptible Tuberculosis",
+        journal="Clin Infect Dis",
+    )
+    assert extract_organization(article) == (
+        "American Thoracic Society / Centers for Disease Control and Prevention"
+        " / Infectious Diseases Society of America"
+    )
+    article = MedicalArticle(
+        title="European Society of Intensive Care Medicine Clinical Practice "
+        "Guideline on fluid therapy",
+        journal="Intensive Care Med",
+    )
+    assert extract_organization(article) == "European Society of Intensive Care Medicine"
+    article = MedicalArticle(
+        title="2024 ACC Expert Consensus Decision Pathway for Heart Failure: A Report "
+        "of the American College of Cardiology Solution Set Oversight Committee",
+        journal="J Am Coll Cardiol",
+    )
+    assert extract_organization(article) == "American College of Cardiology"
+
+
+def test_organization_filter_matches_acronyms_as_capitalised_tokens_only():
+    assert organization_matches("ACC", "Diagnostic accuracy of troponin") is False
+    assert organization_matches("WHO", "infants who present with fever") is False
+    assert organization_matches("ADA", "2026 AHA/ACC/ADA/ASN Guideline") is True
+    assert organization_matches("who", "WHO consolidated guidelines") is True
+    assert organization_matches("American Heart Association", "AHA guideline") is True
+
+
+def test_organization_filter_resolves_every_body_a_request_names():
+    """A request that writes a body out in full with its acronym, prefixes it,
+    or names a joint body stands for every table body it names; the text
+    must name one of them. Before, only an exact name or acronym resolved,
+    so these requests filtered out every candidate."""
+    assert organization_matches("American Academy of Pediatrics (AAP)", "AAP policy") is True
+    assert organization_matches("the American Heart Association", "AHA guideline") is True
+    assert organization_matches("ACC/AHA", "2022 AHA/ACC/HFSA Guideline") is True
+    assert organization_matches("aha, acc", "ACC expert consensus") is True
+    assert organization_matches("ACC/AHA", "Diagnostic accuracy of troponin") is False
+    # A part outside the table stands for itself.
+    assert organization_matches("AHA/HFSA", "HFSA position statement") is True
+    assert organization_matches("AHA/HFSA", "ESC guideline") is False
+    # A blank request names nothing and filters nothing.
+    assert organization_matches("  ", "ESC guideline") is True
 
 
 @respx.mock
@@ -395,6 +476,162 @@ async def test_search_clinical_guidelines_dedupes_articles_across_ladder_steps(t
         await http_client.aclose()
 
 
+def _guideline_record(pmid: str, journal: str, title: str, doi: str, year: str = "") -> str:
+    issue = f"<JournalIssue><PubDate><Year>{year}</Year></PubDate></JournalIssue>" if year else ""
+    return (
+        f"<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID>"
+        f"<Article><Journal>{issue}<Title>{journal}</Title></Journal>"
+        f"<ArticleTitle>{title}</ArticleTitle>"
+        "<Abstract><AbstractText>Evidence-based recommendation and consensus "
+        "for blood pressure management.</AbstractText></Abstract>"
+        "</Article></MedlineCitation>"
+        f"<PubmedData><ArticleIdList><ArticleId IdType=\"doi\">{doi}</ArticleId>"
+        "</ArticleIdList></PubmedData></PubmedArticle>"
+    )
+
+
+@respx.mock
+async def test_search_clinical_guidelines_merges_simultaneous_publications(tmp_path: Path):
+    """One ACC/AHA guideline is published in JACC and in Hypertension under two
+    PMIDs and DOIs; only the "A Report of the ..." tail differs. It is one
+    guideline, not two results."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    core = (
+        "2017 ACC/AHA Guideline for the Prevention, Detection, Evaluation, and "
+        "Management of High Blood Pressure in Adults"
+    )
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["701", "702"]}})
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet>"
+                + _guideline_record(
+                    "701", "Journal of the American College of Cardiology",
+                    f"{core}: A Report of the American College of Cardiology/American "
+                    "Heart Association Task Force on Clinical Practice Guidelines.",
+                    "10.1016/j.jacc.2017.11.006",
+                )
+                + _guideline_record(
+                    "702", "Hypertension",
+                    # No tail on this copy: with it, the parser's stripped
+                    # trailing "." makes both titles identical and the client's
+                    # fuzzy dedupe merges them before the engine merge runs.
+                    core,
+                    "10.1161/HYP.0000000000000065",
+                )
+                + "</PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines("hypertension", organization="ACC")
+        assert meta.error is False
+        assert [g.pmid for g in guidelines] == ["701"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+def test_same_guideline_never_merges_two_editions():
+    """A title match is one guideline only when the copies appeared within a
+    year of each other: simultaneous copies can straddle a year end, but a
+    2011 guideline and its 2019 update are two editions."""
+    original = "Clinical Practice Guideline: Tonsillectomy in Children"
+    update = f"{original} (Update)"
+    assert same_guideline(original, update, year_a="2011", year_b="2019") is False
+    assert same_guideline(original, original, year_a="2011", year_b="2019") is False
+    assert same_guideline(original, original, year_a="2017", year_b="2018") is True
+    assert same_guideline(original, update, year_a="2019", year_b="") is True
+    # One DOI is one publication, whatever the stated years.
+    assert same_guideline(
+        original, update, "10.1/x", "10.1/X", year_a="2011", year_b="2019"
+    ) is True
+
+
+@respx.mock
+async def test_search_clinical_guidelines_keeps_both_editions_of_a_guideline(tmp_path: Path):
+    """The 2011 guideline and its 2019 update share a title prefix. Merging
+    them kept whichever came first in relevance order, often the superseded
+    edition; both must stay."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    title = "Clinical Practice Guideline: Tonsillectomy in Children"
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["901", "902"]}})
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet>"
+                + _guideline_record(
+                    "901", "Otolaryngology--Head and Neck Surgery", title,
+                    "10.1177/0194599810389949", year="2011",
+                )
+                + _guideline_record(
+                    "902", "Otolaryngology--Head and Neck Surgery", f"{title} (Update)",
+                    "10.1177/0194599818801757", year="2019",
+                )
+                + "</PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines("tonsillectomy children")
+        assert meta.error is False
+        assert sorted(g.pmid for g in guidelines) == ["901", "902"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_search_clinical_guidelines_keeps_the_copy_that_passes_the_org_filter(
+    tmp_path: Path,
+):
+    """A joint statement in Ann Emerg Med (first) and Pediatrics: only the
+    Pediatrics copy passes organization="AAP" (journal signal). Merging first
+    kept the Ann Emerg Med copy, the filter then dropped it, and the
+    guideline was lost. The Pediatrics title carries a "A Report of the ..."
+    tail, so the client's fuzzy dedupe does not merge the two first."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+    title = (
+        "Joint Policy Statement: Guidelines for Care of Children in the Emergency Department"
+    )
+    try:
+        respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["801", "802"]}})
+        respx.get(EFETCH_URL).respond(
+            content=(
+                "<PubmedArticleSet>"
+                + _guideline_record(
+                    "801", "Annals of Emergency Medicine", title,
+                    "10.1016/j.annemergmed.2009.08.001",
+                )
+                + _guideline_record(
+                    "802", "Pediatrics",
+                    f"{title}: A Report of the Joint Pediatric Emergency Care Task Force",
+                    "10.1542/peds.2009-1807",
+                )
+                + "</PubmedArticleSet>"
+            ).encode()
+        )
+
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "emergency care children", organization="AAP"
+        )
+        assert meta.error is False
+        assert [g.pmid for g in guidelines] == ["802"]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 @respx.mock
 async def test_search_clinical_guidelines_marks_error_on_pubmed_failure(tmp_path: Path):
     settings = Settings.load()
@@ -462,3 +699,37 @@ def test_aap_journal_signal_matches_pediatrics_family():
     assert _is_aap_journal("Pediatrics (Evanston)")
     assert not _is_aap_journal("JAMA Pediatrics")
     assert not _is_aap_journal("Lancet")
+
+
+@respx.mock
+async def test_aap_org_filter_accepts_full_name_with_acronym(tmp_path: Path):
+    """organization="American Academy of Pediatrics (AAP)" is the AAP: the
+    Pediatrics journal signal keeps a collective-author policy statement, as
+    it does for organization="AAP"."""
+    settings = Settings.load()
+    http_client = AsyncHttpClient(settings)
+    cache = SQLiteCacheManager(db_path=tmp_path / "cache.db", settings=settings)
+    pubmed = MedicalPubMedClient(http_client=http_client, cache=cache, settings=settings)
+    engine = GuidelinesEngine(pubmed=pubmed, cache=cache, settings=settings)
+
+    respx.get(ESEARCH_URL).respond(json={"esearchresult": {"idlist": ["2002"]}})
+    respx.get(EFETCH_URL).respond(
+        content=(
+            "<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>2002</PMID>"
+            "<Article><Journal><Title>Pediatrics</Title></Journal>"
+            "<ArticleTitle>Clinical practice guideline for infectious diseases</ArticleTitle>"
+            "<Abstract><AbstractText>Guideline recommendations.</AbstractText></Abstract>"
+            "<AuthorList><CollectiveName>COMMITTEE ON INFECTIOUS DISEASES</CollectiveName>"
+            "</AuthorList></Article></MedlineCitation></PubmedArticle></PubmedArticleSet>"
+        ).encode()
+    )
+
+    try:
+        guidelines, meta = await engine.search_clinical_guidelines(
+            "infectious diseases", organization="American Academy of Pediatrics (AAP)"
+        )
+        assert meta.error is False
+        assert [g.pmid for g in guidelines] == ["2002"]
+    finally:
+        await cache.close()
+        await http_client.aclose()

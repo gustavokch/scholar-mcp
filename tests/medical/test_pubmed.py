@@ -11,24 +11,33 @@ from scholar_mcp.utils.sqlite_cache import SQLiteCacheManager
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
+# Live EFetch layout: the publication date sits in JournalIssue/PubDate and the
+# record's own identifiers in PubmedData/ArticleIdList.
 PUBMED_XML = """<?xml version="1.0"?>
 <PubmedArticleSet>
   <PubmedArticle>
     <MedlineCitation>
       <PMID>12345</PMID>
       <Article>
-        <Journal><Title>New England Journal of Medicine</Title></Journal>
+        <Journal>
+          <JournalIssue><PubDate><Year>2021</Year></PubDate></JournalIssue>
+          <Title>New England Journal of Medicine</Title>
+        </Journal>
         <ArticleTitle>Metformin efficacy in type 2 diabetes</ArticleTitle>
         <Abstract><AbstractText>Biguanide therapy lowers HbA1c.</AbstractText></Abstract>
         <AuthorList>
           <Author><ForeName>John</ForeName><LastName>Smith</LastName></Author>
           <Author><CollectiveName>Diabetes Research Group</CollectiveName></Author>
         </AuthorList>
-        <ArticleDate><Year>2021</Year></ArticleDate>
         <ELocationID EIdType="doi">10.1056/NEJMoa2021</ELocationID>
-        <ArticleIdList><ArticleId IdType="pmc">PMC7123456</ArticleId></ArticleIdList>
+        <PublicationTypeList>
+          <PublicationType>Randomized Controlled Trial</PublicationType>
+        </PublicationTypeList>
       </Article>
     </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList><ArticleId IdType="pmc">PMC7123456</ArticleId></ArticleIdList>
+    </PubmedData>
   </PubmedArticle>
 </PubmedArticleSet>"""
 
@@ -45,6 +54,45 @@ async def test_parse_pubmed_xml():
     assert a.year == "2021"
     assert a.doi == "10.1056/NEJMoa2021"
     assert a.pmc_id == "7123456"
+    assert a.study_type == "Randomized Controlled Trial"
+    assert a.evidence_grade == "1b"
+
+
+# Shape observed live on PMID 31018962: DateCompleted (2020) precedes PubDate
+# (2019 Aug), and the reference list carries the cited papers' own DOI/PMC ids.
+PUBMED_XML_DATES_AND_REFS = """<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>4242</PMID>
+      <DateCompleted><Year>2020</Year><Month>03</Month><Day>02</Day></DateCompleted>
+      <Article>
+        <Journal>
+          <JournalIssue><PubDate><Year>2019</Year><Month>Aug</Month></PubDate></JournalIssue>
+          <Title>Example Journal</Title>
+        </Journal>
+        <ArticleTitle>Example article.</ArticleTitle>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ReferenceList><Reference><ArticleIdList>
+        <ArticleId IdType="doi">10.1000/cited-paper</ArticleId>
+        <ArticleId IdType="pmc">PMC1111111</ArticleId>
+      </ArticleIdList></Reference></ReferenceList>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">4242</ArticleId>
+        <ArticleId IdType="doi">10.1000/own-doi</ArticleId>
+      </ArticleIdList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>"""
+
+
+def test_parse_pubmed_xml_reads_pubdate_and_own_ids():
+    [a] = parse_pubmed_xml(PUBMED_XML_DATES_AND_REFS)
+    assert a.year == "2019"
+    assert a.doi == "10.1000/own-doi"
+    assert a.pmc_id is None
 
 
 @respx.mock
