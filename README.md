@@ -233,7 +233,7 @@ The AAP guideline and Brazilian MoH (BVS) searches fall back to a headless brows
 | `get_who_iris_full_text` | WHO IRIS | Fetch a WHO IRIS guideline's full text by handle: extracts the primary PDF, falls back to the abstract. Cached 30d (`CACHE_TTL_WHO_IRIS`). |
 | `search_brazil_moh_guidelines` | BVS / iAHx & gov.br | Search Brazilian Ministry of Health technical publications (PCDT, CONITEC, manuais, cadernos) via BVS, PCDT guidelines, and "Saúde de A a Z" surveillance manuals from SVSA and guias-e-manuais publication trees. Supported `collection` options: `all` (default), `brisa`, `pcdt`, and `az`. |
 | `get_brazil_moh_full_text` | BVS / iAHx | Retrieve full text of a Brazilian MoH document, degrading to its abstract. Cached 30d (`CACHE_TTL_BRAZIL_MOH`). |
-| `search_clinical_trials` | ClinicalTrials.gov | Search registered trials. Optional `intervention` and `condition` go to `query.intr` / `query.cond`; with an `intervention`, only trials that give it are kept. |
+| `search_clinical_trials` | ClinicalTrials.gov | Search registered trials. Optional `intervention` and `condition` go to `query.intr` / `query.cond`; with an `intervention`, only trials that give it are kept, unless no fetched trial names it (then all fetched trials are kept). |
 | `search_medical_databases` | PubMed, ClinicalTrials.gov, Europe PMC | Cross-database search of PubMed, ClinicalTrials.gov and Europe PMC systematic reviews/meta-analyses with fuzzy deduplication. A review is labelled "Cochrane" only when its journal is a Cochrane title. |
 | `search_medical_journals` | PubMed | Search top-tier medical journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine). |
 | `get_medical_cache_stats` | SQLite Cache | Retrieve hit/miss metrics and active entry counts from the SQLite cache. |
