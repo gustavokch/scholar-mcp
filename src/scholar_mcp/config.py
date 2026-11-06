@@ -156,10 +156,18 @@ class Settings:
         """NCBI E-utilities requests per second: 9.0 with an API key, 2.8 without."""
         return 9.0 if self.pubmed_api_key else 2.8
 
+    def mirror_tier_skip_reason(self) -> str | None:
+        """Why the mirror tier cannot run, or None when it can. The one rule
+        behind the waterfall's skip record, the Unpaywall preference and the
+        download path; the preference flag cannot override it."""
+        if not self.enable_mirror_tier:
+            return "ENABLE_MIRROR_TIER is False"
+        if not self.fulltext_mirrors:
+            return "FULLTEXT_MIRRORS is unset"
+        return None
+
     def mirror_tier_enabled(self) -> bool:
-        """The mirror tier needs ENABLE_MIRROR_TIER and at least one FULLTEXT_MIRRORS
-        entry; the preference flag cannot override either."""
-        return self.enable_mirror_tier and bool(self.fulltext_mirrors)
+        return self.mirror_tier_skip_reason() is None
 
     def unpaywall_configured(self) -> bool:
         return bool(self.unpaywall_email)

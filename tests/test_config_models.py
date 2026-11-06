@@ -84,6 +84,26 @@ def test_mirror_tier_disabled_beats_preference(monkeypatch):
     assert settings.mirror_tier_enabled() is False
 
 
+@pytest.mark.parametrize(
+    "kwargs,reason",
+    [
+        ({"fulltext_mirrors": ["https://a.example"]}, None),
+        ({}, "FULLTEXT_MIRRORS is unset"),
+        (
+            {"enable_mirror_tier": False, "fulltext_mirrors": ["https://a.example"]},
+            "ENABLE_MIRROR_TIER is False",
+        ),
+        ({"enable_mirror_tier": False}, "ENABLE_MIRROR_TIER is False"),
+    ],
+)
+def test_mirror_tier_skip_reason_decides_enabled(kwargs, reason):
+    """The waterfall's skip reason and the Unpaywall/download gating read one
+    rule: they must never disagree on whether the tier can run."""
+    settings = Settings(**kwargs)
+    assert settings.mirror_tier_skip_reason() == reason
+    assert settings.mirror_tier_enabled() is (reason is None)
+
+
 def test_ncbi_rate_limit_depends_on_api_key(monkeypatch):
     monkeypatch.delenv("PUBMED_API_KEY", raising=False)
     assert Settings.load().ncbi_rate_limit == 2.8

@@ -186,12 +186,7 @@ class WaterfallResolver:
         # arXiv: runs only when an arXiv ID is known (provider self-skips otherwise)
         tiers_plan.append(("arxiv", self.arxiv, None))
 
-        # Mirror skip checks
-        mirror_skip = None
-        if not self.settings.enable_mirror_tier:
-            mirror_skip = "ENABLE_MIRROR_TIER is False"
-        elif not self.settings.fulltext_mirrors:
-            mirror_skip = "FULLTEXT_MIRRORS is unset"
+        mirror_skip = self.settings.mirror_tier_skip_reason()
         tiers_plan.append(("mirror", self.mirror, mirror_skip))
 
         async def _execute_waterfall() -> FullTextResponse | None:
