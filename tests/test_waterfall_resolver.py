@@ -9,11 +9,13 @@ from scholar_mcp.models import FullTextResponse, IdentifierMap, PaperMetadata
 from scholar_mcp.resolver import WaterfallResolver
 from scholar_mcp.utils.http import FetchFailure
 
+MIRRORS = ["https://mirror.example"]
+
 
 def make_resolver(settings: Settings) -> WaterfallResolver:
     r = WaterfallResolver(settings=settings, http_client=AsyncMock(), cache=None)
     r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz", pmcid="PMC1"))
-    for name in ("europe_pmc", "pmc", "unpaywall", "arxiv", "scihub"):
+    for name in ("europe_pmc", "pmc", "unpaywall", "arxiv", "mirror"):
         getattr(r, name).fetch_full_text = AsyncMock(return_value=None)
     r.fetch_abstract = AsyncMock(return_value=None)
     return r
@@ -67,25 +69,43 @@ async def test_unpaywall_tier_consulted_when_oa_url_is_null():
     assert attempts[0].outcome == "hit"
 
 
-async def test_prefer_scihub_skips_unpaywall():
-    r = make_resolver(Settings(prefer_scihub_over_unpaywall=True, enable_scihub=True))
+async def test_prefer_mirrors_skips_unpaywall():
+    r = make_resolver(Settings(prefer_mirrors_over_unpaywall=True, fulltext_mirrors=MIRRORS))
     r.unpaywall.fetch_full_text.return_value = hit("unpaywall")
-    r.scihub.fetch_full_text.return_value = hit("scihub")
+    r.mirror.fetch_full_text.return_value = hit("mirror")
     res = await r.resolve_full_text("10.1038/xyz")
-    assert res.source == "scihub"
+    assert res.source == "mirror"
     r.unpaywall.fetch_full_text.assert_not_awaited()
     skipped = [a for a in res.attempts if a.tier == "unpaywall"][0]
     assert skipped.outcome == "skipped"
 
 
-async def test_enable_scihub_false_beats_preference():
-    """The master switch wins: Unpaywall still runs and Sci-Hub never does."""
-    r = make_resolver(Settings(enable_scihub=False, prefer_scihub_over_unpaywall=True))
+async def test_enable_mirror_tier_false_beats_preference():
+    """The master switch wins: Unpaywall still runs and the mirror tier never does."""
+    r = make_resolver(
+        Settings(
+            enable_mirror_tier=False,
+            prefer_mirrors_over_unpaywall=True,
+            fulltext_mirrors=MIRRORS,
+        )
+    )
     r.unpaywall.fetch_full_text.return_value = hit("unpaywall")
-    r.scihub.fetch_full_text.return_value = hit("scihub")
+    r.mirror.fetch_full_text.return_value = hit("mirror")
     res = await r.resolve_full_text("10.1038/xyz")
     assert res.source == "unpaywall"
-    r.scihub.fetch_full_text.assert_not_awaited()
+    r.mirror.fetch_full_text.assert_not_awaited()
+
+
+async def test_unset_mirrors_skip_the_tier_and_keep_unpaywall():
+    """No FULLTEXT_MIRRORS: the tier is skipped with its reason, and the
+    preference flag cannot drop Unpaywall in favour of a tier that cannot run."""
+    r = make_resolver(Settings(prefer_mirrors_over_unpaywall=True))
+    r.mirror.fetch_full_text.return_value = hit("mirror")
+    res = await r.resolve_full_text("10.1038/xyz")
+    r.unpaywall.fetch_full_text.assert_awaited_once()
+    r.mirror.fetch_full_text.assert_not_awaited()
+    mirror = [a for a in res.attempts if a.tier == "mirror"][0]
+    assert (mirror.outcome, mirror.reason) == ("skipped", "FULLTEXT_MIRRORS is unset")
 
 
 async def test_total_failure_falls_back_to_abstract():
@@ -188,7 +208,7 @@ async def test_download_writes_inside_root(tmp_path):
     assert Path(res.saved_path).read_bytes() == b"%PDF-data"
 
 
-async def test_arxiv_hit_short_circuits_before_scihub():
+async def test_arxiv_hit_short_circuits_before_mirrors():
     r = make_resolver(Settings())
     r.resolve_ids = AsyncMock(
         return_value=IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
@@ -196,7 +216,7 @@ async def test_arxiv_hit_short_circuits_before_scihub():
     r.arxiv.fetch_full_text.return_value = hit("arxiv")
     res = await r.resolve_full_text("arXiv:2305.18290")
     assert res.source == "arxiv"
-    r.scihub.fetch_full_text.assert_not_awaited()
+    r.mirror.fetch_full_text.assert_not_awaited()
     assert [a.tier for a in res.attempts] == ["europepmc", "pmc", "unpaywall", "arxiv"]
 
 
@@ -204,7 +224,7 @@ async def test_arxiv_tier_reports_skip_without_arxiv_id():
     # Real ArxivProvider: no arXiv ID -> fast skip with reason, no HTTP.
     r = WaterfallResolver(settings=Settings(), http_client=AsyncMock(), cache=None)
     r.resolve_ids = AsyncMock(return_value=IdentifierMap(doi="10.1038/xyz"))
-    for name in ("europe_pmc", "pmc", "unpaywall", "scihub"):
+    for name in ("europe_pmc", "pmc", "unpaywall", "mirror"):
         getattr(r, name).fetch_full_text = AsyncMock(return_value=None)
     r.fetch_abstract = AsyncMock(return_value=None)
     res = await r.resolve_full_text("10.1038/xyz")
@@ -213,36 +233,36 @@ async def test_arxiv_tier_reports_skip_without_arxiv_id():
     assert arxiv_attempt.reason == "NO_ARXIV_ID"
 
 
-async def test_fetch_pdf_bytes_prefers_arxiv_before_scihub():
-    r = make_resolver(Settings(unpaywall_email=None))
+async def test_fetch_pdf_bytes_prefers_arxiv_before_mirrors():
+    r = make_resolver(Settings(unpaywall_email=None, fulltext_mirrors=MIRRORS))
     r.http_client.get_bytes = AsyncMock(return_value=b"%PDF-arxiv")
-    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "url"))
+    r.mirror.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "url"))
     b, src = await r.fetch_pdf_bytes(
         IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
     )
     assert (b, src) == (b"%PDF-arxiv", "arxiv")
-    r.scihub.fetch_pdf_bytes.assert_not_awaited()
+    r.mirror.fetch_pdf_bytes.assert_not_awaited()
 
 
 async def test_fetch_pdf_bytes_rejects_arxiv_non_pdf_body():
     """arXiv serves a 200 HTML placeholder while a PDF is still being generated."""
-    r = make_resolver(Settings(unpaywall_email=None))
+    r = make_resolver(Settings(unpaywall_email=None, fulltext_mirrors=MIRRORS))
     r.http_client.get_bytes = AsyncMock(return_value=b"<html>PDF is being generated</html>")
-    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    r.mirror.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "mirror-url"))
     b, src = await r.fetch_pdf_bytes(
         IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
     )
-    assert (b, src) == (b"%PDF-sh", "scihub")
+    assert (b, src) == (b"%PDF-sh", "mirror")
 
 
 async def test_fetch_pdf_bytes_survives_arxiv_transport_error():
-    r = make_resolver(Settings(unpaywall_email=None))
+    r = make_resolver(Settings(unpaywall_email=None, fulltext_mirrors=MIRRORS))
     r.http_client.get_bytes = AsyncMock(side_effect=RuntimeError("boom"))
-    r.scihub.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "scihub-url"))
+    r.mirror.fetch_pdf_bytes = AsyncMock(return_value=(b"%PDF-sh", "mirror-url"))
     b, src = await r.fetch_pdf_bytes(
         IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
     )
-    assert (b, src) == (b"%PDF-sh", "scihub")
+    assert (b, src) == (b"%PDF-sh", "mirror")
 
 
 async def test_fetch_abstract_falls_back_to_europepmc_for_pmid():
@@ -272,11 +292,11 @@ async def test_fetch_abstract_falls_back_to_arxiv():
 
 
 async def test_full_text_hit_backfills_title():
-    """Producers that omit title (scihub, pmc, arxiv, unpaywall) leave
+    """Producers that omit title (mirror, pmc, arxiv, unpaywall) leave
     FullTextResponse.title empty; the resolver backfills it from metadata."""
-    r = make_resolver(Settings())
-    r.scihub.fetch_full_text.return_value = hit("scihub")
-    assert r.scihub.fetch_full_text.return_value.title == ""
+    r = make_resolver(Settings(fulltext_mirrors=MIRRORS))
+    r.mirror.fetch_full_text.return_value = hit("mirror")
+    assert r.mirror.fetch_full_text.return_value.title == ""
     r.fetch_abstract = AsyncMock(return_value=PaperMetadata(title="X"))
     res = await r.resolve_full_text("10.1038/xyz")
     assert res.title == "X"
@@ -289,21 +309,21 @@ async def test_title_backfill_bounded_by_remaining_budget():
     Here the waterfall burns almost the whole budget, so a metadata chain that
     needs more than the remainder must be abandoned, leaving the title empty.
     """
-    settings = Settings(total_budget_seconds=1)
+    settings = Settings(total_budget_seconds=1, fulltext_mirrors=MIRRORS)
     r = make_resolver(settings)
 
     async def slow_hit(_ids):
         await asyncio.sleep(0.9)
-        return hit("scihub")
+        return hit("mirror")
 
     async def slow_meta(_ids):
         await asyncio.sleep(0.5)
         return PaperMetadata(title="X")
 
-    r.scihub.fetch_full_text = slow_hit
+    r.mirror.fetch_full_text = slow_hit
     r.fetch_abstract = slow_meta
     res = await r.resolve_full_text("10.1038/xyz")
-    assert res.source == "scihub"
+    assert res.source == "mirror"
     assert res.title == ""
 
 

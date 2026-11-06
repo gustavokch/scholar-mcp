@@ -5,17 +5,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Sci-Hub mirrors, pruned 2026-09-19. Removed as permanently dead (probed with a
-# DOI request): sci-hub.hkvisa.net (403 "Just a moment" bot shield on every path),
-# sci-hub.st (TLS serves a self-signed certificate), sci-hub.se (NXDOMAIN —
-# domain gone). Re-check liveness before re-adding any mirror.
-DEFAULT_SCIHUB_MIRRORS = [
-    "https://sci-hub.mksa.top",
-    "https://sci-hub.ru",
-    "https://sci-hub.ren",
-    "https://sci-hub.ee",
-]
-
 
 @dataclass
 class Settings:
@@ -28,9 +17,9 @@ class Settings:
     openalex_api_key: str | None = None
     enable_openalex: bool = True
     enable_s2: bool = True
-    enable_scihub: bool = True
-    prefer_scihub_over_unpaywall: bool = False
-    scihub_mirrors: list[str] = field(default_factory=lambda: list(DEFAULT_SCIHUB_MIRRORS))
+    enable_mirror_tier: bool = True
+    prefer_mirrors_over_unpaywall: bool = False
+    fulltext_mirrors: list[str] = field(default_factory=list)
     request_timeout: int = 30
     # Connect-phase bound, applied client-wide. A connect is a handshake
     # carrying no payload: measured healthy hosts complete one in 0.01-0.18 s,
@@ -125,13 +114,13 @@ class Settings:
     # 300 s keeps two full-ceiling stages (2 x 45 s) from starving the camoufox
     # tier (150 s) that follows them. <= 0 disables the bound.
     brazil_chain_timeout_s: float = 300.0
-    # Per-mirror ceiling inside the scihub tier: without it one slow mirror
+    # Per-mirror ceiling inside the mirror tier: without it one slow mirror
     # burns the whole waterfall budget before the next mirror is tried.
-    scihub_mirror_timeout_s: float = 12.0
-    # Whole-tier ceiling for the scihub mirror loop: 4 mirrors x 12 s would
+    mirror_timeout_s: float = 12.0
+    # Whole-tier ceiling for the mirror loop: 4 mirrors x 12 s would
     # be 48 s against the 45 s total_budget_seconds the waterfall enforces.
     # The loop stops starting new mirrors once the tier deadline passes.
-    scihub_tier_timeout_s: float = 20.0
+    mirror_tier_timeout_s: float = 20.0
     enable_browser_fallback: bool = True
     # BVS-specific gate for the camoufox tier in brazil_moh, independent of
     # the pediatrics scrapers. pesquisa.bvsalud.org 403s plain HTTP clients
@@ -166,9 +155,10 @@ class Settings:
         """NCBI E-utilities requests per second: 9.0 with an API key, 2.8 without."""
         return 9.0 if self.pubmed_api_key else 2.8
 
-    def scihub_tier_enabled(self) -> bool:
-        """ENABLE_SCIHUB is the master switch; the preference flag cannot override it."""
-        return self.enable_scihub
+    def mirror_tier_enabled(self) -> bool:
+        """The mirror tier needs ENABLE_MIRROR_TIER and at least one FULLTEXT_MIRRORS
+        entry; the preference flag cannot override either."""
+        return self.enable_mirror_tier and bool(self.fulltext_mirrors)
 
     def unpaywall_configured(self) -> bool:
         return bool(self.unpaywall_email)
@@ -208,12 +198,8 @@ class Settings:
                 )
                 return default
 
-        mirrors_env = os.getenv("SCIHUB_MIRRORS")
-        mirrors = (
-            [m.strip() for m in mirrors_env.split(",") if m.strip()]
-            if mirrors_env
-            else list(DEFAULT_SCIHUB_MIRRORS)
-        )
+        mirrors_env = os.getenv("FULLTEXT_MIRRORS") or ""
+        mirrors = [m.strip() for m in mirrors_env.split(",") if m.strip()]
 
         # NCBI_API_KEY is the name NCBI itself documents, so accept it as an
         # alias. All values go through _env: a key of spaces is a
@@ -237,11 +223,11 @@ class Settings:
             openalex_api_key=_env("OPENALEX_API_KEY"),
             enable_openalex=_bool(os.getenv("ENABLE_OPENALEX"), True),
             enable_s2=_bool(os.getenv("ENABLE_S2"), True),
-            enable_scihub=_bool(os.getenv("ENABLE_SCIHUB"), True),
-            prefer_scihub_over_unpaywall=_bool(
-                os.getenv("PREFER_SCIHUB_OVER_UNPAYWALL"), False
+            enable_mirror_tier=_bool(os.getenv("ENABLE_MIRROR_TIER"), True),
+            prefer_mirrors_over_unpaywall=_bool(
+                os.getenv("PREFER_MIRRORS_OVER_UNPAYWALL"), False
             ),
-            scihub_mirrors=mirrors,
+            fulltext_mirrors=mirrors,
             request_timeout=_int_env("SCHOLAR_REQUEST_TIMEOUT", 30),
             connect_timeout_s=_float_env("CONNECT_TIMEOUT_S", 5.0),
             total_budget_seconds=_int_env("SCHOLAR_TOTAL_BUDGET", 45),
@@ -296,8 +282,8 @@ class Settings:
             brazil_breaker_threshold=_int_env("BRAZIL_BREAKER_THRESHOLD", 2),
             brazil_breaker_cooldown_s=_float_env("BRAZIL_BREAKER_COOLDOWN_S", 60.0),
             brazil_chain_timeout_s=_float_env("BRAZIL_CHAIN_TIMEOUT_S", 300.0),
-            scihub_mirror_timeout_s=_float_env("SCIHUB_MIRROR_TIMEOUT_S", 12.0),
-            scihub_tier_timeout_s=_float_env("SCIHUB_TIER_TIMEOUT_S", 20.0),
+            mirror_timeout_s=_float_env("MIRROR_TIMEOUT_S", 12.0),
+            mirror_tier_timeout_s=_float_env("MIRROR_TIER_TIMEOUT_S", 20.0),
             brazil_browser_fallback=_bool(os.getenv("BRAZIL_BROWSER_FALLBACK"), True),
             brazil_browser_timeout_s=_float_env("BRAZIL_BROWSER_TIMEOUT_S", 150.0),
             brazil_fulltext_timeout_s=_float_env("BRAZIL_FULLTEXT_TIMEOUT_S", 30.0),

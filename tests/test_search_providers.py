@@ -11,8 +11,8 @@ from scholar_mcp.config import Settings
 from scholar_mcp.models import IdentifierMap, PaperMetadata
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import annotate_oa_status
+from scholar_mcp.providers.mirrors import MirrorProvider, _extract_pdf_url
 from scholar_mcp.providers.pubmed import PubMedProvider
-from scholar_mcp.providers.scihub import SciHubProvider, _extract_pdf_url
 from scholar_mcp.utils.http import AsyncHttpClient
 
 ESEARCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
@@ -714,32 +714,32 @@ async def test_oa_status_failed_chunk_leaves_only_its_own_papers_unknown(client,
 
 
 @respx.mock
-async def test_scihub_mirror_fallback(client, monkeypatch):
+async def test_mirror_fallback(client, monkeypatch):
     respx.get(url__startswith="https://mirror1.org").mock(return_value=httpx.Response(500))
     respx.get(url__startswith="https://mirror2.org").mock(
         return_value=httpx.Response(
             200,
-            text='<html><iframe src="//cyber.sci-hub.se/tree/10.1038/test.pdf#view=fitH"></iframe></html>',
+            text='<html><iframe src="//cdn.mirror.example/tree/10.1038/test.pdf#view=fitH"></iframe></html>',
         )
     )
-    pdf_route = respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
-        return_value=httpx.Response(200, content=b"%PDF-scihub-data")
+    pdf_route = respx.get(url__regex=r"https://cdn\.mirror\.example/.*\.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF-mirror-data")
     )
     monkeypatch.setattr(
-        "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "SciHub Extracted Content"
+        "scholar_mcp.providers.mirrors.pdf_bytes_to_text", lambda b: "Mirror Extracted Content"
     )
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
-    assert res is not None and res.source == "scihub"
-    assert "SciHub Extracted Content" in res.content
+    assert res is not None and res.source == "mirror"
+    assert "Mirror Extracted Content" in res.content
     assert pdf_route.called
     assert pdf_route.calls.last.request.headers.get("referer") == "https://mirror2.org/10.1038/test"
 
 
 @respx.mock
-async def test_scihub_passes_referer_header_from_redirected_url(client, monkeypatch):
-    """Upstream PDF hosts (like sci.bban.top) block requests lacking a Referer header."""
+async def test_mirror_passes_referer_header_from_redirected_url(client, monkeypatch):
+    """Some upstream PDF hosts block requests lacking a Referer header."""
     respx.get("https://mirror1.org/10.1038/redirected").mock(
         return_value=httpx.Response(
             301,
@@ -756,7 +756,7 @@ async def test_scihub_passes_referer_header_from_redirected_url(client, monkeypa
         return_value=httpx.Response(200, content=b"%PDF-redirected-data")
     )
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/redirected"))
     assert pdf_bytes == b"%PDF-redirected-data"
     assert pdf_url == "https://upstream.org/paper.pdf"
@@ -765,7 +765,7 @@ async def test_scihub_passes_referer_header_from_redirected_url(client, monkeypa
 
 
 @respx.mock
-async def test_scihub_retries_without_referer_when_hotlink_protected(client):
+async def test_mirror_retries_without_referer_when_hotlink_protected(client):
     """Hosts configured with `valid_referers none …` reject a foreign Referer but
     serve a bare request, so a blocked fetch must be retried without the header."""
     seen: list[str | None] = []
@@ -784,7 +784,7 @@ async def test_scihub_retries_without_referer_when_hotlink_protected(client):
     )
     respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
 
@@ -794,7 +794,7 @@ async def test_scihub_retries_without_referer_when_hotlink_protected(client):
 
 
 @respx.mock
-async def test_scihub_does_not_retry_bare_when_host_fails(client):
+async def test_mirror_does_not_retry_bare_when_host_fails(client):
     """A 5xx is not a Referer problem. Paying a second fetch for it burns the
     resolver budget that the remaining mirrors need."""
     seen: list[str | None] = []
@@ -811,7 +811,7 @@ async def test_scihub_does_not_retry_bare_when_host_fails(client):
     )
     respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
 
@@ -820,7 +820,7 @@ async def test_scihub_does_not_retry_bare_when_host_fails(client):
 
 
 @respx.mock
-async def test_scihub_retries_bare_when_referer_gets_bot_challenge(client):
+async def test_mirror_retries_bare_when_referer_gets_bot_challenge(client):
     """A challenge page is a refusal, not a failure — the header is still the
     plausible cause, so the bare retry must still fire."""
     seen: list[str | None] = []
@@ -843,7 +843,7 @@ async def test_scihub_retries_bare_when_referer_gets_bot_challenge(client):
     )
     respx.get("https://pdf-host.org/paper.pdf").mock(side_effect=_handler)
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
 
@@ -947,7 +947,7 @@ def _install_fake_camoufox(
 def test_landing_url_falls_back_for_non_http_urls():
     """`page.url` is "about:blank" when navigation lands nowhere; that must not
     become a Referer, and must not become the base for relative PDF paths."""
-    from scholar_mcp.providers.scihub import _landing_url
+    from scholar_mcp.providers.mirrors import _landing_url
 
     assert _landing_url("https://mirror1.org/10.1038/test", "https://m/x") == (
         "https://mirror1.org/10.1038/test"
@@ -960,14 +960,14 @@ def test_landing_url_falls_back_for_non_http_urls():
     assert _landing_url(None, "https://m/x") == "https://m/x"
 
 
-def test_scihub_extract_pdf_url_resolves_relative_path():
+def test_mirror_extract_pdf_url_resolves_relative_path():
     html = '<html><iframe src="/storage/10.1038/test.pdf#view=fitH"></iframe></html>'
-    res = _extract_pdf_url(html, base_url="https://sci-hub.se/10.1038/test")
-    assert res == "https://sci-hub.se/storage/10.1038/test.pdf"
+    res = _extract_pdf_url(html, base_url="https://mirror1.org/10.1038/test")
+    assert res == "https://mirror1.org/storage/10.1038/test.pdf"
 
     html_embed = '<html><embed src="/tree/10.1038/test.pdf"/></html>'
-    res_embed = _extract_pdf_url(html_embed, base_url="https://sci-hub.se/10.1038/test")
-    assert res_embed == "https://sci-hub.se/tree/10.1038/test.pdf"
+    res_embed = _extract_pdf_url(html_embed, base_url="https://mirror1.org/10.1038/test")
+    assert res_embed == "https://mirror1.org/tree/10.1038/test.pdf"
 
 
 @respx.mock
@@ -978,14 +978,14 @@ async def test_failing_mirror_deprioritized_on_next_call(client):
     respx.get(url__startswith="https://m2.org").mock(
         return_value=httpx.Response(
             200,
-            text='<html><iframe src="https://cyber.sci-hub.se/deprio.pdf"></iframe></html>',
+            text='<html><iframe src="https://cdn.mirror.example/deprio.pdf"></iframe></html>',
         )
     )
-    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+    respx.get(url__regex=r"https://cdn\.mirror\.example/.*\.pdf").mock(
         return_value=httpx.Response(200, content=b"%PDF-deprio")
     )
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(
+    provider = MirrorProvider(
         client, mirrors=["https://m1.org", "https://m2.org"], settings=settings
     )
     ids = IdentifierMap(doi="10.1/deprio")
@@ -1003,7 +1003,7 @@ async def test_failing_mirror_deprioritized_on_next_call(client):
 @respx.mock
 async def test_mirror_tier_respects_tier_deadline(client):
     """The whole mirror tier is bounded, not just each mirror: 7 mirrors x a
-    slow per-mirror timeout must not add up past scihub_tier_timeout_s."""
+    slow per-mirror timeout must not add up past mirror_tier_timeout_s."""
     async def _slow(request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(30)
         return httpx.Response(503)
@@ -1013,10 +1013,10 @@ async def test_mirror_tier_respects_tier_deadline(client):
         respx.get(url__startswith=m).mock(side_effect=_slow)
     settings = Settings(
         enable_browser_fallback=False,
-        scihub_mirror_timeout_s=1.0,
-        scihub_tier_timeout_s=2.0,
+        mirror_timeout_s=1.0,
+        mirror_tier_timeout_s=2.0,
     )
-    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    provider = MirrorProvider(client, mirrors=mirrors, settings=settings)
     start = time.monotonic()
     b, _ = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1/tier"))
     elapsed = time.monotonic() - start
@@ -1026,7 +1026,7 @@ async def test_mirror_tier_respects_tier_deadline(client):
 
 @respx.mock
 async def test_mirror_attempt_respects_per_mirror_timeout(client):
-    """Each mirror gets at most scihub_mirror_timeout_s; a slow mirror must
+    """Each mirror gets at most mirror_timeout_s; a slow mirror must
     not burn the whole waterfall budget before the next mirror is tried."""
     async def _slow(request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(5)
@@ -1036,14 +1036,14 @@ async def test_mirror_attempt_respects_per_mirror_timeout(client):
     respx.get(url__startswith="https://fast.org").mock(
         return_value=httpx.Response(
             200,
-            text='<html><iframe src="https://cyber.sci-hub.se/fast.pdf"></iframe></html>',
+            text='<html><iframe src="https://cdn.mirror.example/fast.pdf"></iframe></html>',
         )
     )
-    respx.get(url__regex=r"https://cyber\.sci-hub\.se/.*\.pdf").mock(
+    respx.get(url__regex=r"https://cdn\.mirror\.example/.*\.pdf").mock(
         return_value=httpx.Response(200, content=b"%PDF-fast")
     )
-    settings = Settings(enable_browser_fallback=False, scihub_mirror_timeout_s=0.2)
-    provider = SciHubProvider(
+    settings = Settings(enable_browser_fallback=False, mirror_timeout_s=0.2)
+    provider = MirrorProvider(
         client, mirrors=["https://slow.org", "https://fast.org"], settings=settings
     )
     start = time.monotonic()
@@ -1054,15 +1054,15 @@ async def test_mirror_attempt_respects_per_mirror_timeout(client):
 
 
 @respx.mock
-async def test_scihub_all_mirrors_down_is_miss(client, monkeypatch):
+async def test_mirror_all_mirrors_down_is_miss(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(503))
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(doi="10.1038/test")) is None
 
 
 @respx.mock
-async def test_scihub_fetch_pdf_bytes_ignores_non_pdf_content(client):
+async def test_mirror_fetch_pdf_bytes_ignores_non_pdf_content(client):
     """When a mirror returns HTML/error page instead of PDF bytes, it should be ignored."""
     respx.get(url__startswith="https://mirror1.org").mock(
         return_value=httpx.Response(
@@ -1074,25 +1074,25 @@ async def test_scihub_fetch_pdf_bytes_ignores_non_pdf_content(client):
         return_value=httpx.Response(200, content=b"<html>Cloudflare error</html>")
     )
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test"))
     assert pdf_bytes is None
     assert pdf_url is None
 
 
 @respx.mock
-async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
+async def test_mirror_camoufox_fallback_when_http_blocked(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
     rendered_html = '<html><embed src="https://sci-pdf.org/paper.pdf" type="application/pdf"/></html>'
     fake = _install_fake_camoufox(monkeypatch, rendered_html=rendered_html)
     monkeypatch.setattr(
-        "scholar_mcp.providers.scihub.pdf_bytes_to_text", lambda b: "Camoufox SciHub Content"
+        "scholar_mcp.providers.mirrors.pdf_bytes_to_text", lambda b: "Camoufox Mirror Content"
     )
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
-    assert res is not None and res.source == "scihub"
-    assert "Camoufox SciHub Content" in res.content
+    assert res is not None and res.source == "mirror"
+    assert "Camoufox Mirror Content" in res.content
     assert len(fake.attempts) == 1
     assert "https://mirror1.org/10.1038/test" in fake.urls
     assert len(fake.headers) == 1
@@ -1100,7 +1100,7 @@ async def test_scihub_camoufox_fallback_when_http_blocked(client, monkeypatch):
 
 
 @respx.mock
-async def test_scihub_camoufox_uses_final_page_url_as_referer(client, monkeypatch):
+async def test_mirror_camoufox_uses_final_page_url_as_referer(client, monkeypatch):
     """A mirror that redirects must be referenced by the page it landed on, not by
     the requested URL — and relative PDF paths must resolve against it."""
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
@@ -1111,7 +1111,7 @@ async def test_scihub_camoufox_uses_final_page_url_as_referer(client, monkeypatc
         final_url="https://landed.org/10.1038/test",
     )
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
 
@@ -1121,7 +1121,7 @@ async def test_scihub_camoufox_uses_final_page_url_as_referer(client, monkeypatc
 
 
 @respx.mock
-async def test_scihub_camoufox_tolerates_aborted_goto(client, monkeypatch):
+async def test_mirror_camoufox_tolerates_aborted_goto(client, monkeypatch):
     """A bot-shield interstitial navigates the page itself; when that
     redirect races the goto, Playwright raises NS_BINDING_ABORTED. The abort
     means the interstitial is working, not that the mirror failed: the
@@ -1133,7 +1133,7 @@ async def test_scihub_camoufox_tolerates_aborted_goto(client, monkeypatch):
         monkeypatch, rendered_html=rendered_html, abort_goto=True
     )
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
 
@@ -1143,7 +1143,7 @@ async def test_scihub_camoufox_tolerates_aborted_goto(client, monkeypatch):
 
 
 @respx.mock
-async def test_scihub_camoufox_falls_through_to_http_without_bare_retry(client, monkeypatch):
+async def test_mirror_camoufox_falls_through_to_http_without_bare_retry(client, monkeypatch):
     """When the browser fetch is refused, the httpx fall-through still sends the
     Referer, but must not spend a third, bare request: a real browser session was
     already turned away, so the barest request has strictly less to offer."""
@@ -1160,7 +1160,7 @@ async def test_scihub_camoufox_falls_through_to_http_without_bare_retry(client, 
     )
     _install_fake_camoufox(monkeypatch, rendered_html=rendered_html, browser_status=403)
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
 
@@ -1169,17 +1169,17 @@ async def test_scihub_camoufox_falls_through_to_http_without_bare_retry(client, 
 
 
 @respx.mock
-async def test_scihub_browser_fallback_disabled_skips_camoufox(client, monkeypatch):
+async def test_mirror_browser_fallback_disabled_skips_camoufox(client, monkeypatch):
     respx.get(url__regex=r"https://mirror\d\.org.*").mock(return_value=httpx.Response(403))
     fake = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     res = await provider.fetch_full_text(IdentifierMap(doi="10.1038/test"))
     assert res is None
     assert len(fake.attempts) == 0
 
 
-async def test_scihub_camoufox_import_error_gracefully_handled(client, monkeypatch):
+async def test_mirror_camoufox_import_error_gracefully_handled(client, monkeypatch):
     import builtins
 
     _real_import = builtins.__import__
@@ -1191,25 +1191,25 @@ async def test_scihub_camoufox_import_error_gracefully_handled(client, monkeypat
 
     monkeypatch.setattr("builtins.__import__", _block_camoufox)
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     bytes_res, url_res = await provider._fetch_via_camoufox("10.1038/test")
     assert bytes_res is None
     assert url_res is None
 
 
-async def test_scihub_without_doi_is_miss(client):
+async def test_mirror_without_doi_is_miss(client):
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(pmid="123")) is None
 
 
 @respx.mock
-async def test_scihub_whitespace_doi_is_miss(client):
+async def test_mirror_whitespace_doi_is_miss(client):
     route = respx.get(url__startswith="https://mirror1.org").mock(
         return_value=httpx.Response(200, text="<html>home</html>")
     )
     settings = Settings(enable_browser_fallback=False)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
     assert await provider.fetch_full_text(IdentifierMap(doi="   ")) is None
     pdf_bytes, pdf_url = await provider.fetch_pdf_bytes(IdentifierMap(doi="   "))
     assert pdf_bytes is None
@@ -1218,7 +1218,7 @@ async def test_scihub_whitespace_doi_is_miss(client):
 
 
 @respx.mock
-async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
+async def test_mirror_camoufox_caps_mirror_attempts(client, monkeypatch):
     """Camoufox fallback must try at most _CAMOUFOX_MAX_MIRRORS mirrors,
     not all 5 provided."""
     mirrors = [f"https://m{i}.org" for i in range(5)]
@@ -1227,9 +1227,9 @@ async def test_scihub_camoufox_caps_mirror_attempts(client, monkeypatch):
     # Camoufox returns no PDF from any mirror (empty HTML)
     fake = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=mirrors, settings=settings)
+    provider = MirrorProvider(client, mirrors=mirrors, settings=settings)
     await provider._fetch_via_camoufox("10.1038/test")
-    from scholar_mcp.providers.scihub import _CAMOUFOX_MAX_MIRRORS
+    from scholar_mcp.providers.mirrors import _CAMOUFOX_MAX_MIRRORS
     assert len(fake.urls) == _CAMOUFOX_MAX_MIRRORS
 
 
@@ -1504,9 +1504,9 @@ async def test_provider_last_error_is_per_request():
 async def test_mirror_penalty_is_capped(client, monkeypatch):
     """Penalties order the mirror list; they must not grow without bound as a
     long-lived process keeps retrying a dead mirror."""
-    from scholar_mcp.providers.scihub import MAX_MIRROR_PENALTY
+    from scholar_mcp.providers.mirrors import MAX_MIRROR_PENALTY
 
-    provider = SciHubProvider(
+    provider = MirrorProvider(
         client, mirrors=["https://m1.example"], settings=Settings(enable_browser_fallback=False)
     )
 
@@ -1658,7 +1658,7 @@ _MIRROR_PAGE = (
 
 
 @respx.mock
-async def test_scihub_camoufox_waits_out_the_interstitial_after_an_aborted_goto(
+async def test_mirror_camoufox_waits_out_the_interstitial_after_an_aborted_goto(
     client, monkeypatch
 ):
     """The aborted goto leaves the page on the Cloudflare interstitial; the
@@ -1671,7 +1671,7 @@ async def test_scihub_camoufox_waits_out_the_interstitial_after_an_aborted_goto(
         content_script=[_MID_REDIRECT, _CLOUDFLARE_INTERSTITIAL, _MIRROR_PAGE],
     )
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(client, mirrors=["https://mirror1.org"], settings=settings)
+    provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
 
     pdf_bytes, pdf_url = await provider._fetch_via_camoufox("10.1038/test")
 
@@ -1681,7 +1681,7 @@ async def test_scihub_camoufox_waits_out_the_interstitial_after_an_aborted_goto(
 
 
 @respx.mock
-async def test_scihub_camoufox_skips_a_blocked_mirror_without_waiting(
+async def test_mirror_camoufox_skips_a_blocked_mirror_without_waiting(
     client, monkeypatch
 ):
     """Without an abort nothing says the interstitial is mid-challenge: a
@@ -1691,7 +1691,7 @@ async def test_scihub_camoufox_skips_a_blocked_mirror_without_waiting(
         monkeypatch, content_script=[_CLOUDFLARE_INTERSTITIAL]
     )
     settings = Settings(enable_browser_fallback=True)
-    provider = SciHubProvider(
+    provider = MirrorProvider(
         client, mirrors=["https://mirror1.org", "https://mirror2.org"], settings=settings
     )
 

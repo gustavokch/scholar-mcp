@@ -37,10 +37,10 @@ medical = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/w8s/scholar-mcp"
-Repository = "https://github.com/w8s/scholar-mcp"
-Changelog = "https://github.com/w8s/scholar-mcp/blob/main/CHANGELOG.md"
-Issues = "https://github.com/w8s/scholar-mcp/issues"
+Homepage = "https://github.com/gustavokch/scholar-mcp"
+Repository = "https://github.com/gustavokch/scholar-mcp"
+Changelog = "https://github.com/gustavokch/scholar-mcp/blob/main/CHANGELOG.md"
+Issues = "https://github.com/gustavokch/scholar-mcp/issues"
 
 [project.scripts]
 scholar-mcp = "scholar_mcp.server:main"

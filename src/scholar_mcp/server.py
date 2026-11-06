@@ -162,7 +162,7 @@ async def get_full_text(
 ) -> dict[str, Any]:
     """Retrieve full text of an academic paper using multi-tier waterfall resolution.
 
-    Tiers: Europe PMC -> PMC -> Unpaywall -> arXiv -> Sci-Hub -> Abstract fallback.
+    Tiers: Europe PMC -> PMC -> Unpaywall -> arXiv -> configured mirrors -> Abstract fallback.
 
     Args:
         identifier: DOI, PMID, PMCID, arXiv ID, or paper title.

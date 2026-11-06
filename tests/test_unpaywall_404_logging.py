@@ -51,7 +51,7 @@ async def test_unpaywall_fetch_full_text_500_still_warns(client, caplog):
 
 @respx.mock
 async def test_resolver_fetch_pdf_bytes_unpaywall_404_no_warning(client, caplog):
-    settings = Settings(unpaywall_email="test@example.com", enable_scihub=False)
+    settings = Settings(unpaywall_email="test@example.com", enable_mirror_tier=False)
     resolver = WaterfallResolver(settings=settings, http_client=client)
 
     route = respx.get(UNPAYWALL_URL).mock(
@@ -68,7 +68,7 @@ async def test_resolver_fetch_pdf_bytes_unpaywall_404_no_warning(client, caplog)
 
 @respx.mock
 async def test_resolver_fetch_pdf_bytes_unpaywall_500_still_warns(client, caplog):
-    settings = Settings(unpaywall_email="test@example.com", enable_scihub=False)
+    settings = Settings(unpaywall_email="test@example.com", enable_mirror_tier=False)
     resolver = WaterfallResolver(settings=settings, http_client=client)
 
     route = respx.get(UNPAYWALL_URL).mock(
@@ -143,7 +143,7 @@ async def test_fetch_oa_pdf_url_none_without_email(client):
 @respx.mock
 async def test_resolver_fetch_pdf_bytes_uses_unpaywall_provider(client):
     """The resolver must go through the provider, not a second inline lookup."""
-    settings = Settings(unpaywall_email="test@example.com", enable_scihub=False)
+    settings = Settings(unpaywall_email="test@example.com", enable_mirror_tier=False)
     resolver = WaterfallResolver(settings=settings, http_client=client)
 
     lookup = respx.get("https://api.unpaywall.org/v2/10.1000/x").mock(

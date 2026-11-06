@@ -18,7 +18,7 @@ When resolving paper full text from a DOI, PMID, PMCID, arXiv ID, or title, `sch
 2. **PubMed Central (PMC)** — NCBI E-utilities JATS XML retrieval to clean Markdown.
 3. **Unpaywall** — Open-access PDF discovery and in-memory text extraction (requires email).
 4. **arXiv** — Preprint PDF retrieval and in-memory text extraction (only when an arXiv ID is known; arXiv DOIs `10.48550/arXiv.*` are detected automatically).
-5. **Sci-Hub** — Multi-mirror failover and in-memory PDF text extraction.
+5. **Configured mirrors** — DOI lookup across the base URLs in `FULLTEXT_MIRRORS`, with mirror failover and in-memory PDF text extraction. Skipped when `FULLTEXT_MIRRORS` is unset.
 6. **Abstract Fallback** — PubMed, CrossRef, and arXiv structured abstract and metadata if full text is unavailable.
 
 Accepted identifier formats include `10.xxxx/...` DOIs, `PMID:...`, `PMC...`, arXiv IDs (`arXiv:2305.18290`, `2305.18290v2`, `hep-th/9901001`, arxiv.org abs/pdf URLs), and free-text titles.
@@ -36,7 +36,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
   "mcpServers": {
     "scholar": {
       "command": "uvx",
-      "args": ["scholar-mcp"],
+      "args": ["--from", "git+https://github.com/gustavokch/scholar-mcp", "scholar-mcp"],
       "env": {
         "UNPAYWALL_EMAIL": "your-email@example.com",
         "PUBMED_EMAIL": "your-email@example.com"
@@ -46,20 +46,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 }
 ```
 
----
-
-## Migration from `scihub-mcp` (v0.4.0)
-
-`scholar-mcp` is a complete rewrite and superset of `scihub-mcp`.
-
-| `scihub-mcp` (Old) | `scholar-mcp` (New) |
-|---|---|
-| Command: `uvx scihub-mcp` | Command: `uvx scholar-mcp` |
-| `search_scihub_by_keyword` | `search_papers(query, source="auto")` |
-| `search_scihub_by_title` | `get_full_text(title)` or `get_metadata(title)` |
-| `search_scihub_by_doi` | `get_full_text(doi)` or `get_metadata(doi)` |
-| `download_scihub_pdf` | `download_paper(identifier, output_path)` |
-| Env var: `FORCE_SCIHUB` | Env var: `PREFER_SCIHUB_OVER_UNPAYWALL` |
+`scholar-mcp` installs from this repository. The `scholar-mcp` package on PyPI is an unrelated project, so `uvx scholar-mcp` without `--from` runs a different server.
 
 ---
 
@@ -213,7 +200,7 @@ The `journal_impact` signal reads `src/scholar_mcp/data/scimago_sjr.json`, gener
 
 `scholar-mcp` includes native medical intelligence tools backed by openFDA, RxNav, WHO Global Health Observatory, ClinicalTrials.gov, PubMed, and AAP clinical guidelines with persistent SQLite caching and cross-source deduplication.
 
-The AAP guideline and Brazilian MoH (BVS) searches fall back to a headless browser (`camoufox`) when a plain HTTP request hits a Cloudflare or 403 block. `camoufox` is a core dependency, so no extra install is needed; `pip install 'scholar-mcp[medical]'` is kept as a no-op alias for older setups. Set `ENABLE_BROWSER_FALLBACK=false` to turn the fallback off. Cochrane is not a browser target: `search_medical_databases` reaches its reviews through the Europe PMC API.
+The AAP guideline and Brazilian MoH (BVS) searches fall back to a headless browser (`camoufox`) when a plain HTTP request hits a Cloudflare or 403 block. `camoufox` is a core dependency, so no extra install is needed; the `medical` extra is kept as a no-op alias for older setups. Set `ENABLE_BROWSER_FALLBACK=false` to turn the fallback off. Cochrane is not a browser target: `search_medical_databases` reaches its reviews through the Europe PMC API.
 
 ### Medical Tool Suite
 
@@ -255,9 +242,11 @@ All options are configured via environment variables:
 | `PUBMED_EMAIL` | None | Email sent in NCBI and CrossRef polite pool headers. |
 | `PUBMED_API_KEY` | None | NCBI API key (raises rate limit from 3 rps to 10 rps). |
 | `PUBMED_TOOL` | `ScholarMCP` | Tool identifier sent to NCBI E-utilities. |
-| `ENABLE_SCIHUB` | `true` | Master switch for Sci-Hub tier. `false` disables Sci-Hub. |
-| `PREFER_SCIHUB_OVER_UNPAYWALL` | `false` | When `true`, tries Sci-Hub before Unpaywall. |
-| `SCIHUB_MIRRORS` | Built-in list | Comma-separated list of Sci-Hub mirror base URLs. |
+| `ENABLE_MIRROR_TIER` | `true` | Master switch for the mirror tier. `false` skips it even when `FULLTEXT_MIRRORS` is set. |
+| `FULLTEXT_MIRRORS` | None | Comma-separated mirror base URLs; the tier requests `<mirror>/<doi>` and extracts the linked PDF. No list ships with the package, so the tier is skipped until this is set. |
+| `PREFER_MIRRORS_OVER_UNPAYWALL` | `false` | When `true` and the mirror tier can run, the Unpaywall tier is skipped. |
+| `MIRROR_TIMEOUT_S` | `12.0` | Per-mirror ceiling (seconds) inside the mirror tier. |
+| `MIRROR_TIER_TIMEOUT_S` | `20.0` | Whole-tier ceiling (seconds); no new mirror starts once it passes. |
 | `SCHOLAR_DOWNLOAD_DIR` | `./downloads` | Root directory sandbox for `download_paper`. |
 | `SCHOLAR_MAX_CHARS` | `50000` | Default character limit for full-text responses. |
 | `SCHOLAR_TOTAL_BUDGET` | `45` | Total wall-clock budget (seconds) per full-text call. |
@@ -310,7 +299,7 @@ All options are configured via environment variables:
 ## Acknowledgments
 
 - PubMed search integration logic ported from [JackKuo666/PubMed-MCP-Server](https://github.com/JackKuo666/PubMed-MCP-Server) (MIT, Copyright (c) 2025 JackKuo666).
-- Sci-Hub scraping and failover logic derived from [CyberKrypton/Sci-Hub-MCP-Server](https://github.com/CyberKrypton/Sci-Hub-MCP-Server) and [JackKuo666/Sci-Hub-MCP-Server](https://github.com/JackKuo666/Sci-Hub-MCP-Server).
+- Mirror scraping and failover logic derived from MCP servers by [CyberKrypton](https://github.com/CyberKrypton) and [JackKuo666](https://github.com/JackKuo666).
 
 ---
 

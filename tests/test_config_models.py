@@ -13,15 +13,16 @@ from scholar_mcp.models import (
 def test_settings_defaults(monkeypatch):
     for var in (
         "PUBMED_API_KEY",
-        "ENABLE_SCIHUB",
-        "PREFER_SCIHUB_OVER_UNPAYWALL",
+        "ENABLE_MIRROR_TIER",
+        "PREFER_MIRRORS_OVER_UNPAYWALL",
+        "FULLTEXT_MIRRORS",
         "SCHOLAR_DOWNLOAD_DIR",
         "SCHOLAR_MAX_CHARS",
     ):
         monkeypatch.delenv(var, raising=False)
     settings = Settings.load()
-    assert settings.enable_scihub is True
-    assert settings.prefer_scihub_over_unpaywall is False
+    assert settings.enable_mirror_tier is True
+    assert settings.prefer_mirrors_over_unpaywall is False
     assert settings.pubmed_api_key is None
     assert settings.max_chars == 50_000
     assert settings.total_budget_seconds == 45
@@ -29,27 +30,37 @@ def test_settings_defaults(monkeypatch):
     assert settings.cache_ttl_seconds == 3600
     assert settings.title_match_threshold == 80.0
     assert settings.download_dir.name == "downloads"
-    assert len(settings.scihub_mirrors) > 0
+    assert settings.fulltext_mirrors == []
+    assert settings.mirror_tier_enabled() is False
 
 
 def test_settings_custom_env(monkeypatch):
-    monkeypatch.setenv("PREFER_SCIHUB_OVER_UNPAYWALL", "true")
-    monkeypatch.setenv("ENABLE_SCIHUB", "false")
+    monkeypatch.setenv("PREFER_MIRRORS_OVER_UNPAYWALL", "true")
+    monkeypatch.setenv("ENABLE_MIRROR_TIER", "false")
     monkeypatch.setenv("PUBMED_API_KEY", "test-key")
     monkeypatch.setenv("SCHOLAR_MAX_CHARS", "1000")
     settings = Settings.load()
-    assert settings.prefer_scihub_over_unpaywall is True
-    assert settings.enable_scihub is False
+    assert settings.prefer_mirrors_over_unpaywall is True
+    assert settings.enable_mirror_tier is False
     assert settings.pubmed_api_key == "test-key"
     assert settings.max_chars == 1000
 
 
-def test_scihub_disabled_beats_preference(monkeypatch):
-    """ENABLE_SCIHUB=false wins even when the preference flag is set."""
-    monkeypatch.setenv("ENABLE_SCIHUB", "false")
-    monkeypatch.setenv("PREFER_SCIHUB_OVER_UNPAYWALL", "true")
+def test_fulltext_mirrors_env_is_split_and_trimmed(monkeypatch):
+    monkeypatch.delenv("ENABLE_MIRROR_TIER", raising=False)
+    monkeypatch.setenv("FULLTEXT_MIRRORS", " https://a.example , ,https://b.example/ ")
     settings = Settings.load()
-    assert settings.scihub_tier_enabled() is False
+    assert settings.fulltext_mirrors == ["https://a.example", "https://b.example/"]
+    assert settings.mirror_tier_enabled() is True
+
+
+def test_mirror_tier_disabled_beats_preference(monkeypatch):
+    """ENABLE_MIRROR_TIER=false wins even with mirrors set and the preference flag on."""
+    monkeypatch.setenv("ENABLE_MIRROR_TIER", "false")
+    monkeypatch.setenv("PREFER_MIRRORS_OVER_UNPAYWALL", "true")
+    monkeypatch.setenv("FULLTEXT_MIRRORS", "https://a.example")
+    settings = Settings.load()
+    assert settings.mirror_tier_enabled() is False
 
 
 def test_ncbi_rate_limit_depends_on_api_key(monkeypatch):
@@ -237,8 +248,8 @@ def test_settings_who_iris_ttl_env_override(monkeypatch):
 @pytest.mark.parametrize(
     "env_var,attr,default",
     [
-        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", 12.0),
-        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", 20.0),
+        ("MIRROR_TIMEOUT_S", "mirror_timeout_s", 12.0),
+        ("MIRROR_TIER_TIMEOUT_S", "mirror_tier_timeout_s", 20.0),
         ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", 3600),
         ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", 60),
         ("CACHE_TTL_FDA", "cache_ttl_fda", 86400),
@@ -268,8 +279,8 @@ def test_settings_malformed_timeout_and_ttl_env_falls_back_to_default(
 @pytest.mark.parametrize(
     "env_var,attr,value,expected",
     [
-        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", "5.5", 5.5),
-        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", "9.0", 9.0),
+        ("MIRROR_TIMEOUT_S", "mirror_timeout_s", "5.5", 5.5),
+        ("MIRROR_TIER_TIMEOUT_S", "mirror_tier_timeout_s", "9.0", 9.0),
         ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", "120", 120),
         ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", "30", 30),
         ("CACHE_TTL_FDA", "cache_ttl_fda", "1800", 1800),
@@ -288,8 +299,8 @@ def test_settings_valid_timeout_and_ttl_env_is_parsed(
 @pytest.mark.parametrize(
     "env_var,attr,default",
     [
-        ("SCIHUB_MIRROR_TIMEOUT_S", "scihub_mirror_timeout_s", 12.0),
-        ("SCIHUB_TIER_TIMEOUT_S", "scihub_tier_timeout_s", 20.0),
+        ("MIRROR_TIMEOUT_S", "mirror_timeout_s", 12.0),
+        ("MIRROR_TIER_TIMEOUT_S", "mirror_tier_timeout_s", 20.0),
         ("SCHOLAR_CACHE_TTL", "cache_ttl_seconds", 3600),
         ("CACHE_TTL_IDMAP_FAILURE", "cache_ttl_idmap_failure", 60),
         ("CACHE_TTL_FDA", "cache_ttl_fda", 86400),

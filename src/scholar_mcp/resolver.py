@@ -22,10 +22,10 @@ from scholar_mcp.parsers.jats import list_sections, select_sections
 from scholar_mcp.providers.arxiv import ARXIV_PDF, ArxivProvider
 from scholar_mcp.providers.crossref import CrossRefProvider
 from scholar_mcp.providers.europe_pmc import EuropePMCProvider, annotate_oa_status
+from scholar_mcp.providers.mirrors import MirrorProvider
 from scholar_mcp.providers.openalex import OpenAlexProvider
 from scholar_mcp.providers.pmc import PMCProvider
 from scholar_mcp.providers.pubmed import PubMedProvider
-from scholar_mcp.providers.scihub import SciHubProvider
 from scholar_mcp.providers.semantic_scholar import SemanticScholarProvider
 from scholar_mcp.providers.unpaywall import UnpaywallProvider
 from scholar_mcp.ranking import RankingPipeline
@@ -66,9 +66,9 @@ class WaterfallResolver:
         self.pmc = PMCProvider(self.http_client)
         self.arxiv = ArxivProvider(self.http_client)
         self.unpaywall = UnpaywallProvider(self.http_client, email=self.settings.unpaywall_email)
-        self.scihub = SciHubProvider(
+        self.mirror = MirrorProvider(
             self.http_client,
-            mirrors=self.settings.scihub_mirrors,
+            mirrors=self.settings.fulltext_mirrors,
             settings=self.settings,
         )
         self.pubmed = PubMedProvider(self.http_client, self.settings)
@@ -144,11 +144,11 @@ class WaterfallResolver:
             except Exception:
                 pass
 
-        # Try Sci-Hub if enabled
-        if self.settings.scihub_tier_enabled() and ids.doi:
-            b, _url = await self.scihub.fetch_pdf_bytes(ids)
+        # Try the configured mirrors if enabled
+        if self.settings.mirror_tier_enabled() and ids.doi:
+            b, _url = await self.mirror.fetch_pdf_bytes(ids)
             if b:
-                return b, "scihub"
+                return b, "mirror"
 
         return None, None
 
@@ -171,7 +171,7 @@ class WaterfallResolver:
             )
 
         # Plan tiers
-        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. arXiv -> 5. Sci-Hub -> 6. Abstract fallback
+        # 1. Europe PMC -> 2. PMC -> 3. Unpaywall -> 4. arXiv -> 5. Mirrors -> 6. Abstract fallback
         tiers_plan = [
             ("europepmc", self.europe_pmc, None),
             ("pmc", self.pmc, None),
@@ -179,18 +179,20 @@ class WaterfallResolver:
 
         # Unpaywall skip checks
         unpaywall_skip = None
-        if self.settings.prefer_scihub_over_unpaywall and self.settings.enable_scihub:
-            unpaywall_skip = "PREFER_SCIHUB_OVER_UNPAYWALL"
+        if self.settings.prefer_mirrors_over_unpaywall and self.settings.mirror_tier_enabled():
+            unpaywall_skip = "PREFER_MIRRORS_OVER_UNPAYWALL"
         tiers_plan.append(("unpaywall", self.unpaywall, unpaywall_skip))
 
         # arXiv: runs only when an arXiv ID is known (provider self-skips otherwise)
         tiers_plan.append(("arxiv", self.arxiv, None))
 
-        # Sci-Hub skip checks
-        scihub_skip = None
-        if not self.settings.scihub_tier_enabled():
-            scihub_skip = "ENABLE_SCIHUB is False"
-        tiers_plan.append(("scihub", self.scihub, scihub_skip))
+        # Mirror skip checks
+        mirror_skip = None
+        if not self.settings.enable_mirror_tier:
+            mirror_skip = "ENABLE_MIRROR_TIER is False"
+        elif not self.settings.fulltext_mirrors:
+            mirror_skip = "FULLTEXT_MIRRORS is unset"
+        tiers_plan.append(("mirror", self.mirror, mirror_skip))
 
         async def _execute_waterfall() -> FullTextResponse | None:
             for name, provider, skip_reason in tiers_plan:
@@ -230,7 +232,7 @@ class WaterfallResolver:
                 attempts.append(FetchAttempt(tier=in_flight_tier, outcome="timeout", reason="Total budget exceeded"))
 
         if winning_resp is not None:
-            # Producers like scihub/pmc/arxiv/unpaywall omit title; backfill it
+            # Producers like mirror/pmc/arxiv/unpaywall omit title; backfill it
             # from the metadata chain. The backfill runs after the waterfall, so
             # its ceiling comes out of what the waterfall left of the same
             # budget — capped at 5 s, skipped entirely when nothing remains.
