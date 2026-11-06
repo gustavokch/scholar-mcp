@@ -2,6 +2,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -198,8 +199,22 @@ class Settings:
                 )
                 return default
 
-        mirrors_env = os.getenv("FULLTEXT_MIRRORS") or ""
-        mirrors = [m.strip() for m in mirrors_env.split(",") if m.strip()]
+        # Only an http(s) URL with a host can be requested. Anything else would
+        # still count as configured: the tier would run, fail every request,
+        # and PREFER_MIRRORS_OVER_UNPAYWALL would drop Unpaywall for nothing.
+        mirrors: list[str] = []
+        for entry in (os.getenv("FULLTEXT_MIRRORS") or "").split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = urlsplit(entry)
+            if parts.scheme in ("http", "https") and parts.netloc:
+                mirrors.append(entry)
+            else:
+                logger.warning(
+                    "ignoring FULLTEXT_MIRRORS entry %r: not an http(s) URL with a host",
+                    entry,
+                )
 
         # NCBI_API_KEY is the name NCBI itself documents, so accept it as an
         # alias. All values go through _env: a key of spaces is a

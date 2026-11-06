@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from scholar_mcp.config import Settings
 from scholar_mcp.models import (
@@ -52,6 +54,25 @@ def test_fulltext_mirrors_env_is_split_and_trimmed(monkeypatch):
     settings = Settings.load()
     assert settings.fulltext_mirrors == ["https://a.example", "https://b.example/"]
     assert settings.mirror_tier_enabled() is True
+
+
+def test_fulltext_mirrors_drops_entries_that_are_not_http_urls(monkeypatch, caplog):
+    """A bare host would count as configured, then fail every request: the
+    tier would run for nothing and the preference flag would drop Unpaywall."""
+    monkeypatch.delenv("ENABLE_MIRROR_TIER", raising=False)
+    monkeypatch.setenv(
+        "FULLTEXT_MIRRORS", "mirror.example,ftp://b.example,https://,http://ok.example"
+    )
+    with caplog.at_level(logging.WARNING, logger="scholar_mcp.config"):
+        settings = Settings.load()
+    assert settings.fulltext_mirrors == ["http://ok.example"]
+    assert len([r for r in caplog.records if "FULLTEXT_MIRRORS" in r.getMessage()]) == 3
+
+
+def test_fulltext_mirrors_with_no_valid_entry_leave_the_tier_off(monkeypatch):
+    monkeypatch.delenv("ENABLE_MIRROR_TIER", raising=False)
+    monkeypatch.setenv("FULLTEXT_MIRRORS", "mirror.example")
+    assert Settings.load().mirror_tier_enabled() is False
 
 
 def test_mirror_tier_disabled_beats_preference(monkeypatch):
