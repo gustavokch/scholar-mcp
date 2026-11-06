@@ -164,7 +164,7 @@ class Settings:
         if not self.enable_mirror_tier:
             return "ENABLE_MIRROR_TIER is False"
         if not self.fulltext_mirrors:
-            return "FULLTEXT_MIRRORS is unset"
+            return "FULLTEXT_MIRRORS has no http(s) URL"
         return None
 
     def mirror_tier_enabled(self) -> bool:

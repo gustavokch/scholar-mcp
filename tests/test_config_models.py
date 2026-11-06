@@ -88,7 +88,7 @@ def test_mirror_tier_disabled_beats_preference(monkeypatch):
     "kwargs,reason",
     [
         ({"fulltext_mirrors": ["https://a.example"]}, None),
-        ({}, "FULLTEXT_MIRRORS is unset"),
+        ({}, "FULLTEXT_MIRRORS has no http(s) URL"),
         (
             {"enable_mirror_tier": False, "fulltext_mirrors": ["https://a.example"]},
             "ENABLE_MIRROR_TIER is False",

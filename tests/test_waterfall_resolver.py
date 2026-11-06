@@ -105,7 +105,7 @@ async def test_unset_mirrors_skip_the_tier_and_keep_unpaywall():
     r.unpaywall.fetch_full_text.assert_awaited_once()
     r.mirror.fetch_full_text.assert_not_awaited()
     mirror = [a for a in res.attempts if a.tier == "mirror"][0]
-    assert (mirror.outcome, mirror.reason) == ("skipped", "FULLTEXT_MIRRORS is unset")
+    assert (mirror.outcome, mirror.reason) == ("skipped", "FULLTEXT_MIRRORS has no http(s) URL")
 
 
 async def test_total_failure_falls_back_to_abstract():
