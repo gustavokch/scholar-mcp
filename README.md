@@ -243,7 +243,7 @@ All options are configured via environment variables:
 | `PUBMED_API_KEY` | None | NCBI API key (raises rate limit from 3 rps to 10 rps). |
 | `PUBMED_TOOL` | `ScholarMCP` | Tool identifier sent to NCBI E-utilities. |
 | `ENABLE_MIRROR_TIER` | `true` | Master switch for the mirror tier. `false` skips it even when `FULLTEXT_MIRRORS` is set. |
-| `FULLTEXT_MIRRORS` | None | Comma-separated mirror base URLs; the tier requests `<mirror>/<doi>` and extracts the linked PDF. No list ships with the package, so the tier is skipped until this is set. |
+| `FULLTEXT_MIRRORS` | None | Comma-separated mirror base URLs (`http://` or `https://`); the tier requests `<mirror>/<doi>` and extracts the linked PDF. Entries without a scheme and host are dropped with a warning. No list ships with the package, so the tier is skipped until this names at least one valid URL. |
 | `PREFER_MIRRORS_OVER_UNPAYWALL` | `false` | When `true` and the mirror tier can run, the Unpaywall tier is skipped. |
 | `MIRROR_TIMEOUT_S` | `12.0` | Per-mirror ceiling (seconds) inside the mirror tier. |
 | `MIRROR_TIER_TIMEOUT_S` | `20.0` | Whole-tier ceiling (seconds); no new mirror starts once it passes. |

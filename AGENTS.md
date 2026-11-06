@@ -73,7 +73,7 @@ src/scholar_mcp/
    - Tier 2: PMC (JATS XML -> Markdown)
    - Tier 3: Unpaywall (Legal OA PDF -> Text) — skipped when `PREFER_MIRRORS_OVER_UNPAYWALL` is set and the mirror tier can run
    - Tier 4: arXiv (Preprint PDF -> Text, automatic for arXiv DOIs `10.48550/arXiv.*` and arXiv IDs) — the provider self-skips when no arXiv ID is known
-   - Tier 5: Mirrors (Mirror-rotated PDF -> Text with Camoufox anti-detection fallback) — skipped when `ENABLE_MIRROR_TIER` is false or `FULLTEXT_MIRRORS` is unset. No mirror list is committed: base URLs live only in deployment config.
+   - Tier 5: Mirrors (Mirror-rotated PDF -> Text with Camoufox anti-detection fallback) — skipped when `ENABLE_MIRROR_TIER` is false or `FULLTEXT_MIRRORS` holds no `http(s)` URL (other entries are dropped with a warning at load). `Settings.mirror_tier_skip_reason()` is the one rule behind this skip, the Unpaywall preference and the download path. No mirror list is committed: base URLs live only in deployment config.
    - Tier 6: Abstract Fallback (PubMed / CrossRef metadata)
 
    Skipped tiers are still recorded in the response as `FetchAttempt(outcome="skipped")` with the reason, so the order above describes the plan, not a guarantee that every tier runs.
