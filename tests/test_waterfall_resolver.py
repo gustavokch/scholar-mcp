@@ -109,7 +109,7 @@ async def test_unset_mirrors_skip_the_tier_and_keep_unpaywall():
 
 
 async def test_total_failure_falls_back_to_abstract():
-    r = make_resolver(Settings())
+    r = make_resolver(Settings(fulltext_mirrors=MIRRORS))
     r.fetch_abstract.return_value = PaperMetadata(title="T", abstract="An abstract.")
     res = await r.resolve_full_text("10.1038/xyz")
     assert res.status == "abstract_only"
@@ -118,9 +118,10 @@ async def test_total_failure_falls_back_to_abstract():
 
 
 async def test_nothing_at_all_returns_not_found():
-    res = await make_resolver(Settings()).resolve_full_text("10.1038/xyz")
+    res = await make_resolver(Settings(fulltext_mirrors=MIRRORS)).resolve_full_text("10.1038/xyz")
     assert res.status == "not_found"
     assert len(res.attempts) == 6
+    assert [a.outcome for a in res.attempts if a.tier == "mirror"] == ["miss"]
 
 
 async def test_ambiguous_title_does_not_fetch():
@@ -209,7 +210,7 @@ async def test_download_writes_inside_root(tmp_path):
 
 
 async def test_arxiv_hit_short_circuits_before_mirrors():
-    r = make_resolver(Settings())
+    r = make_resolver(Settings(fulltext_mirrors=MIRRORS))
     r.resolve_ids = AsyncMock(
         return_value=IdentifierMap(arxiv="2305.18290", doi="10.48550/arXiv.2305.18290")
     )
