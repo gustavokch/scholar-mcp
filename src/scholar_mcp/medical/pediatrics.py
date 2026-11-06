@@ -68,7 +68,7 @@ YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 # Browser-fallback budget. The AAP host sits behind Cloudflare, so the
 # challenge needs time to settle, but search_aap_guidelines is an MCP tool
-# with no caller-side ceiling — mirror scihub.py's bounded camoufox block.
+# with no caller-side ceiling — same bounded camoufox block as providers/mirrors.py.
 _NAV_TIMEOUT_MS = 15000
 # Condition-based challenge budget: poll until the interstitial hands back
 # a real page (observed ~10s), not a fixed sleep that fires mid-challenge.
