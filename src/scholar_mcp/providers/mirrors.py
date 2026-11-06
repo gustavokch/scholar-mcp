@@ -214,7 +214,7 @@ class MirrorProvider(BaseProvider):
         ids: IdentifierMap,
     ) -> tuple[bytes | None, str | None]:
         """Attempt to fetch raw PDF bytes across the configured mirrors, returning (bytes, pdf_url)."""
-        if not ids.doi or not ids.doi.strip():
+        if not self.mirrors or not ids.doi or not ids.doi.strip():
             return None, None
 
         clean_doi = ids.doi.strip()

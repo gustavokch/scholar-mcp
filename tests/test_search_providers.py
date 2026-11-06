@@ -1197,6 +1197,15 @@ async def test_mirror_camoufox_import_error_gracefully_handled(client, monkeypat
     assert url_res is None
 
 
+async def test_mirror_without_mirrors_never_launches_browser(client, monkeypatch):
+    """No mirror list is the default. A browser launch costs seconds and has
+    no mirror to visit, so the provider must miss without starting one."""
+    fake = _install_fake_camoufox(monkeypatch, rendered_html="<html></html>")
+    provider = MirrorProvider(client, mirrors=[], settings=Settings(enable_browser_fallback=True))
+    assert await provider.fetch_pdf_bytes(IdentifierMap(doi="10.1038/test")) == (None, None)
+    assert fake.attempts == []
+
+
 async def test_mirror_without_doi_is_miss(client):
     settings = Settings(enable_browser_fallback=False)
     provider = MirrorProvider(client, mirrors=["https://mirror1.org"], settings=settings)
