@@ -31,7 +31,7 @@ class IdentifierMap:
 class FetchAttempt:
     """One waterfall tier outcome, for debuggability."""
 
-    tier: str  # "pmc" | "europepmc" | "unpaywall" | "scihub" | "abstract_fallback"
+    tier: str  # "pmc" | "europepmc" | "unpaywall" | "mirror" | "abstract_fallback"
     outcome: str  # "hit" | "miss" | "skipped" | "error" | "timeout"
     reason: str = ""
     elapsed_ms: int = 0
@@ -77,7 +77,7 @@ class PaperMetadata:
 @dataclass
 class FullTextResponse:
     status: str  # "full_text" | "abstract_only" | "ambiguous_match" | "not_found" | "error"
-    source: str  # "pmc" | "europepmc" | "unpaywall" | "scihub" | "abstract_fallback" | "none"
+    source: str  # "pmc" | "europepmc" | "unpaywall" | "mirror" | "abstract_fallback" | "none"
     format: str = "markdown"  # "markdown" | "text"
     title: str = ""
     doi: str | None = None

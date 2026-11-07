@@ -36,3 +36,21 @@ data/raw/
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 node_modules
+
+# Local settings, including the private FULLTEXT_MIRRORS list.
+.env
+
+# Internal working notes kept local only.
+/docs/scholar-mcp-implementation-handoff.md
+/docs/superpowers/plans/2026-08-28-pr1-review-remediation.md
+/docs/superpowers/plans/2026-08-28-pr3-review-remediation.md
+/docs/superpowers/plans/2026-08-28-scholar-mcp-unified-plan.md
+/docs/superpowers/plans/2026-08-31-rerank-and-citation-check.md
+/docs/superpowers/plans/2026-09-01-pr12-review-remediation.md
+/docs/superpowers/plans/2026-09-05-pr17-review-remediation.md
+/docs/superpowers/plans/2026-09-05-pr17-review-round2-remediation.md
+/docs/superpowers/plans/2026-09-08-pr20-review-remediation.md
+/docs/superpowers/plans/2026-09-24-review-findings-ranking-and-filters.md
+/docs/superpowers/plans/2026-10-01-camoufox-goto-abort-tolerance.md
+/docs/superpowers/plans/2026-11-05-pr58-review-remediation.md
+/docs/superpowers/specs/2026-08-28-scholar-mcp-unified-design.md

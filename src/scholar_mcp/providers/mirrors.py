@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-from scholar_mcp.config import DEFAULT_SCIHUB_MIRRORS, Settings
+from scholar_mcp.config import Settings
 from scholar_mcp.models import FullTextResponse, IdentifierMap
 from scholar_mcp.parsers.pdf import pdf_bytes_to_text
 from scholar_mcp.providers.base import BaseProvider, MIN_USEFUL_CHARS
@@ -22,7 +22,7 @@ _CAMOUFOX_GOTO_TIMEOUT_MS = 15000
 # After an aborted goto, how long one mirror may keep reading for the
 # Cloudflare interstitial to hand back the page. Up to _CAMOUFOX_MAX_MIRRORS
 # mirrors share _CAMOUFOX_TOTAL_TIMEOUT, so a mirror whose interstitial never
-# clears must not spend more than its share. Not measured against Sci-Hub.
+# clears must not spend more than its share. Not measured against live mirrors.
 _CAMOUFOX_INTERSTITIAL_CLEAR_MS = 5000
 
 # Ceiling on a mirror's failure count. The count only orders the mirror list, so
@@ -61,7 +61,7 @@ def _landing_url(page_url: str | None, fallback: str) -> str:
 
 
 def _extract_pdf_url(html: str, base_url: str | None = None) -> str | None:
-    """Extract PDF URL from Sci-Hub HTML response."""
+    """Extract the PDF URL from a mirror's DOI landing page."""
     if not html:
         return None
 
@@ -92,10 +92,10 @@ def _extract_pdf_url(html: str, base_url: str | None = None) -> str | None:
     return None
 
 
-class SciHubProvider(BaseProvider):
-    """Sci-Hub multi-mirror scraper and PDF text extractor."""
+class MirrorProvider(BaseProvider):
+    """Multi-mirror DOI scraper and PDF text extractor over ``FULLTEXT_MIRRORS``."""
 
-    tier: str = "scihub"
+    tier: str = "mirror"
 
     def __init__(
         self,
@@ -105,7 +105,7 @@ class SciHubProvider(BaseProvider):
     ) -> None:
         super().__init__(http_client)
         self.settings = settings or Settings.load()
-        self.mirrors = mirrors if mirrors is not None else list(self.settings.scihub_mirrors)
+        self.mirrors = mirrors if mirrors is not None else list(self.settings.fulltext_mirrors)
         # Failure memory: a mirror that fails gets +1; iteration order is a
         # stable sort on penalties, so known-bad mirrors sink to the tail
         # while zero-penalty mirrors keep config order. Success pops the entry.
@@ -116,7 +116,7 @@ class SciHubProvider(BaseProvider):
     ) -> bytes | None:
         """Fetch raw PDF bytes, preferring a landing-page ``Referer``.
 
-        Hosts such as sci.bban.top require the header; others use hotlink
+        Some PDF hosts require the header; others use hotlink
         protection that rejects a foreign one while accepting a bare request.
         Only a refusal -- 401/403, or a 200 bot-challenge page -- gets one retry
         without the header, and only when ``allow_bare_retry`` is set. A request
@@ -213,8 +213,8 @@ class SciHubProvider(BaseProvider):
         self,
         ids: IdentifierMap,
     ) -> tuple[bytes | None, str | None]:
-        """Attempt to fetch raw PDF bytes across Sci-Hub mirrors, returning (bytes, pdf_url)."""
-        if not ids.doi or not ids.doi.strip():
+        """Attempt to fetch raw PDF bytes across the configured mirrors, returning (bytes, pdf_url)."""
+        if not self.mirrors or not ids.doi or not ids.doi.strip():
             return None, None
 
         clean_doi = ids.doi.strip()
@@ -240,7 +240,7 @@ class SciHubProvider(BaseProvider):
         # the per-mirror ceiling would outlast the 45 s waterfall budget.
         # Once the tier deadline passes, no new mirror is started.
         tier_budget = float(
-            getattr(self.settings, "scihub_tier_timeout_s", 0.0) or 0.0
+            getattr(self.settings, "mirror_tier_timeout_s", 0.0) or 0.0
         )
         tier_start = time.monotonic()
         for mirror in ordered:
@@ -248,7 +248,7 @@ class SciHubProvider(BaseProvider):
                 break
             try:
                 result = await asyncio.wait_for(
-                    _try_mirror(mirror), timeout=self.settings.scihub_mirror_timeout_s
+                    _try_mirror(mirror), timeout=self.settings.mirror_timeout_s
                 )
             except Exception:
                 # asyncio.TimeoutError included: this is ordering metadata, not
@@ -285,7 +285,7 @@ class SciHubProvider(BaseProvider):
 
         return FullTextResponse(
             status="full_text",
-            source="scihub",
+            source="mirror",
             format="text",
             content=text,
             total_chars=len(text),
