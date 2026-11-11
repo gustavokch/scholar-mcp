@@ -176,6 +176,13 @@ _CAMOUFOX_SHIELD_CLEAR_MS = 20000
 # ceiling that clears it. Raise once a real launch-time measurement exists.
 _CAMOUFOX_MIN_USEFUL_CEILING_S = 20.0
 
+# Live Camoufox browsers per engine (the engine is a process-wide singleton).
+# Each launch is a full Firefox process, and full-text lookups fan out one
+# call per search result; past the cap a caller queues, and the wait spends
+# its own ceiling. 2 matches BRAZIL_MAX_CONCURRENT's default for plain BVS
+# requests.
+_CAMOUFOX_MAX_CONCURRENT = 2
+
 _BVS_CHALLENGE_MARKERS = (
     "shield-templates",
     "b-cdn.net",
@@ -822,6 +829,7 @@ class BrazilMoHEngine:
             settings.brazil_breaker_threshold,
             settings.brazil_breaker_cooldown_s,
         )
+        self._browser_slots = asyncio.Semaphore(_CAMOUFOX_MAX_CONCURRENT)
 
     async def _bvs_request(
         self, composed: str, count: int, deadline: float | None
@@ -1712,12 +1720,13 @@ class BrazilMoHEngine:
         timeout. ``None`` uses the browser timeout alone; ``0.0`` skips the
         tier outright. Any positive value is the seconds actually left.
         Whichever value results (``effective_ceiling``) bounds both the
-        overall ``wait_for`` and, after subtracting the time the launch
-        itself took, the in-browser navigation -- so navigation can never
-        silently outlive what launch already spent. An ``effective_ceiling``
-        below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
-        Camoufox launch needs tens of seconds, so a doomed ceiling would only
-        burn startup time.
+        overall ``wait_for`` and, after subtracting the time spent queueing
+        for a browser slot and launching, the in-browser navigation -- so
+        navigation can never silently outlive what the tier already spent.
+        At most ``_CAMOUFOX_MAX_CONCURRENT`` browsers run per engine. An
+        ``effective_ceiling`` below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips
+        the launch outright: a Camoufox launch needs tens of seconds, so a
+        doomed ceiling would only burn startup time.
         """
         if ceiling is not None and ceiling <= 0:
             logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
@@ -1744,11 +1753,13 @@ class BrazilMoHEngine:
         )
 
         async def _run() -> list[dict[str, Any]] | None:
-            launch_start = time.monotonic()
-            async with AsyncCamoufox(headless=True) as browser:
+            # Taken before the slot: queueing spends the same ceiling as the
+            # launch, so the navigation budget must count it.
+            tier_start = time.monotonic()
+            async with self._browser_slots, AsyncCamoufox(headless=True) as browser:
                 page = await browser.new_page()
                 nav_budget_s = max(
-                    effective_ceiling - (time.monotonic() - launch_start), 0.0
+                    effective_ceiling - (time.monotonic() - tier_start), 0.0
                 )
                 nav_timeout_ms = min(
                     _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)

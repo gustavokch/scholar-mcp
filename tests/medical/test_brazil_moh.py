@@ -3932,6 +3932,53 @@ async def test_full_text_keeps_challenge_when_browser_outlives_budget(tmp_path, 
         await http_client.aclose()
 
 
+async def test_camoufox_fetch_caps_concurrent_browsers(tmp_path, monkeypatch):
+    """Full-text lookups fan out one call per search result, and each
+    shielded one reaches the browser tier. Launches past the cap must queue
+    instead of starting one Firefox per caller, and the queued calls still
+    complete once a slot frees."""
+    import sys
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([_bvs_doc()])))
+    api_mod = sys.modules["camoufox.async_api"]
+    inner = api_mod.AsyncCamoufox
+    live = 0
+    peak = 0
+    gate = asyncio.Event()
+
+    class _Gated:
+        def __init__(self, **kw):
+            self._ctx = inner(**kw)
+
+        async def __aenter__(self):
+            nonlocal live, peak
+            live += 1
+            peak = max(peak, live)
+            await gate.wait()
+            return await self._ctx.__aenter__()
+
+        async def __aexit__(self, *exc):
+            nonlocal live
+            live -= 1
+            return await self._ctx.__aexit__(*exc)
+
+    monkeypatch.setattr(api_mod, "AsyncCamoufox", _Gated)
+    try:
+        tasks = [
+            asyncio.create_task(engine._camoufox_fetch(f"q{i}", 5, None))
+            for i in range(4)
+        ]
+        await asyncio.sleep(0.05)
+        assert peak < len(tasks)
+        gate.set()
+        results = await asyncio.gather(*tasks)
+        assert [docs[0]["id"] for docs in results] == ["biblio-1"] * len(tasks)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
