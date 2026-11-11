@@ -842,6 +842,9 @@ class BrazilMoHEngine:
             settings.brazil_breaker_threshold,
             settings.brazil_breaker_cooldown_s,
         )
+        # Like ``bvs_guard``, this semaphore binds to the loop of the first
+        # caller that has to wait. The engine serves one event loop: the
+        # shared ``AsyncHttpClient`` already fails on a second one.
         self._browser_slots = asyncio.Semaphore(_CAMOUFOX_MAX_CONCURRENT)
 
     async def _bvs_request(
