@@ -2424,7 +2424,7 @@ async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
         monkeypatch, json.dumps(payload), abort_goto=True
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert attempts == [True]
     finally:
@@ -2626,7 +2626,7 @@ async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
     tmp_path, monkeypatch
 ):
     """When BVS returns an HTML challenge/block page (e.g. Bunny CDN Bot Shield),
-    _camoufox_search must not crash with JSONDecodeError, but return []."""
+    the browser fallback must preserve the search error rather than crash."""
     settings = Settings(
         cache_ttl_seconds=3600,
         enable_browser_fallback=True,
@@ -2679,8 +2679,8 @@ async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monke
     )
     try:
         with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
-            docs = await engine._camoufox_search("dengue", count=10, ceiling=25.0)
-        assert docs == []
+            docs = await engine._camoufox_fetch("dengue", count=10, ceiling=25.0)
+        assert docs is None
         messages = [r.getMessage() for r in caplog.records]
         assert any("origin returned an error page" in m for m in messages)
         assert not any("challenge or block page" in m for m in messages)
@@ -2713,7 +2713,7 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
     }
     _install_fake_camoufox(monkeypatch, json.dumps(payload))
     try:
-        docs = await engine._camoufox_search("triagem", count=10, ceiling=25.0)
+        docs = await engine._camoufox_fetch("triagem", count=10, ceiling=25.0)
         assert [d["id"] for d in docs] == ["1"]
     finally:
         await cache.close()
@@ -2722,7 +2722,7 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
 
 async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
     """``ceiling=0.0`` means the chain budget is exhausted (W6): the browser
-    tier must return [] without ever importing camoufox, never launch with a
+    tier must return None without ever importing camoufox, never launch with a
     zero-second timeout."""
     import sys as _sys
 
@@ -2736,8 +2736,8 @@ async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, mon
 
     monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
     try:
-        docs = await engine._camoufox_search("dengue", count=10, ceiling=0.0)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", count=10, ceiling=0.0)
+        assert docs is None
     finally:
         await cache.close()
         await http_client.aclose()
@@ -2758,8 +2758,8 @@ async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeyp
 
     monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
     try:
-        docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", count=10, ceiling=5.0)
+        assert docs is None
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3797,6 +3797,96 @@ async def _camoufox_engine(tmp_path: Path):
     return BrazilMoHEngine(http_client, cache, settings), cache, http_client
 
 
+@pytest.mark.parametrize("status", [200, 403])
+@respx.mock
+async def test_full_text_recovers_shielded_lookup_with_browser(tmp_path, monkeypatch, status):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    record_id = 'biblio-"1\\2'
+    docs = [
+        _bvs_doc(record_id="biblio-other", ab=["Wrong abstract."]),
+        _bvs_doc(record_id=record_id, ab=["Correct abstract."], ur=["https://example.org/doc"]),
+    ]
+    _, urls, _, _ = _install_fake_camoufox(
+        monkeypatch, content_script=[_BVS_INTERSTITIAL, json.dumps(_bvs_response(docs))]
+    )
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            status, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text(record_id)
+        assert payload["content"] == "Correct abstract."
+        assert payload["content_type"] == "abstract"
+        assert meta.error is False
+        assert urllib.parse.parse_qs(urllib.parse.urlsplit(urls[0]).query)["q"] == [
+            'id:"biblio-\\"1\\\\2"'
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("browser_payload", "expected_status", "expected_kind"),
+    [
+        (json.dumps(_bvs_response([])), "not_found", "successful_empty"),
+        ('{"error": "upstream failure"}', "error", "cdn_challenge"),
+    ],
+)
+@respx.mock
+async def test_full_text_distinguishes_empty_browser_result_from_failure(
+    tmp_path, monkeypatch, browser_payload, expected_status, expected_kind
+):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _install_fake_camoufox(monkeypatch, browser_payload)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == expected_status
+        assert meta.error_kind == expected_kind
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_full_text_preserves_challenge_when_browser_fails(tmp_path, monkeypatch):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _install_fake_camoufox(monkeypatch, content_script=[_BVS_INTERSTITIAL])
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize("reason", ["global_disabled", "brazil_disabled", "short_budget"])
+@respx.mock
+async def test_full_text_shield_respects_browser_limits(tmp_path, monkeypatch, reason):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    attempts, _, _, _ = _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([
+        _bvs_doc(record_id="biblio-1", ab=["Should not be served."])
+    ])))
+    if reason == "global_disabled":
+        engine.settings.enable_browser_fallback = False
+    elif reason == "brazil_disabled":
+        engine.settings.brazil_browser_fallback = False
+    else:
+        engine.settings.brazil_fulltext_timeout_s = 5.0
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert meta.error_kind == "cdn_challenge"
+        assert attempts == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
@@ -3812,7 +3902,7 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         ],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == [500, 500, 500]
     finally:
@@ -3832,7 +3922,7 @@ async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
         content_script=[_BVS_INTERSTITIAL, _BVS_INTERSTITIAL, _bvs_payload()],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == [500, 500]
     finally:
@@ -3852,8 +3942,8 @@ async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
         monkeypatch, content_script=[_BVS_INTERSTITIAL]
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", 10, None)
+        assert docs is None
         assert sum(sleeps) == _CAMOUFOX_SHIELD_CLEAR_MS
         assert len(urls) == 1
     finally:
@@ -3873,7 +3963,7 @@ async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield
         content_script=[_bvs_payload("https://acme.b-cdn.net/dengue.pdf")],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == []
     finally:

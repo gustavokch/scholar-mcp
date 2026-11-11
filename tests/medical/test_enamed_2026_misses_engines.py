@@ -281,7 +281,7 @@ async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypat
     engine, cache, http_client = await _engine(tmp_path)
     captured = _install_fake_camoufox(monkeypatch)
     try:
-        await engine._camoufox_search("dengue", 10, ceiling=25.0)
+        await engine._camoufox_fetch("dengue", 10, ceiling=25.0)
         assert 24000 <= captured["timeout"] <= 25000
     finally:
         await cache.close()
@@ -297,7 +297,7 @@ async def test_camoufox_nav_cap_leaves_the_browser_budget_in_charge(tmp_path, mo
     captured = _install_fake_camoufox(monkeypatch)
     try:
         budget_ms = engine.settings.brazil_browser_timeout_s * 1000
-        await engine._camoufox_search("dengue", 10, ceiling=None)
+        await engine._camoufox_fetch("dengue", 10, ceiling=None)
         assert budget_ms - 1000 <= captured["timeout"] <= budget_ms
     finally:
         await cache.close()
@@ -903,7 +903,7 @@ async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch)
             seen.append(count)
             return []
 
-        engine._camoufox_search = _fake_browser
+        engine._camoufox_fetch = _fake_browser
         await engine.search_guidelines("dengue hidratacao", limit=10)
         assert calls == [10, 10], (
             "the browser tier must recompute the overfetch window, not reuse the chain-start count"
@@ -931,7 +931,7 @@ async def test_camoufox_skips_when_ceiling_below_useful_floor(tmp_path, monkeypa
         monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
         monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
 
-        assert await engine._camoufox_search("dengue", 10, ceiling=0.5) == []
+        assert await engine._camoufox_fetch("dengue", 10, ceiling=0.5) is None
         assert constructed == [], "camoufox must not launch under a tiny ceiling"
     finally:
         await cache.close()
