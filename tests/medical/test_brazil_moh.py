@@ -3953,48 +3953,122 @@ async def test_full_text_keeps_challenge_when_browser_outlives_budget(tmp_path, 
         await http_client.aclose()
 
 
+class _LaunchGate:
+    """Holds every Camoufox launch until ``gate`` is set; counts live browsers."""
+
+    def __init__(self, monkeypatch):
+        import sys
+
+        api_mod = sys.modules["camoufox.async_api"]
+        inner = api_mod.AsyncCamoufox
+        self.gate = asyncio.Event()
+        self.live = 0
+        self.peak = 0
+        outer = self
+
+        class _Gated:
+            def __init__(self, **kw):
+                self._ctx = inner(**kw)
+
+            async def __aenter__(self):
+                outer.live += 1
+                outer.peak = max(outer.peak, outer.live)
+                await outer.gate.wait()
+                return await self._ctx.__aenter__()
+
+            async def __aexit__(self, *exc):
+                outer.live -= 1
+                return await self._ctx.__aexit__(*exc)
+
+        monkeypatch.setattr(api_mod, "AsyncCamoufox", _Gated)
+
+
 async def test_camoufox_fetch_caps_concurrent_browsers(tmp_path, monkeypatch):
     """Full-text lookups fan out one call per search result, and each
     shielded one reaches the browser tier. Launches past the cap must queue
     instead of starting one Firefox per caller, and the queued calls still
     complete once a slot frees."""
-    import sys
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
 
     engine, cache, http_client = await _camoufox_engine(tmp_path)
     _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([_bvs_doc()])))
-    api_mod = sys.modules["camoufox.async_api"]
-    inner = api_mod.AsyncCamoufox
-    live = 0
-    peak = 0
-    gate = asyncio.Event()
-
-    class _Gated:
-        def __init__(self, **kw):
-            self._ctx = inner(**kw)
-
-        async def __aenter__(self):
-            nonlocal live, peak
-            live += 1
-            peak = max(peak, live)
-            await gate.wait()
-            return await self._ctx.__aenter__()
-
-        async def __aexit__(self, *exc):
-            nonlocal live
-            live -= 1
-            return await self._ctx.__aexit__(*exc)
-
-    monkeypatch.setattr(api_mod, "AsyncCamoufox", _Gated)
+    launches = _LaunchGate(monkeypatch)
     try:
         tasks = [
             asyncio.create_task(engine._camoufox_fetch(f"q{i}", 5, None))
             for i in range(4)
         ]
         await asyncio.sleep(0.05)
-        assert peak < len(tasks)
-        gate.set()
+        assert launches.peak == _CAMOUFOX_MAX_CONCURRENT
+        launches.gate.set()
         results = await asyncio.gather(*tasks)
         assert [docs[0]["id"] for docs in results] == ["biblio-1"] * len(tasks)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
+    tmp_path, monkeypatch
+):
+    """The useful-ceiling floor guards the launch, not the call: a caller
+    that waited for a slot until less than the floor was left must not
+    start a Firefox it cannot use."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.5
+    )
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    launches = _LaunchGate(monkeypatch)
+    try:
+        holders = [
+            asyncio.create_task(engine._camoufox_fetch(f"hold{i}", 5, None))
+            for i in range(2)
+        ]
+        await asyncio.sleep(0.05)
+        queued = asyncio.create_task(engine._camoufox_fetch("late", 5, 0.8))
+        await asyncio.sleep(0.5)
+        launches.gate.set()
+        held = await asyncio.gather(*holders)
+        assert await queued is None
+        assert [docs[0]["id"] for docs in held] == ["biblio-1", "biblio-1"]
+        assert len(attempts) == 2
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_frees_the_slot_of_a_caller_cancelled_in_queue(
+    tmp_path, monkeypatch
+):
+    """At the default budgets most queued lookups run out of ceiling while
+    they wait. A cancelled waiter must leave both slots usable, or every
+    later browser call queues until its own ceiling."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+    _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([_bvs_doc()])))
+    launches = _LaunchGate(monkeypatch)
+    try:
+        holders = [
+            asyncio.create_task(engine._camoufox_fetch(f"hold{i}", 5, None))
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
+        ]
+        await asyncio.sleep(0.05)
+        assert await engine._camoufox_fetch("late", 5, 0.1) is None
+        launches.gate.set()
+        await asyncio.gather(*holders)
+        after = [
+            asyncio.create_task(engine._camoufox_fetch(f"after{i}", 5, 1.0))
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
+        ]
+        results = await asyncio.gather(*after)
+        assert [docs[0]["id"] for docs in results] == ["biblio-1"] * len(after)
     finally:
         await cache.close()
         await http_client.aclose()

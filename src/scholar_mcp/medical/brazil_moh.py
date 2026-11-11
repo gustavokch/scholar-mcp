@@ -179,8 +179,7 @@ _CAMOUFOX_MIN_USEFUL_CEILING_S = 20.0
 # Live Camoufox browsers per engine (the engine is a process-wide singleton).
 # Each launch is a full Firefox process, and full-text lookups fan out one
 # call per search result; past the cap a caller queues, and the wait spends
-# its own ceiling. 2 matches BRAZIL_MAX_CONCURRENT's default for plain BVS
-# requests.
+# its own ceiling.
 _CAMOUFOX_MAX_CONCURRENT = 2
 
 _BVS_CHALLENGE_MARKERS = (
@@ -1742,7 +1741,9 @@ class BrazilMoHEngine:
         At most ``_CAMOUFOX_MAX_CONCURRENT`` browsers run per engine. An
         ``effective_ceiling`` below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips
         the launch outright: a Camoufox launch needs tens of seconds, so a
-        doomed ceiling would only burn startup time.
+        doomed ceiling would only burn startup time. The floor is checked
+        again once a slot is held, so a caller whose wait spent it skips the
+        launch too.
         """
         if ceiling is not None and ceiling <= 0:
             logger.info("brazil_moh camoufox tier skipped: caller budget exhausted")
@@ -1772,23 +1773,33 @@ class BrazilMoHEngine:
             # Taken before the slot: queueing spends the same ceiling as the
             # launch, so the navigation budget must count it.
             tier_start = time.monotonic()
-            async with self._browser_slots, AsyncCamoufox(headless=True) as browser:
-                page = await browser.new_page()
-                nav_budget_s = max(
-                    effective_ceiling - (time.monotonic() - tier_start), 0.0
-                )
-                nav_timeout_ms = min(
-                    _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
-                )
-                await goto_tolerant(page, target, nav_timeout_ms)
-                # The shield answers the first request with a 403 interstitial
-                # and swaps in the payload once its challenge clears, with or
-                # without an aborted goto: keep reading for the budget.
-                content = await read_content_settled(
-                    page,
-                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
-                    ready=lambda html: not _bvs_shield_pending(html),
-                )
+            async with self._browser_slots:
+                queued_left = effective_ceiling - (time.monotonic() - tier_start)
+                if queued_left < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+                    logger.info(
+                        "brazil_moh camoufox tier skipped: %.1fs left after "
+                        "waiting for a browser slot, below useful floor",
+                        queued_left,
+                    )
+                    return None
+                async with AsyncCamoufox(headless=True) as browser:
+                    page = await browser.new_page()
+                    nav_budget_s = max(
+                        effective_ceiling - (time.monotonic() - tier_start), 0.0
+                    )
+                    nav_timeout_ms = min(
+                        _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
+                    )
+                    await goto_tolerant(page, target, nav_timeout_ms)
+                    # The shield answers the first request with a 403
+                    # interstitial and swaps in the payload once its challenge
+                    # clears, with or without an aborted goto: keep reading for
+                    # the budget.
+                    content = await read_content_settled(
+                        page,
+                        min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
+                        ready=lambda html: not _bvs_shield_pending(html),
+                    )
             text = _browser_payload_text(content)
             try:
                 data = json.loads(text)
