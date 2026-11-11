@@ -3869,9 +3869,13 @@ async def test_full_text_distinguishes_empty_browser_result_from_failure(
         await http_client.aclose()
 
 
+@pytest.mark.parametrize("fulltext_s", [30.0, 0.0])
 @respx.mock
-async def test_full_text_preserves_challenge_when_browser_fails(tmp_path, monkeypatch):
+async def test_full_text_preserves_challenge_when_browser_fails(
+    tmp_path, monkeypatch, fulltext_s
+):
     engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_fulltext_timeout_s = fulltext_s
     _install_fake_camoufox(monkeypatch, content_script=[_BVS_INTERSTITIAL])
     try:
         respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
@@ -3879,6 +3883,7 @@ async def test_full_text_preserves_challenge_when_browser_fails(tmp_path, monkey
         assert payload["status"] == "error"
         assert payload["timeout_phase"] == "lookup"
         assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is False
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3948,6 +3953,67 @@ async def test_full_text_keeps_challenge_when_browser_outlives_budget(tmp_path, 
         assert payload["timeout_phase"] == "lookup"
         assert meta.error_kind == "cdn_challenge"
         assert meta.timeout is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("fulltext_s", "browser_s", "expected_timeout"),
+    [(0.5, 150.0, True), (5.0, 0.3, False)],
+    ids=["fulltext_ceiling", "browser_cap"],
+)
+@respx.mock
+async def test_full_text_flags_timeout_when_browser_navigation_ends_at_budget(
+    tmp_path, monkeypatch, fulltext_s, browser_s, expected_timeout
+):
+    """Playwright raises its own goto timeout, sized from the same budget,
+    so the browser can return before either ``wait_for`` fires. The ceiling
+    still cut the lookup short, and ``timeout`` must say so whichever timer
+    ends the browser. A browser stopped by its own cap, with full-text budget
+    left, is not a ceiling landing."""
+    import sys
+    import types
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_fulltext_timeout_s = fulltext_s
+    engine.settings.brazil_browser_timeout_s = browser_s
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+
+    class _Page:
+        async def goto(self, url, *, wait_until=None, timeout=None):
+            await asyncio.sleep(timeout / 1000)
+            raise RuntimeError(f"Timeout {timeout}ms exceeded.")
+
+    class _Browser:
+        async def new_page(self):
+            return _Page()
+
+    class _Launch:
+        async def __aenter__(self):
+            return _Browser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _Launch()
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            403, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["error"] == "bvs request failed"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is expected_timeout
     finally:
         await cache.close()
         await http_client.aclose()

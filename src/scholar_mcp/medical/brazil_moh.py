@@ -68,6 +68,7 @@ the full-text ceiling, and vice versa.
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 import urllib.parse
@@ -1787,8 +1788,12 @@ class BrazilMoHEngine:
                     nav_budget_s = max(
                         effective_ceiling - (time.monotonic() - tier_start), 0.0
                     )
+                    # Rounded up: a budget-bound goto must not end before the
+                    # caller's deadline, which ``get_full_text`` relies on to
+                    # tell a ceiling landing from a browser failure.
                     nav_timeout_ms = min(
-                        _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
+                        _CAMOUFOX_NAV_TIMEOUT_MS,
+                        max(math.ceil(nav_budget_s * 1000), 1),
                     )
                     await goto_tolerant(page, target, nav_timeout_ms)
                     # The shield answers the first request with a 403
@@ -2056,7 +2061,9 @@ class BrazilMoHEngine:
         which decline a retry that would land past it -- no share is reserved
         for the PDF phase, because cutting the lookup short would lose the
         record and the abstract with it. A lookup timeout surfaces as
-        ``status=error`` with ``error_kind=timeout`` and is never cached. A
+        ``status=error`` with ``error_kind=timeout`` and is never cached,
+        unless the lookup had hit the shield: then the ceiling returns
+        ``error_kind=cdn_challenge`` with ``timeout=True``. A
         budget exhausted after the lookup succeeded is not a dead end: the
         abstract is already in memory, so it is served with
         ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
@@ -2171,7 +2178,15 @@ class BrazilMoHEngine:
                 normalized, deadline=deadline, state=lookup_state
             )
             if error_kind:
-                payload, meta = _lookup_failure(error_kind)
+                # The browser's own bounds are sized from ``deadline`` and end
+                # at or after it, so a shielded failure past it is the ceiling
+                # cutting the browser short, whichever timer fired first.
+                timed_out = (
+                    lookup_state.shielded
+                    and deadline is not None
+                    and time.monotonic() >= deadline
+                )
+                payload, meta = _lookup_failure(error_kind, timeout=timed_out)
                 return None, True, payload, meta
             if record is None:
                 return (
