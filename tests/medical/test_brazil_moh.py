@@ -496,6 +496,27 @@ def _bvs_response(docs, num_found=None):
     }
 
 
+def test_parse_docs_tells_a_malformed_envelope_from_an_empty_result():
+    from scholar_mcp.medical.brazil_moh import _extract_docs, _parse_docs
+
+    doc = _bvs_doc()
+    assert _parse_docs(_bvs_response([])) == []
+    assert _parse_docs(_bvs_response([doc, "junk", None])) == [doc]
+    malformed = [
+        [],
+        {"error": "upstream failure"},
+        {"diaServerResponse": []},
+        {"diaServerResponse": ["x"]},
+        {"diaServerResponse": [{"response": [1]}]},
+        {"diaServerResponse": [{"response": "x"}]},
+        {"diaServerResponse": [{"response": {"docs": None}}]},
+    ]
+    for data in malformed:
+        assert _parse_docs(data) is None, data
+        # Search and the HTTP lookup read a malformed envelope as a miss.
+        assert _extract_docs(data) == [], data
+
+
 def test_dedupe_by_id_keeps_first_occurrence_and_order():
     docs = [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": "c"}]
     assert [d["id"] for d in _dedupe_by_id(docs)] == ["a", "b", "c"]

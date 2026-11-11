@@ -581,19 +581,32 @@ def _build_query(
     return " AND ".join(clauses)
 
 
-def _extract_docs(data: Any) -> list[dict[str, Any]]:
-    """Pull the document list out of the nested BVS envelope."""
+def _parse_docs(data: Any) -> list[dict[str, Any]] | None:
+    """Documents in the BVS envelope; ``None`` when the envelope is malformed.
+
+    ``[]`` is a valid empty result. Non-dict entries inside a well-formed
+    ``docs`` list are dropped, not fatal.
+    """
     if not isinstance(data, dict):
-        return []
-    responses = data.get("diaServerResponse") or []
+        return None
+    responses = data.get("diaServerResponse")
     if not isinstance(responses, list) or not responses:
-        return []
+        return None
     first = responses[0]
     if not isinstance(first, dict):
-        return []
-    response = first.get("response") or {}
-    docs = response.get("docs") or []
+        return None
+    response = first.get("response")
+    if not isinstance(response, dict):
+        return None
+    docs = response.get("docs")
+    if not isinstance(docs, list):
+        return None
     return [doc for doc in docs if isinstance(doc, dict)]
+
+
+def _extract_docs(data: Any) -> list[dict[str, Any]]:
+    """Documents in the BVS envelope; ``[]`` for an empty or malformed one."""
+    return _parse_docs(data) or []
 
 
 def _select_document_url(doc: dict[str, Any]) -> str:
@@ -1787,17 +1800,10 @@ class BrazilMoHEngine:
                 else:
                     logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
                 return None
-            try:
-                raw_docs = data["diaServerResponse"][0]["response"]["docs"]
-            except (KeyError, IndexError, TypeError):
+            docs = _parse_docs(data)
+            if docs is None:
                 logger.warning("brazil_moh: BVS browser fallback received malformed JSON")
-                return None
-            if not isinstance(raw_docs, list) or any(
-                not isinstance(doc, dict) for doc in raw_docs
-            ):
-                logger.warning("brazil_moh: BVS browser fallback received malformed docs")
-                return None
-            return _extract_docs(data)
+            return docs
 
         try:
             return await asyncio.wait_for(_run(), timeout=effective_ceiling)
