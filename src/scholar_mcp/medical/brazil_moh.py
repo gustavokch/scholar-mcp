@@ -237,6 +237,11 @@ ABSTRACT_MAX_CHARS = 4000
 # under this override.
 _BVS_RETRYABLE_STATUSES = RETRYABLE_STATUS_CODES
 
+# Rows asked for by the full-text record lookup and its browser retry. The
+# ``id:"..."`` phrase query can rank a near-miss id ahead of the exact one,
+# which ``_lookup_record`` filters out, so one row is not enough.
+_LOOKUP_COUNT = 5
+
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
 
@@ -1834,7 +1839,8 @@ class BrazilMoHEngine:
         self,
         record_id: str,
         deadline: float | None = None,
-        state: _LookupState | None = None,
+        *,
+        state: _LookupState,
     ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
         """Resolve one record by its Solr id. Returns (record, error_kind).
 
@@ -1859,7 +1865,7 @@ class BrazilMoHEngine:
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
-            params={"q": composed, "output": "json", "count": 5},
+            params={"q": composed, "output": "json", "count": _LOOKUP_COUNT},
             retryable_statuses=_BVS_RETRYABLE_STATUSES,
             deadline=deadline,
         )
@@ -1881,12 +1887,13 @@ class BrazilMoHEngine:
         if error_kind == "cdn_challenge" and (
             self.settings.enable_browser_fallback and self.settings.brazil_browser_fallback
         ):
-            if state is not None:
-                state.shielded = True
+            state.shielded = True
             ceiling = float(self.settings.brazil_browser_timeout_s)
             if deadline is not None:
                 ceiling = min(ceiling, max(deadline - time.monotonic(), 0.0))
-            browser_docs = await self._camoufox_fetch(composed, 5, ceiling=ceiling)
+            browser_docs = await self._camoufox_fetch(
+                composed, _LOOKUP_COUNT, ceiling=ceiling
+            )
             if browser_docs is not None:
                 docs = browser_docs
                 error_kind = None

@@ -21,6 +21,7 @@ from scholar_mcp.medical.brazil_moh import (
     ABSTRACT_MAX_CHARS,
     BVS_SEARCH_URL,
     BrazilMoHEngine,
+    _LookupState,
     _SearchState,
 )
 from scholar_mcp.medical.models import BrazilGuideline
@@ -771,7 +772,7 @@ async def test_lookup_record_retries_5xx_then_reports_outage(tmp_path: Path):
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
         )
-        record, kind = await engine._lookup_record("biblio-x")
+        record, kind = await engine._lookup_record("biblio-x", state=_LookupState())
         assert record is None
         assert kind == "origin_outage"
         assert len(route.calls) == http_client.max_retries, (
