@@ -4000,6 +4000,45 @@ async def test_camoufox_fetch_caps_concurrent_browsers(tmp_path, monkeypatch):
         await http_client.aclose()
 
 
+@pytest.mark.parametrize(
+    ("upstream", "expected_kind"),
+    [
+        (httpx.Response(502, text="bad gateway"), "origin_outage"),
+        (httpx.ConnectError("connection refused"), "origin_outage"),
+        (
+            httpx.Response(200, text="not json", headers={"content-type": "text/plain"}),
+            "backend_error",
+        ),
+    ],
+    ids=["5xx", "connect_error", "non_json_200"],
+)
+@respx.mock
+async def test_full_text_lookup_skips_browser_on_non_shield_failures(
+    tmp_path, monkeypatch, upstream, expected_kind
+):
+    """Only a shield verdict qualifies for the browser: a 5xx, an unreachable
+    origin, or a non-JSON payload comes from the origin itself, which the
+    browser would reach just the same."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _pin_fast_limiter(http_client)
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    try:
+        route = respx.get(BVS_SEARCH_URL)
+        if isinstance(upstream, Exception):
+            route.mock(side_effect=upstream)
+        else:
+            route.mock(return_value=upstream)
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert meta.error_kind == expected_kind
+        assert attempts == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
