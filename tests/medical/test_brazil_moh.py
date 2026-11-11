@@ -4106,6 +4106,28 @@ async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
         await http_client.aclose()
 
 
+async def test_camoufox_fetch_launches_a_lone_caller_at_exactly_the_floor(
+    tmp_path, monkeypatch
+):
+    """Only a ceiling below the floor skips the browser. A caller that took a
+    free slot spent nothing queueing, so ``BRAZIL_BROWSER_TIMEOUT_S`` set to
+    the floor must still launch."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MIN_USEFUL_CEILING_S
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_browser_timeout_s = _CAMOUFOX_MIN_USEFUL_CEILING_S
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    try:
+        docs = await engine._camoufox_fetch("q", 5, None)
+        assert [doc["id"] for doc in docs] == ["biblio-1"]
+        assert len(attempts) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_fetch_frees_the_slot_of_a_caller_cancelled_in_queue(
     tmp_path, monkeypatch
 ):

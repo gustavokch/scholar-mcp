@@ -1779,9 +1779,13 @@ class BrazilMoHEngine:
             # Taken before the slot: queueing spends the same ceiling as the
             # launch, so the navigation budget must count it.
             tier_start = time.monotonic()
+            # Only a caller that had to wait re-checks the floor: one that took
+            # a free slot spent nothing, and a ceiling of exactly the floor
+            # must still launch.
+            queued = self._browser_slots.locked()
             async with self._browser_slots:
                 queued_left = effective_ceiling - (time.monotonic() - tier_start)
-                if queued_left < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+                if queued and queued_left < _CAMOUFOX_MIN_USEFUL_CEILING_S:
                     logger.info(
                         "brazil_moh camoufox tier skipped: %.1fs left after "
                         "waiting for a browser slot, below useful floor",
