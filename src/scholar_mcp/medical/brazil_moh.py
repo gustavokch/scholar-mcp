@@ -268,6 +268,19 @@ class _SearchState:
 
 
 @dataclass
+class _LookupState:
+    """Mutable state for one ``_lookup_record`` call.
+
+    ``get_full_text`` bounds the lookup with ``asyncio.wait_for``; a
+    cancellation there discards the lookup's return value. ``shielded`` is
+    written before the browser tier starts, so the timeout handler can still
+    report the shield as the cause.
+    """
+
+    shielded: bool = False
+
+
+@dataclass
 class _SearchOutcome:
     """The fields that vary across ``search_guidelines``' meta+log call sites.
 
@@ -1782,7 +1795,10 @@ class BrazilMoHEngine:
             return None
 
     async def _lookup_record(
-        self, record_id: str, deadline: float | None = None
+        self,
+        record_id: str,
+        deadline: float | None = None,
+        state: _LookupState | None = None,
     ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
         """Resolve one record by its Solr id. Returns (record, error_kind).
 
@@ -1792,6 +1808,13 @@ class BrazilMoHEngine:
         ``deadline`` (absolute ``time.monotonic()``) bounds the retry ladder
         underneath this call so it ends itself while the host's status is still
         readable, instead of being cancelled by the caller's ceiling.
+
+        A ``cdn_challenge`` verdict retries the query once through
+        ``_camoufox_fetch`` inside what is left of ``deadline``. A valid
+        browser payload replaces the verdict (an empty one is a clean
+        not-found); a failed or malformed one keeps ``cdn_challenge``.
+        ``state.shielded`` is set before the browser starts, because a caller
+        ceiling that lands mid-browser discards this call's return value.
         """
         # The id is caller-controlled; escape it so a quote or backslash
         # cannot terminate the id:"..." phrase and rewrite the query.
@@ -1822,6 +1845,8 @@ class BrazilMoHEngine:
         if error_kind == "cdn_challenge" and (
             self.settings.enable_browser_fallback and self.settings.brazil_browser_fallback
         ):
+            if state is not None:
+                state.shielded = True
             ceiling = float(self.settings.brazil_browser_timeout_s)
             if deadline is not None:
                 ceiling = min(ceiling, max(deadline - time.monotonic(), 0.0))
@@ -2068,6 +2093,19 @@ class BrazilMoHEngine:
                 ),
             )
 
+        def _lookup_failure(
+            kind: BvsErrorKind, *, timeout: bool = False
+        ) -> tuple[dict[str, Any], CacheMetadata]:
+            return (
+                {**base, "status": "error", "error": "bvs request failed",
+                 "title": "", "content_type": "none", "content": "",
+                 "abstract_fallback": False, "timeout_phase": "lookup"},
+                CacheMetadata(
+                    cached=False, cache_age=0, error=True,
+                    error_kind=kind, timeout=timeout,
+                ),
+            )
+
         budget_start = time.monotonic()
         # One deadline for the whole call, shared by both phases and handed
         # down into the retry ladders. No fraction is reserved for the PDF
@@ -2079,6 +2117,7 @@ class BrazilMoHEngine:
         # Bound before ``_resolve`` is defined below, because ``_resolve``
         # closes over it.
         deadline = budget_start + ceiling if ceiling > 0 else None
+        lookup_state = _LookupState()
 
         async def _resolve() -> tuple[
             BrazilGuideline | None, bool, dict[str, Any], CacheMetadata | None
@@ -2098,20 +2137,11 @@ class BrazilMoHEngine:
             if record_meta.cached and cached_record is not None:
                 return BrazilGuideline.from_dict(cached_record), False, {}, None
             record, error_kind = await self._lookup_record(
-                normalized, deadline=deadline
+                normalized, deadline=deadline, state=lookup_state
             )
             if error_kind:
-                return (
-                    None,
-                    True,
-                    {**base, "status": "error", "error": "bvs request failed",
-                     "title": "", "content_type": "none", "content": "",
-                     "abstract_fallback": False, "timeout_phase": "lookup"},
-                    CacheMetadata(
-                        cached=False, cache_age=0, error=True,
-                        error_kind=error_kind or "backend_error",
-                    ),
-                )
+                payload, meta = _lookup_failure(error_kind)
+                return None, True, payload, meta
             if record is None:
                 return (
                     None,
@@ -2137,12 +2167,17 @@ class BrazilMoHEngine:
             base["timeout_phase"] = "lookup"
             logger.warning(
                 "brazil_moh full text lookup for %r exceeded its %.1fs budget "
-                "(phase=lookup, elapsed=%.1fs, detail=%s)",
+                "(phase=lookup, elapsed=%.1fs, shielded=%s, detail=%s)",
                 normalized,
                 ceiling,
                 time.monotonic() - budget_start,
+                lookup_state.shielded,
                 _failure_detail(self.http_client),
             )
+            if lookup_state.shielded:
+                # The ceiling cut the browser tier short: the cause is still
+                # the shield, not a slow origin.
+                return _lookup_failure("cdn_challenge", timeout=True)
             return _timeout_result("")
         if early_meta is not None:
             return early_payload, early_meta

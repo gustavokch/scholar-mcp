@@ -3887,6 +3887,51 @@ async def test_full_text_shield_respects_browser_limits(tmp_path, monkeypatch, r
         await http_client.aclose()
 
 
+@respx.mock
+async def test_full_text_keeps_challenge_when_browser_outlives_budget(tmp_path, monkeypatch):
+    """The lookup's browser shares the full-text deadline with the outer
+    ``wait_for``. When the ceiling lands while the browser is still running,
+    the cause is still the shield: the verdict must survive the cancellation
+    instead of reading as a slow origin."""
+    import sys
+    import types
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_fulltext_timeout_s = 0.5
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+    launched: list[bool] = []
+
+    class _NeverReady:
+        async def __aenter__(self):
+            launched.append(True)
+            await asyncio.sleep(3600)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _NeverReady()
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            403, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert launched == [True]
+        assert payload["status"] == "error"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
