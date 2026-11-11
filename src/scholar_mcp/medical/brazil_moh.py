@@ -1742,7 +1742,7 @@ class BrazilMoHEngine:
         doomed ceiling would only burn startup time.
         """
         if ceiling is not None and ceiling <= 0:
-            logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
+            logger.info("brazil_moh camoufox tier skipped: caller budget exhausted")
             return None
 
         effective_ceiling = (

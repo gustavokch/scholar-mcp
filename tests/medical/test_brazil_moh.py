@@ -2413,7 +2413,7 @@ async def test_shielded_search_navigates_the_all_field_query_once(
         await http_client.aclose()
 
 
-async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
+async def test_camoufox_fetch_tolerates_aborted_goto(tmp_path, monkeypatch):
     """A Bunny-shield redirect racing the goto aborts it with
     NS_BINDING_ABORTED; the JSON payload must still be read once the page
     settles instead of the whole browser tier returning []."""
@@ -2643,7 +2643,7 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         await http_client.aclose()
 
 
-async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
+async def test_search_keeps_challenge_error_when_browser_gets_block_page(
     tmp_path, monkeypatch
 ):
     """When BVS returns an HTML challenge/block page (e.g. Bunny CDN Bot Shield),
@@ -2741,7 +2741,7 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
         await http_client.aclose()
 
 
-async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
+async def test_camoufox_fetch_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
     """``ceiling=0.0`` means the chain budget is exhausted (W6): the browser
     tier must return None without ever importing camoufox, never launch with a
     zero-second timeout."""
@@ -2764,7 +2764,7 @@ async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, mon
         await http_client.aclose()
 
 
-async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeypatch):
+async def test_camoufox_fetch_skips_launch_below_useful_floor(tmp_path, monkeypatch):
     """A positive ceiling that cannot outlast a Camoufox launch must also
     skip without importing camoufox."""
     import sys as _sys
@@ -4039,7 +4039,7 @@ async def test_full_text_lookup_skips_browser_on_non_shield_failures(
         await http_client.aclose()
 
 
-async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
+async def test_camoufox_fetch_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
     """The aborted goto leaves the page on the Bunny interstitial; the payload
@@ -4062,7 +4062,7 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
+async def test_camoufox_fetch_waits_out_the_shield_after_a_clean_goto(
     tmp_path, monkeypatch
 ):
     """Live BVS answers a clean goto with the 403 interstitial and swaps in
@@ -4082,7 +4082,7 @@ async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
+async def test_camoufox_fetch_gives_up_on_a_shield_that_never_clears(
     tmp_path, monkeypatch
 ):
     """A persistent block page costs one shield-clear budget and one
@@ -4103,7 +4103,7 @@ async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
         await http_client.aclose()
 
 
-async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield_marker(
+async def test_camoufox_fetch_does_not_wait_on_a_payload_that_mentions_a_shield_marker(
     tmp_path, monkeypatch
 ):
     """A record linking a b-cdn.net document is record text, not a shield: the
