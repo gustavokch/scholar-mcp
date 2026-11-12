@@ -622,6 +622,23 @@ def test_bundled_corpus_has_no_self_authored_summaries():
         assert not _self_authored(license_line), path.name
 
 
+async def test_retired_summary_ids_resolve_to_no_bundled_document(tmp_path: Path):
+    # Saved traces and caches still name the two retired summaries. Both
+    # local lookups must miss, so the full-text open never serves another
+    # document under an old id.
+    engine, cache, http_client = await _engine(tmp_path, stub_local=False)
+    try:
+        for record_id in (
+            "ms-portaria-aps-cofinanciamento-2025",
+            "ms-vigilancia-enchentes-rs-2025",
+        ):
+            assert await engine.pcdt_engine.get_guideline(record_id) is None
+            assert await engine.az_engine.get_guideline(record_id) is None
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
 def test_config_fulltext_ceiling_defaults_and_env(monkeypatch):
     from scholar_mcp.config import Settings
 
