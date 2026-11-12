@@ -46,13 +46,13 @@
       "Guias e manuais"
     ]
   },
-  "ms-portaria-aps-cofinanciamento-2025": {
-    "title": "Indicadores de cofinanciamento federal da APS — atualização 2025",
-    "description": "Atualização de 2025 dos indicadores de qualidade do cofinanciamento federal do Piso de Atenção Primária à Saúde (APS): componente fixo, blocos de acesso, cuidado e resolutividade, apuração quadrimestral e vínculo territorial.",
-    "file_path": "guidelines/indicadores_aps_cofinanciamento_2025.txt",
-    "keywords": "aps cofinanciamento indicadores 2025 atencao primaria piso qualidade portaria",
-    "source_url": "https://www.gov.br/saude/pt-br/composicao/saps",
-    "license": "Resumo técnico autoral — domínio público (CC0)",
+  "ms-nota-metodologica-c3-gestacao-puerperio-2025": {
+    "title": "Nota Metodológica C3 - Cuidado na Gestação e Puerpério",
+    "description": "Tem como objetivo avaliar o acesso e monitoramento efetivo durante a gestação e puerpério, com incentivo à captação precoce e acompanhamento coordenado e contínuo na APS.",
+    "file_path": "guidelines/nota_metodologica_c3_gestacao_puerperio.txt",
+    "keywords": "nota metodologica c3 indicador cuidado gestacao puerperio gestante puerpera pre-natal atencao primaria",
+    "source_url": "https://www.gov.br/saude/pt-br/composicao/saps/publicacoes/fichas-tecnicas/equipe-de-atencao-primaria-e-saude-da-familia/nota-metodologica-c3-cuidado-na-gestacao-e-puerperio",
+    "license": "Texto oficial — Lei 9.610/98, art. 8 (sem direito autoral)",
     "authors": [
       "Ministério da Saúde"
     ],

@@ -552,20 +552,19 @@ async def test_fulltext_timeout_maps_to_timeout_kind(tmp_path: Path):
 # S2.5 — corpus additions ---------------------------------------------------------
 
 
-async def test_2025_aps_indicators_retrievable_via_title(tmp_path: Path):
+async def test_c3_methodological_note_retrievable_via_title(tmp_path: Path):
     # No respx: the bundled corpus path must make zero network calls, so
     # any live request would fail loudly instead of hiding behind a mock.
     engine, cache, http_client = await _engine(tmp_path, stub_local=False)
     try:
         records, _ = await engine.search_guidelines(
-            "aps cofinanciamento indicadores 2025", collection="pcdt"
+            "nota metodologica c3 gestacao puerperio", collection="pcdt"
         )
-        assert "ms-portaria-aps-cofinanciamento-2025" in [r.record_id for r in records]
-        payload, _ = await engine.get_full_text(
-            "ms-portaria-aps-cofinanciamento-2025", max_chars=10000
-        )
+        record_id = "ms-nota-metodologica-c3-gestacao-puerperio-2025"
+        assert record_id in [r.record_id for r in records]
+        payload, _ = await engine.get_full_text(record_id, max_chars=10000)
         assert payload["status"] == "success"
-        assert "cofinanciamento" in payload["content"].lower()
+        assert "cuidado na gestação e puerpério" in payload["content"].lower()
     finally:
         await cache.close()
         await http_client.aclose()
@@ -592,7 +591,7 @@ async def test_rs_flood_doctrine_retrievable_via_title(tmp_path: Path):
 def test_new_corpus_files_carry_provenance_and_length():
     data_dir = Path(__file__).resolve().parents[2] / "src" / "scholar_mcp" / "data"
     for rel in (
-        "guidelines/indicadores_aps_cofinanciamento_2025.txt",
+        "guidelines/nota_metodologica_c3_gestacao_puerperio.txt",
         "guidelines/vigilancia_enchentes_rs_2025.txt",
     ):
         text = (data_dir / rel).read_text(encoding="utf-8")
