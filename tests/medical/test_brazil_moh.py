@@ -496,6 +496,27 @@ def _bvs_response(docs, num_found=None):
     }
 
 
+def test_parse_docs_tells_a_malformed_envelope_from_an_empty_result():
+    from scholar_mcp.medical.brazil_moh import _extract_docs, _parse_docs
+
+    doc = _bvs_doc()
+    assert _parse_docs(_bvs_response([])) == []
+    assert _parse_docs(_bvs_response([doc, "junk", None])) == [doc]
+    malformed = [
+        [],
+        {"error": "upstream failure"},
+        {"diaServerResponse": []},
+        {"diaServerResponse": ["x"]},
+        {"diaServerResponse": [{"response": [1]}]},
+        {"diaServerResponse": [{"response": "x"}]},
+        {"diaServerResponse": [{"response": {"docs": None}}]},
+    ]
+    for data in malformed:
+        assert _parse_docs(data) is None, data
+        # Search and the HTTP lookup read a malformed envelope as a miss.
+        assert _extract_docs(data) == [], data
+
+
 def test_dedupe_by_id_keeps_first_occurrence_and_order():
     docs = [{"id": "a"}, {"id": "b"}, {"id": "a"}, {"id": "c"}]
     assert [d["id"] for d in _dedupe_by_id(docs)] == ["a", "b", "c"]
@@ -2392,7 +2413,7 @@ async def test_shielded_search_navigates_the_all_field_query_once(
         await http_client.aclose()
 
 
-async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
+async def test_camoufox_fetch_tolerates_aborted_goto(tmp_path, monkeypatch):
     """A Bunny-shield redirect racing the goto aborts it with
     NS_BINDING_ABORTED; the JSON payload must still be read once the page
     settles instead of the whole browser tier returning []."""
@@ -2424,7 +2445,7 @@ async def test_camoufox_search_tolerates_aborted_goto(tmp_path, monkeypatch):
         monkeypatch, json.dumps(payload), abort_goto=True
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert attempts == [True]
     finally:
@@ -2622,11 +2643,11 @@ async def test_camoufox_docs_all_non_brazilian_keeps_error(tmp_path, monkeypatch
         await http_client.aclose()
 
 
-async def test_camoufox_challenge_or_html_returns_empty_and_does_not_raise(
+async def test_search_keeps_challenge_error_when_browser_gets_block_page(
     tmp_path, monkeypatch
 ):
     """When BVS returns an HTML challenge/block page (e.g. Bunny CDN Bot Shield),
-    _camoufox_search must not crash with JSONDecodeError, but return []."""
+    the browser fallback must preserve the search error rather than crash."""
     settings = Settings(
         cache_ttl_seconds=3600,
         enable_browser_fallback=True,
@@ -2679,8 +2700,8 @@ async def test_browser_fallback_logs_origin_outage_not_challenge(tmp_path, monke
     )
     try:
         with caplog.at_level(logging.INFO, logger="scholar_mcp.medical.brazil_moh"):
-            docs = await engine._camoufox_search("dengue", count=10, ceiling=25.0)
-        assert docs == []
+            docs = await engine._camoufox_fetch("dengue", count=10, ceiling=25.0)
+        assert docs is None
         messages = [r.getMessage() for r in caplog.records]
         assert any("origin returned an error page" in m for m in messages)
         assert not any("challenge or block page" in m for m in messages)
@@ -2713,16 +2734,16 @@ async def test_browser_fallback_keeps_records_whose_text_matches_a_marker(tmp_pa
     }
     _install_fake_camoufox(monkeypatch, json.dumps(payload))
     try:
-        docs = await engine._camoufox_search("triagem", count=10, ceiling=25.0)
+        docs = await engine._camoufox_fetch("triagem", count=10, ceiling=25.0)
         assert [d["id"] for d in docs] == ["1"]
     finally:
         await cache.close()
         await http_client.aclose()
 
 
-async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
+async def test_camoufox_fetch_skips_launch_when_ceiling_exhausted(tmp_path, monkeypatch):
     """``ceiling=0.0`` means the chain budget is exhausted (W6): the browser
-    tier must return [] without ever importing camoufox, never launch with a
+    tier must return None without ever importing camoufox, never launch with a
     zero-second timeout."""
     import sys as _sys
 
@@ -2736,14 +2757,14 @@ async def test_camoufox_search_skips_launch_when_ceiling_exhausted(tmp_path, mon
 
     monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
     try:
-        docs = await engine._camoufox_search("dengue", count=10, ceiling=0.0)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", count=10, ceiling=0.0)
+        assert docs is None
     finally:
         await cache.close()
         await http_client.aclose()
 
 
-async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeypatch):
+async def test_camoufox_fetch_skips_launch_below_useful_floor(tmp_path, monkeypatch):
     """A positive ceiling that cannot outlast a Camoufox launch must also
     skip without importing camoufox."""
     import sys as _sys
@@ -2758,8 +2779,8 @@ async def test_camoufox_search_skips_launch_below_useful_floor(tmp_path, monkeyp
 
     monkeypatch.setitem(_sys.modules, "camoufox.async_api", _NeverImported())
     try:
-        docs = await engine._camoufox_search("dengue", count=10, ceiling=5.0)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", count=10, ceiling=5.0)
+        assert docs is None
     finally:
         await cache.close()
         await http_client.aclose()
@@ -3797,7 +3818,392 @@ async def _camoufox_engine(tmp_path: Path):
     return BrazilMoHEngine(http_client, cache, settings), cache, http_client
 
 
-async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
+@pytest.mark.parametrize("status", [200, 403])
+@respx.mock
+async def test_full_text_recovers_shielded_lookup_with_browser(tmp_path, monkeypatch, status):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    record_id = 'biblio-"1\\2'
+    docs = [
+        _bvs_doc(record_id="biblio-other", ab=["Wrong abstract."]),
+        _bvs_doc(record_id=record_id, ab=["Correct abstract."], ur=["https://example.org/doc"]),
+    ]
+    _, urls, _, _ = _install_fake_camoufox(
+        monkeypatch, content_script=[_BVS_INTERSTITIAL, json.dumps(_bvs_response(docs))]
+    )
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            status, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text(record_id)
+        assert payload["content"] == "Correct abstract."
+        assert payload["content_type"] == "abstract"
+        assert meta.error is False
+        assert urllib.parse.parse_qs(urllib.parse.urlsplit(urls[0]).query)["q"] == [
+            'id:"biblio-\\"1\\\\2"'
+        ]
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("browser_payload", "expected_status", "expected_kind"),
+    [
+        (json.dumps(_bvs_response([])), "not_found", "successful_empty"),
+        ('{"error": "upstream failure"}', "error", "cdn_challenge"),
+    ],
+)
+@respx.mock
+async def test_full_text_distinguishes_empty_browser_result_from_failure(
+    tmp_path, monkeypatch, browser_payload, expected_status, expected_kind
+):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _install_fake_camoufox(monkeypatch, browser_payload)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == expected_status
+        assert meta.error_kind == expected_kind
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize("fulltext_s", [30.0, 0.0])
+@respx.mock
+async def test_full_text_preserves_challenge_when_browser_fails(
+    tmp_path, monkeypatch, fulltext_s
+):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_fulltext_timeout_s = fulltext_s
+    _install_fake_camoufox(monkeypatch, content_script=[_BVS_INTERSTITIAL])
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is False
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize("reason", ["global_disabled", "brazil_disabled", "short_budget"])
+@respx.mock
+async def test_full_text_shield_respects_browser_limits(tmp_path, monkeypatch, reason):
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    attempts, _, _, _ = _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([
+        _bvs_doc(record_id="biblio-1", ab=["Should not be served."])
+    ])))
+    if reason == "global_disabled":
+        engine.settings.enable_browser_fallback = False
+    elif reason == "brazil_disabled":
+        engine.settings.brazil_browser_fallback = False
+    else:
+        engine.settings.brazil_fulltext_timeout_s = 5.0
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(403, text="shield"))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert meta.error_kind == "cdn_challenge"
+        assert attempts == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@respx.mock
+async def test_full_text_keeps_challenge_when_browser_outlives_budget(tmp_path, monkeypatch):
+    """The lookup's browser shares the full-text deadline with the outer
+    ``wait_for``. When the ceiling lands while the browser is still running,
+    the cause is still the shield: the verdict must survive the cancellation
+    instead of reading as a slow origin."""
+    import sys
+    import types
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_fulltext_timeout_s = 0.5
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+    launched: list[bool] = []
+
+    class _NeverReady:
+        async def __aenter__(self):
+            launched.append(True)
+            await asyncio.sleep(3600)
+
+        async def __aexit__(self, *exc):
+            return False
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _NeverReady()
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            403, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert launched == [True]
+        assert payload["status"] == "error"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is True
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("fulltext_s", "browser_s", "expected_timeout"),
+    [(0.5, 150.0, True), (5.0, 0.3, False)],
+    ids=["fulltext_ceiling", "browser_cap"],
+)
+@respx.mock
+async def test_full_text_flags_timeout_when_browser_navigation_ends_at_budget(
+    tmp_path, monkeypatch, fulltext_s, browser_s, expected_timeout
+):
+    """Playwright raises its own goto timeout, sized from the same budget,
+    so the browser can return before either ``wait_for`` fires. The ceiling
+    still cut the lookup short, and ``timeout`` must say so whichever timer
+    ends the browser. A browser stopped by its own cap, with full-text budget
+    left, is not a ceiling landing."""
+    import sys
+    import types
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _pin_fast_limiter(http_client)
+    engine.settings.brazil_fulltext_timeout_s = fulltext_s
+    engine.settings.brazil_browser_timeout_s = browser_s
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+
+    class _Page:
+        async def goto(self, url, *, wait_until=None, timeout=None):
+            await asyncio.sleep(timeout / 1000)
+            raise RuntimeError(f"Timeout {timeout}ms exceeded.")
+
+    class _Browser:
+        async def new_page(self):
+            return _Page()
+
+    class _Launch:
+        async def __aenter__(self):
+            return _Browser()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    api_mod = types.ModuleType("camoufox.async_api")
+    api_mod.AsyncCamoufox = lambda **kw: _Launch()
+    camoufox_mod = types.ModuleType("camoufox")
+    camoufox_mod.async_api = api_mod
+    monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
+    monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
+    try:
+        respx.get(BVS_SEARCH_URL).mock(return_value=httpx.Response(
+            403, text=_BVS_INTERSTITIAL, headers={"content-type": "text/html"}
+        ))
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["error"] == "bvs request failed"
+        assert payload["timeout_phase"] == "lookup"
+        assert meta.error_kind == "cdn_challenge"
+        assert meta.timeout is expected_timeout
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+class _LaunchGate:
+    """Holds every Camoufox launch until ``gate`` is set; counts live browsers."""
+
+    def __init__(self, monkeypatch):
+        import sys
+
+        api_mod = sys.modules["camoufox.async_api"]
+        inner = api_mod.AsyncCamoufox
+        self.gate = asyncio.Event()
+        self.live = 0
+        self.peak = 0
+        outer = self
+
+        class _Gated:
+            def __init__(self, **kw):
+                self._ctx = inner(**kw)
+
+            async def __aenter__(self):
+                outer.live += 1
+                outer.peak = max(outer.peak, outer.live)
+                await outer.gate.wait()
+                return await self._ctx.__aenter__()
+
+            async def __aexit__(self, *exc):
+                outer.live -= 1
+                return await self._ctx.__aexit__(*exc)
+
+        monkeypatch.setattr(api_mod, "AsyncCamoufox", _Gated)
+
+
+async def test_camoufox_fetch_caps_concurrent_browsers(tmp_path, monkeypatch):
+    """Full-text lookups fan out one call per search result, and each
+    shielded one reaches the browser tier. Launches past the cap must queue
+    instead of starting one Firefox per caller, and the queued calls still
+    complete once a slot frees."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([_bvs_doc()])))
+    launches = _LaunchGate(monkeypatch)
+    try:
+        tasks = [
+            asyncio.create_task(engine._camoufox_fetch(f"q{i}", 5, None))
+            for i in range(4)
+        ]
+        await asyncio.sleep(0.05)
+        assert launches.peak == _CAMOUFOX_MAX_CONCURRENT
+        launches.gate.set()
+        results = await asyncio.gather(*tasks)
+        assert [docs[0]["id"] for docs in results] == ["biblio-1"] * len(tasks)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
+    tmp_path, monkeypatch
+):
+    """The useful-ceiling floor guards the launch, not the call: a caller
+    that waited for a slot until less than the floor was left must not
+    start a Firefox it cannot use."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.5
+    )
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    launches = _LaunchGate(monkeypatch)
+    try:
+        holders = [
+            asyncio.create_task(engine._camoufox_fetch(f"hold{i}", 5, None))
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
+        ]
+        await asyncio.sleep(0.05)
+        queued = asyncio.create_task(engine._camoufox_fetch("late", 5, 0.8))
+        await asyncio.sleep(0.5)
+        launches.gate.set()
+        held = await asyncio.gather(*holders)
+        assert await queued is None
+        assert [docs[0]["id"] for docs in held] == ["biblio-1"] * len(holders)
+        assert len(attempts) == len(holders)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_launches_a_lone_caller_at_exactly_the_floor(
+    tmp_path, monkeypatch
+):
+    """Only a ceiling below the floor skips the browser. A caller that took a
+    free slot spent nothing queueing, so ``BRAZIL_BROWSER_TIMEOUT_S`` set to
+    the floor must still launch."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MIN_USEFUL_CEILING_S
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    engine.settings.brazil_browser_timeout_s = _CAMOUFOX_MIN_USEFUL_CEILING_S
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    try:
+        docs = await engine._camoufox_fetch("q", 5, None)
+        assert [doc["id"] for doc in docs] == ["biblio-1"]
+        assert len(attempts) == 1
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_frees_the_slot_of_a_caller_cancelled_in_queue(
+    tmp_path, monkeypatch
+):
+    """At the default budgets most queued lookups run out of ceiling while
+    they wait. A cancelled waiter must leave both slots usable, or every
+    later browser call queues until its own ceiling."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
+
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    monkeypatch.setattr(
+        "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.01
+    )
+    _install_fake_camoufox(monkeypatch, json.dumps(_bvs_response([_bvs_doc()])))
+    launches = _LaunchGate(monkeypatch)
+    try:
+        holders = [
+            asyncio.create_task(engine._camoufox_fetch(f"hold{i}", 5, None))
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
+        ]
+        await asyncio.sleep(0.05)
+        assert await engine._camoufox_fetch("late", 5, 0.1) is None
+        launches.gate.set()
+        await asyncio.gather(*holders)
+        after = [
+            asyncio.create_task(engine._camoufox_fetch(f"after{i}", 5, 1.0))
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
+        ]
+        results = await asyncio.gather(*after)
+        assert [docs[0]["id"] for docs in results] == ["biblio-1"] * len(after)
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("upstream", "expected_kind"),
+    [
+        (httpx.Response(502, text="bad gateway"), "origin_outage"),
+        (httpx.ConnectError("connection refused"), "origin_outage"),
+        (
+            httpx.Response(200, text="not json", headers={"content-type": "text/plain"}),
+            "backend_error",
+        ),
+    ],
+    ids=["5xx", "connect_error", "non_json_200"],
+)
+@respx.mock
+async def test_full_text_lookup_skips_browser_on_non_shield_failures(
+    tmp_path, monkeypatch, upstream, expected_kind
+):
+    """Only a shield verdict qualifies for the browser: a 5xx, an unreachable
+    origin, or a non-JSON payload comes from the origin itself, which the
+    browser would reach just the same."""
+    engine, cache, http_client = await _camoufox_engine(tmp_path)
+    _pin_fast_limiter(http_client)
+    attempts, _, _, _ = _install_fake_camoufox(
+        monkeypatch, json.dumps(_bvs_response([_bvs_doc()]))
+    )
+    try:
+        route = respx.get(BVS_SEARCH_URL)
+        if isinstance(upstream, Exception):
+            route.mock(side_effect=upstream)
+        else:
+            route.mock(return_value=upstream)
+        payload, meta = await engine.get_full_text("biblio-1")
+        assert payload["status"] == "error"
+        assert meta.error_kind == expected_kind
+        assert attempts == []
+    finally:
+        await cache.close()
+        await http_client.aclose()
+
+
+async def test_camoufox_fetch_waits_out_the_interstitial_after_an_aborted_goto(
     tmp_path, monkeypatch
 ):
     """The aborted goto leaves the page on the Bunny interstitial; the payload
@@ -3812,7 +4218,7 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         ],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == [500, 500, 500]
     finally:
@@ -3820,7 +4226,7 @@ async def test_camoufox_search_waits_out_the_interstitial_after_an_aborted_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
+async def test_camoufox_fetch_waits_out_the_shield_after_a_clean_goto(
     tmp_path, monkeypatch
 ):
     """Live BVS answers a clean goto with the 403 interstitial and swaps in
@@ -3832,7 +4238,7 @@ async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
         content_script=[_BVS_INTERSTITIAL, _BVS_INTERSTITIAL, _bvs_payload()],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == [500, 500]
     finally:
@@ -3840,7 +4246,7 @@ async def test_camoufox_search_waits_out_the_shield_after_a_clean_goto(
         await http_client.aclose()
 
 
-async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
+async def test_camoufox_fetch_gives_up_on_a_shield_that_never_clears(
     tmp_path, monkeypatch
 ):
     """A persistent block page costs one shield-clear budget and one
@@ -3852,8 +4258,8 @@ async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
         monkeypatch, content_script=[_BVS_INTERSTITIAL]
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
-        assert docs == []
+        docs = await engine._camoufox_fetch("dengue", 10, None)
+        assert docs is None
         assert sum(sleeps) == _CAMOUFOX_SHIELD_CLEAR_MS
         assert len(urls) == 1
     finally:
@@ -3861,7 +4267,7 @@ async def test_camoufox_search_gives_up_on_a_shield_that_never_clears(
         await http_client.aclose()
 
 
-async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield_marker(
+async def test_camoufox_fetch_does_not_wait_on_a_payload_that_mentions_a_shield_marker(
     tmp_path, monkeypatch
 ):
     """A record linking a b-cdn.net document is record text, not a shield: the
@@ -3873,7 +4279,7 @@ async def test_camoufox_search_does_not_wait_on_a_payload_that_mentions_a_shield
         content_script=[_bvs_payload("https://acme.b-cdn.net/dengue.pdf")],
     )
     try:
-        docs = await engine._camoufox_search("dengue", 10, None)
+        docs = await engine._camoufox_fetch("dengue", 10, None)
         assert [d["ti"] for d in docs] == ["Manejo da dengue"]
         assert sleeps == []
     finally:

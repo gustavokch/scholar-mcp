@@ -68,6 +68,7 @@ the full-text ceiling, and vice versa.
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 import urllib.parse
@@ -176,6 +177,12 @@ _CAMOUFOX_SHIELD_CLEAR_MS = 20000
 # ceiling that clears it. Raise once a real launch-time measurement exists.
 _CAMOUFOX_MIN_USEFUL_CEILING_S = 20.0
 
+# Live Camoufox browsers per engine (the engine is a process-wide singleton).
+# Each launch is a full Firefox process, and full-text lookups fan out one
+# call per search result; past the cap a caller queues, and the wait spends
+# its own ceiling.
+_CAMOUFOX_MAX_CONCURRENT = 2
+
 _BVS_CHALLENGE_MARKERS = (
     "shield-templates",
     "b-cdn.net",
@@ -230,6 +237,11 @@ ABSTRACT_MAX_CHARS = 4000
 # under this override.
 _BVS_RETRYABLE_STATUSES = RETRYABLE_STATUS_CODES
 
+# Rows asked for by the full-text record lookup and its browser retry. The
+# ``id:"..."`` phrase query can rank a near-miss id ahead of the exact one,
+# which ``_lookup_record`` filters out, so one row is not enough.
+_LOOKUP_COUNT = 5
+
 _DOI_RE = re.compile(r"(?<![\w.])10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
 
 
@@ -265,6 +277,19 @@ class _SearchState:
     local_timed_out: bool = False
     stages_attempted: int = 0
     overfetch_window: int = 0
+
+
+@dataclass
+class _LookupState:
+    """Mutable state for one ``_lookup_record`` call.
+
+    ``get_full_text`` bounds the lookup with ``asyncio.wait_for``; a
+    cancellation there discards the lookup's return value. ``shielded`` is
+    written before the browser tier starts, so the timeout handler can still
+    report the shield as the cause.
+    """
+
+    shielded: bool = False
 
 
 @dataclass
@@ -561,19 +586,32 @@ def _build_query(
     return " AND ".join(clauses)
 
 
-def _extract_docs(data: Any) -> list[dict[str, Any]]:
-    """Pull the document list out of the nested BVS envelope."""
+def _parse_docs(data: Any) -> list[dict[str, Any]] | None:
+    """Documents in the BVS envelope; ``None`` when the envelope is malformed.
+
+    ``[]`` is a valid empty result. Non-dict entries inside a well-formed
+    ``docs`` list are dropped, not fatal.
+    """
     if not isinstance(data, dict):
-        return []
-    responses = data.get("diaServerResponse") or []
+        return None
+    responses = data.get("diaServerResponse")
     if not isinstance(responses, list) or not responses:
-        return []
+        return None
     first = responses[0]
     if not isinstance(first, dict):
-        return []
-    response = first.get("response") or {}
-    docs = response.get("docs") or []
+        return None
+    response = first.get("response")
+    if not isinstance(response, dict):
+        return None
+    docs = response.get("docs")
+    if not isinstance(docs, list):
+        return None
     return [doc for doc in docs if isinstance(doc, dict)]
+
+
+def _extract_docs(data: Any) -> list[dict[str, Any]]:
+    """Documents in the BVS envelope; ``[]`` for an empty or malformed one."""
+    return _parse_docs(data) or []
 
 
 def _select_document_url(doc: dict[str, Any]) -> str:
@@ -809,6 +847,10 @@ class BrazilMoHEngine:
             settings.brazil_breaker_threshold,
             settings.brazil_breaker_cooldown_s,
         )
+        # Like ``bvs_guard``, this semaphore binds to the loop of the first
+        # caller that has to wait. The engine serves one event loop: the
+        # shared ``AsyncHttpClient`` already fails on a second one.
+        self._browser_slots = asyncio.Semaphore(_CAMOUFOX_MAX_CONCURRENT)
 
     async def _bvs_request(
         self, composed: str, count: int, deadline: float | None
@@ -1510,7 +1552,7 @@ class BrazilMoHEngine:
             and self.settings.enable_browser_fallback
             and self.settings.brazil_browser_fallback
         ):
-            docs = await self._camoufox_search(
+            docs = await self._camoufox_fetch(
                 all_composed,
                 self._overfetch_count(clamped, chain_start),
                 ceiling=self._browser_ceiling(chain_start),
@@ -1682,9 +1724,9 @@ class BrazilMoHEngine:
         remaining = chain_budget - (time.monotonic() - chain_start)
         return min(float(self.settings.brazil_browser_timeout_s), max(remaining, 0.0))
 
-    async def _camoufox_search(
+    async def _camoufox_fetch(
         self, composed: str, count: int, ceiling: float | None
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | None:
         """Last-resort rendered fetch of the BVS JSON search payload.
 
         ``pesquisa.bvsalud.org`` 403s plain HTTP clients behind a Bunny CDN
@@ -1692,24 +1734,26 @@ class BrazilMoHEngine:
         budget exhausts, so every stage ends as ``([], True)``. A real browser
         carries the fingerprint the shield accepts. Returns raw Solr-style doc
         dicts so ``_dedupe_by_id``/``_build_record``/``_is_brazilian`` apply
-        unchanged. Any failure or timeout returns ``[]``.
+        unchanged. A valid empty response returns ``[]``; a failed, skipped,
+        or malformed response returns ``None``.
 
-        ``ceiling`` comes from ``_browser_ceiling``: ``None`` means the chain
-        bound is disabled, so the flat per-tier cap
-        (``brazil_browser_timeout_s``) alone applies; ``0.0`` means the chain
-        budget is exhausted and the tier is skipped outright, never launched
-        with a zero timeout; any positive value is the seconds actually left.
+        ``ceiling`` is the remaining caller budget, capped by the browser
+        timeout. ``None`` uses the browser timeout alone; ``0.0`` skips the
+        tier outright. Any positive value is the seconds actually left.
         Whichever value results (``effective_ceiling``) bounds both the
-        overall ``wait_for`` and, after subtracting the time the launch
-        itself took, the in-browser navigation -- so navigation can never
-        silently outlive what launch already spent. An ``effective_ceiling``
-        below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips the launch outright: a
-        Camoufox launch needs tens of seconds, so a doomed ceiling would only
-        burn startup time.
+        overall ``wait_for`` and, after subtracting the time spent queueing
+        for a browser slot and launching, the in-browser navigation -- so
+        navigation can never silently outlive what the tier already spent.
+        At most ``_CAMOUFOX_MAX_CONCURRENT`` browsers run per engine. An
+        ``effective_ceiling`` below ``_CAMOUFOX_MIN_USEFUL_CEILING_S`` skips
+        the launch outright: a Camoufox launch needs tens of seconds, so a
+        doomed ceiling would only burn startup time. The floor is checked
+        again once a slot is held, so a caller whose wait spent it skips the
+        launch too.
         """
         if ceiling is not None and ceiling <= 0:
-            logger.info("brazil_moh camoufox tier skipped: chain budget exhausted")
-            return []
+            logger.info("brazil_moh camoufox tier skipped: caller budget exhausted")
+            return None
 
         effective_ceiling = (
             float(self.settings.brazil_browser_timeout_s) if ceiling is None else ceiling
@@ -1719,37 +1763,57 @@ class BrazilMoHEngine:
                 "brazil_moh camoufox tier skipped: %.1fs ceiling below useful floor",
                 effective_ceiling,
             )
-            return []
+            return None
         try:
             from camoufox.async_api import AsyncCamoufox
         except ImportError:
             logger.warning("camoufox unavailable; BVS browser fallback disabled")
-            return []
+            return None
 
         target = (
             f"{BVS_SEARCH_URL}?q={urllib.parse.quote(composed)}"
             f"&output=json&count={count}"
         )
 
-        async def _run() -> list[dict[str, Any]]:
-            launch_start = time.monotonic()
-            async with AsyncCamoufox(headless=True) as browser:
-                page = await browser.new_page()
-                nav_budget_s = max(
-                    effective_ceiling - (time.monotonic() - launch_start), 0.0
-                )
-                nav_timeout_ms = min(
-                    _CAMOUFOX_NAV_TIMEOUT_MS, max(int(nav_budget_s * 1000), 1)
-                )
-                await goto_tolerant(page, target, nav_timeout_ms)
-                # The shield answers the first request with a 403 interstitial
-                # and swaps in the payload once its challenge clears, with or
-                # without an aborted goto: keep reading for the budget.
-                content = await read_content_settled(
-                    page,
-                    min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
-                    ready=lambda html: not _bvs_shield_pending(html),
-                )
+        async def _run() -> list[dict[str, Any]] | None:
+            # Taken before the slot: queueing spends the same ceiling as the
+            # launch, so the navigation budget must count it.
+            tier_start = time.monotonic()
+            # Only a caller that had to wait re-checks the floor: one that took
+            # a free slot spent nothing, and a ceiling of exactly the floor
+            # must still launch.
+            queued = self._browser_slots.locked()
+            async with self._browser_slots:
+                queued_left = effective_ceiling - (time.monotonic() - tier_start)
+                if queued and queued_left < _CAMOUFOX_MIN_USEFUL_CEILING_S:
+                    logger.info(
+                        "brazil_moh camoufox tier skipped: %.1fs left after "
+                        "waiting for a browser slot, below useful floor",
+                        queued_left,
+                    )
+                    return None
+                async with AsyncCamoufox(headless=True) as browser:
+                    page = await browser.new_page()
+                    nav_budget_s = max(
+                        effective_ceiling - (time.monotonic() - tier_start), 0.0
+                    )
+                    # Rounded up: a budget-bound goto must not end before the
+                    # caller's deadline, which ``get_full_text`` relies on to
+                    # tell a ceiling landing from a browser failure.
+                    nav_timeout_ms = min(
+                        _CAMOUFOX_NAV_TIMEOUT_MS,
+                        max(math.ceil(nav_budget_s * 1000), 1),
+                    )
+                    await goto_tolerant(page, target, nav_timeout_ms)
+                    # The shield answers the first request with a 403
+                    # interstitial and swaps in the payload once its challenge
+                    # clears, with or without an aborted goto: keep reading for
+                    # the budget.
+                    content = await read_content_settled(
+                        page,
+                        min(_CAMOUFOX_SHIELD_CLEAR_MS, nav_timeout_ms),
+                        ready=lambda html: not _bvs_shield_pending(html),
+                    )
             text = _browser_payload_text(content)
             try:
                 data = json.loads(text)
@@ -1763,17 +1827,24 @@ class BrazilMoHEngine:
                     logger.info("brazil_moh: BVS origin returned an error page")
                 else:
                     logger.warning("brazil_moh: BVS browser fallback received non-JSON payload")
-                return []
-            return _extract_docs(data)
+                return None
+            docs = _parse_docs(data)
+            if docs is None:
+                logger.warning("brazil_moh: BVS browser fallback received malformed JSON")
+            return docs
 
         try:
             return await asyncio.wait_for(_run(), timeout=effective_ceiling)
         except Exception:
             logger.warning("brazil_moh camoufox fallback failed", exc_info=True)
-            return []
+            return None
 
     async def _lookup_record(
-        self, record_id: str, deadline: float | None = None
+        self,
+        record_id: str,
+        deadline: float | None = None,
+        *,
+        state: _LookupState,
     ) -> tuple[BrazilGuideline | None, BvsErrorKind | None]:
         """Resolve one record by its Solr id. Returns (record, error_kind).
 
@@ -1783,35 +1854,62 @@ class BrazilMoHEngine:
         ``deadline`` (absolute ``time.monotonic()``) bounds the retry ladder
         underneath this call so it ends itself while the host's status is still
         readable, instead of being cancelled by the caller's ceiling.
+
+        A ``cdn_challenge`` verdict retries the query once through
+        ``_camoufox_fetch`` inside what is left of ``deadline``. A valid
+        browser payload replaces the verdict (an empty one is a clean
+        not-found); a failed or malformed one keeps ``cdn_challenge``.
+        ``state.shielded`` is set before the browser starts, because a caller
+        ceiling that lands mid-browser discards this call's return value.
         """
         # The id is caller-controlled; escape it so a quote or backslash
         # cannot terminate the id:"..." phrase and rewrite the query.
         escaped = record_id.replace("\\", "\\\\").replace('"', '\\"')
+        composed = f'id:"{escaped}"'
         resp = await self.http_client.get(
             BVS_SEARCH_URL,
             headers=BVS_HEADERS,
-            params={"q": f'id:"{escaped}"', "output": "json", "count": 5},
+            params={"q": composed, "output": "json", "count": _LOOKUP_COUNT},
             retryable_statuses=_BVS_RETRYABLE_STATUSES,
             deadline=deadline,
         )
+        error_kind: BvsErrorKind | None = None
+        docs: list[dict[str, Any]] = []
         if resp is None:
             failure = getattr(self.http_client, "last_failure", None)
-            return None, _classify_failure(failure)
-        try:
-            data = resp.json()
-        except ValueError:
-            if self.http_client.is_unexpected_html(
-                resp
-            ) or self.http_client.is_challenge_html(resp):
-                return None, "cdn_challenge"
-            return None, "backend_error"
+            error_kind = _classify_failure(failure)
+        else:
+            try:
+                docs = _extract_docs(resp.json())
+            except ValueError:
+                if self.http_client.is_unexpected_html(
+                    resp
+                ) or self.http_client.is_challenge_html(resp):
+                    error_kind = "cdn_challenge"
+                else:
+                    error_kind = "backend_error"
+        if error_kind == "cdn_challenge" and (
+            self.settings.enable_browser_fallback and self.settings.brazil_browser_fallback
+        ):
+            state.shielded = True
+            ceiling = float(self.settings.brazil_browser_timeout_s)
+            if deadline is not None:
+                ceiling = min(ceiling, max(deadline - time.monotonic(), 0.0))
+            browser_docs = await self._camoufox_fetch(
+                composed, _LOOKUP_COUNT, ceiling=ceiling
+            )
+            if browser_docs is not None:
+                docs = browser_docs
+                error_kind = None
+        if error_kind:
+            return None, error_kind
         # ``id:"..."`` is a phrase query against a tokenized field, so a
         # near-miss record can come back ahead of the requested one. Only an
         # exact id is accepted: the wrong record would otherwise be served and
         # cached under the caller's id for the full TTL.
         docs = [
             doc
-            for doc in _dedupe_by_id(_extract_docs(data))
+            for doc in _dedupe_by_id(docs)
             if _first(doc.get("id")) == record_id
         ]
         if not docs:
@@ -1974,7 +2072,9 @@ class BrazilMoHEngine:
         which decline a retry that would land past it -- no share is reserved
         for the PDF phase, because cutting the lookup short would lose the
         record and the abstract with it. A lookup timeout surfaces as
-        ``status=error`` with ``error_kind=timeout`` and is never cached. A
+        ``status=error`` with ``error_kind=timeout`` and is never cached,
+        unless the lookup had hit the shield: then the ceiling returns
+        ``error_kind=cdn_challenge`` with ``timeout=True``. A
         budget exhausted after the lookup succeeded is not a dead end: the
         abstract is already in memory, so it is served with
         ``abstract_fallback=True`` and ``content_type="abstract"`` -- an
@@ -2042,6 +2142,19 @@ class BrazilMoHEngine:
                 ),
             )
 
+        def _lookup_failure(
+            kind: BvsErrorKind, *, timeout: bool = False
+        ) -> tuple[dict[str, Any], CacheMetadata]:
+            return (
+                {**base, "status": "error", "error": "bvs request failed",
+                 "title": "", "content_type": "none", "content": "",
+                 "abstract_fallback": False, "timeout_phase": "lookup"},
+                CacheMetadata(
+                    cached=False, cache_age=0, error=True,
+                    error_kind=kind, timeout=timeout,
+                ),
+            )
+
         budget_start = time.monotonic()
         # One deadline for the whole call, shared by both phases and handed
         # down into the retry ladders. No fraction is reserved for the PDF
@@ -2053,6 +2166,7 @@ class BrazilMoHEngine:
         # Bound before ``_resolve`` is defined below, because ``_resolve``
         # closes over it.
         deadline = budget_start + ceiling if ceiling > 0 else None
+        lookup_state = _LookupState()
 
         async def _resolve() -> tuple[
             BrazilGuideline | None, bool, dict[str, Any], CacheMetadata | None
@@ -2072,20 +2186,22 @@ class BrazilMoHEngine:
             if record_meta.cached and cached_record is not None:
                 return BrazilGuideline.from_dict(cached_record), False, {}, None
             record, error_kind = await self._lookup_record(
-                normalized, deadline=deadline
+                normalized, deadline=deadline, state=lookup_state
             )
             if error_kind:
-                return (
-                    None,
-                    True,
-                    {**base, "status": "error", "error": "bvs request failed",
-                     "title": "", "content_type": "none", "content": "",
-                     "abstract_fallback": False, "timeout_phase": "lookup"},
-                    CacheMetadata(
-                        cached=False, cache_age=0, error=True,
-                        error_kind=error_kind or "backend_error",
-                    ),
+                # When ``deadline`` sizes the browser's ceiling, every bound of
+                # the browser ends at or after it, so a shielded failure past
+                # the deadline is the ceiling cutting the browser short,
+                # whichever timer fired first. A browser stopped earlier by
+                # ``brazil_browser_timeout_s``, or failing on its own, ends
+                # before the deadline and keeps ``timeout=False``.
+                timed_out = (
+                    lookup_state.shielded
+                    and deadline is not None
+                    and time.monotonic() >= deadline
                 )
+                payload, meta = _lookup_failure(error_kind, timeout=timed_out)
+                return None, True, payload, meta
             if record is None:
                 return (
                     None,
@@ -2111,12 +2227,17 @@ class BrazilMoHEngine:
             base["timeout_phase"] = "lookup"
             logger.warning(
                 "brazil_moh full text lookup for %r exceeded its %.1fs budget "
-                "(phase=lookup, elapsed=%.1fs, detail=%s)",
+                "(phase=lookup, elapsed=%.1fs, shielded=%s, detail=%s)",
                 normalized,
                 ceiling,
                 time.monotonic() - budget_start,
+                lookup_state.shielded,
                 _failure_detail(self.http_client),
             )
+            if lookup_state.shielded:
+                # The ceiling cut the browser tier short: the cause is still
+                # the shield, not a slow origin.
+                return _lookup_failure("cdn_challenge", timeout=True)
             return _timeout_result("")
         if early_meta is not None:
             return early_payload, early_meta

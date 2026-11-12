@@ -21,6 +21,7 @@ from scholar_mcp.medical.brazil_moh import (
     ABSTRACT_MAX_CHARS,
     BVS_SEARCH_URL,
     BrazilMoHEngine,
+    _LookupState,
     _SearchState,
 )
 from scholar_mcp.medical.models import BrazilGuideline
@@ -281,7 +282,7 @@ async def test_camoufox_nav_timeout_clamped_to_small_ceiling(tmp_path, monkeypat
     engine, cache, http_client = await _engine(tmp_path)
     captured = _install_fake_camoufox(monkeypatch)
     try:
-        await engine._camoufox_search("dengue", 10, ceiling=25.0)
+        await engine._camoufox_fetch("dengue", 10, ceiling=25.0)
         assert 24000 <= captured["timeout"] <= 25000
     finally:
         await cache.close()
@@ -297,7 +298,7 @@ async def test_camoufox_nav_cap_leaves_the_browser_budget_in_charge(tmp_path, mo
     captured = _install_fake_camoufox(monkeypatch)
     try:
         budget_ms = engine.settings.brazil_browser_timeout_s * 1000
-        await engine._camoufox_search("dengue", 10, ceiling=None)
+        await engine._camoufox_fetch("dengue", 10, ceiling=None)
         assert budget_ms - 1000 <= captured["timeout"] <= budget_ms
     finally:
         await cache.close()
@@ -533,7 +534,7 @@ async def test_fulltext_timeout_maps_to_timeout_kind(tmp_path: Path):
         tmp_path, brazil_fulltext_timeout_s=0.05
     )
     try:
-        async def _slow_lookup(record_id, deadline=None):
+        async def _slow_lookup(record_id, deadline=None, state=None):
             await asyncio.sleep(5.0)
             return None, None
 
@@ -619,7 +620,7 @@ async def test_fulltext_pdf_phase_gets_remaining_budget(tmp_path, monkeypatch):
             return_value=httpx.Response(200, json=_bvs_response([doc]))
         )
 
-        async def _slow_lookup(record_id, deadline=None):
+        async def _slow_lookup(record_id, deadline=None, state=None):
             await asyncio.sleep(0.3)
             return _build_record(doc), None
 
@@ -771,7 +772,7 @@ async def test_lookup_record_retries_5xx_then_reports_outage(tmp_path: Path):
         route = respx.get(url__startswith=BVS_SEARCH_URL).mock(
             return_value=httpx.Response(500, text="Erro 504 - Gateway Timeout")
         )
-        record, kind = await engine._lookup_record("biblio-x")
+        record, kind = await engine._lookup_record("biblio-x", state=_LookupState())
         assert record is None
         assert kind == "origin_outage"
         assert len(route.calls) == http_client.max_retries, (
@@ -903,7 +904,7 @@ async def test_browser_tier_recomputes_adaptive_overfetch(tmp_path, monkeypatch)
             seen.append(count)
             return []
 
-        engine._camoufox_search = _fake_browser
+        engine._camoufox_fetch = _fake_browser
         await engine.search_guidelines("dengue hidratacao", limit=10)
         assert calls == [10, 10], (
             "the browser tier must recompute the overfetch window, not reuse the chain-start count"
@@ -931,7 +932,7 @@ async def test_camoufox_skips_when_ceiling_below_useful_floor(tmp_path, monkeypa
         monkeypatch.setitem(sys.modules, "camoufox", camoufox_mod)
         monkeypatch.setitem(sys.modules, "camoufox.async_api", api_mod)
 
-        assert await engine._camoufox_search("dengue", 10, ceiling=0.5) == []
+        assert await engine._camoufox_fetch("dengue", 10, ceiling=0.5) is None
         assert constructed == [], "camoufox must not launch under a tiny ceiling"
     finally:
         await cache.close()

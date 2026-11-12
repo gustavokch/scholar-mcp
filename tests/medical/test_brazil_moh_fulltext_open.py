@@ -130,7 +130,7 @@ async def test_timeout_phase_lookup_when_lookup_exceeds_budget(tmp_path: Path):
     slow lookup reports ``timeout_phase == "lookup"``."""
     engine, cache, http_client = await _engine(tmp_path, brazil_fulltext_timeout_s=0.05)
     try:
-        async def _slow_lookup(record_id, deadline=None):
+        async def _slow_lookup(record_id, deadline=None, state=None):
             await asyncio.sleep(5.0)
             return None, None
 
