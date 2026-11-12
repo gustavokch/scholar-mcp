@@ -4080,6 +4080,8 @@ async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
     """The useful-ceiling floor guards the launch, not the call: a caller
     that waited for a slot until less than the floor was left must not
     start a Firefox it cannot use."""
+    from scholar_mcp.medical.brazil_moh import _CAMOUFOX_MAX_CONCURRENT
+
     engine, cache, http_client = await _camoufox_engine(tmp_path)
     monkeypatch.setattr(
         "scholar_mcp.medical.brazil_moh._CAMOUFOX_MIN_USEFUL_CEILING_S", 0.5
@@ -4091,7 +4093,7 @@ async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
     try:
         holders = [
             asyncio.create_task(engine._camoufox_fetch(f"hold{i}", 5, None))
-            for i in range(2)
+            for i in range(_CAMOUFOX_MAX_CONCURRENT)
         ]
         await asyncio.sleep(0.05)
         queued = asyncio.create_task(engine._camoufox_fetch("late", 5, 0.8))
@@ -4099,8 +4101,8 @@ async def test_camoufox_fetch_skips_launch_when_queueing_spends_the_floor(
         launches.gate.set()
         held = await asyncio.gather(*holders)
         assert await queued is None
-        assert [docs[0]["id"] for docs in held] == ["biblio-1", "biblio-1"]
-        assert len(attempts) == 2
+        assert [docs[0]["id"] for docs in held] == ["biblio-1"] * len(holders)
+        assert len(attempts) == len(holders)
     finally:
         await cache.close()
         await http_client.aclose()

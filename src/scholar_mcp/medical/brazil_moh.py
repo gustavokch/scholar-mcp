@@ -2189,9 +2189,12 @@ class BrazilMoHEngine:
                 normalized, deadline=deadline, state=lookup_state
             )
             if error_kind:
-                # The browser's own bounds are sized from ``deadline`` and end
-                # at or after it, so a shielded failure past it is the ceiling
-                # cutting the browser short, whichever timer fired first.
+                # When ``deadline`` sizes the browser's ceiling, every bound of
+                # the browser ends at or after it, so a shielded failure past
+                # the deadline is the ceiling cutting the browser short,
+                # whichever timer fired first. A browser stopped earlier by
+                # ``brazil_browser_timeout_s``, or failing on its own, ends
+                # before the deadline and keeps ``timeout=False``.
                 timed_out = (
                     lookup_state.shielded
                     and deadline is not None
