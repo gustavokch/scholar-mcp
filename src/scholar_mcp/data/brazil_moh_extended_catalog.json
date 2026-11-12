@@ -60,13 +60,13 @@
       "Guias e manuais"
     ]
   },
-  "ms-vigilancia-enchentes-rs-2025": {
-    "title": "Vigilância em saúde nas enchentes do Rio Grande do Sul — doutrina de resposta 2024/2025",
-    "description": "Doutrina de vigilância em saúde para as enchentes no Rio Grande do Sul: sala de situação, leptospirose e doenças das águas, vigilância em abrigos, qualidade da água e recuperação da rede.",
-    "file_path": "guidelines/vigilancia_enchentes_rs_2025.txt",
-    "keywords": "enchentes vigilancia rio grande do sul leptospirose abrigos desastres vigiagua",
-    "source_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa",
-    "license": "Resumo técnico autoral — domínio público (CC0)",
+  "ms-guia-resposta-inundacao-2017": {
+    "title": "Guia de preparação e resposta à emergência em saúde pública por inundação",
+    "description": "Este Guia foi elaborado com o objetivo de nortear a atuação das Secretarias de Saúde no desenvolvimento de suas ações de preparação e resposta às inundações.",
+    "file_path": "guidelines/guia_resposta_inundacao_2017.txt",
+    "keywords": "inundacao enchentes desastres emergencia saude publica preparacao resposta gestao de risco vigilancia em saude",
+    "source_url": "https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/enchentes/guia-de-preparacao-e-resposta-a-emergencia-em-saude-publica-por-inundacao.pdf",
+    "license": "Publicação oficial do Ministério da Saúde — licença não declarada no documento",
     "authors": [
       "Ministério da Saúde"
     ],

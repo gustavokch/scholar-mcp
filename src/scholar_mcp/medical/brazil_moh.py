@@ -142,7 +142,9 @@ MAX_FULL_TEXT_CHARS = 600_000
 # v3: origin (position prior scoped to BVS records).
 # v4: PCDT heading keywords change catalog ranking. v5: PCDT floor; the cached
 # search row now carries the pinned ids.
-CACHE_SCHEMA = "v5"
+# v6: two self-written local summaries replaced by official texts; cached rows
+# still served them.
+CACHE_SCHEMA = "v6"
 
 # A PCDT-engine hit at or above this engine score is kept in the final slice.
 # The merge ranks catalog rows on lexical coverage alone, so a protocol found

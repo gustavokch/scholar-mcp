@@ -8,6 +8,7 @@ tier stays off unless a test installs its own fake.
 
 import asyncio
 import dataclasses
+import json
 import sys
 import time
 import types
@@ -570,19 +571,18 @@ async def test_c3_methodological_note_retrievable_via_title(tmp_path: Path):
         await http_client.aclose()
 
 
-async def test_rs_flood_doctrine_retrievable_via_title(tmp_path: Path):
+async def test_flood_response_guide_retrievable_via_title(tmp_path: Path):
     # No respx: see above -- the corpus path is offline by construction.
     engine, cache, http_client = await _engine(tmp_path, stub_local=False)
     try:
         records, _ = await engine.search_guidelines(
-            "enchentes vigilancia rio grande sul", collection="pcdt"
+            "guia preparacao resposta emergencia inundacao", collection="pcdt"
         )
-        assert "ms-vigilancia-enchentes-rs-2025" in [r.record_id for r in records]
-        payload, _ = await engine.get_full_text(
-            "ms-vigilancia-enchentes-rs-2025", max_chars=10000
-        )
+        record_id = "ms-guia-resposta-inundacao-2017"
+        assert record_id in [r.record_id for r in records]
+        payload, _ = await engine.get_full_text(record_id, max_chars=10000)
         assert payload["status"] == "success"
-        assert "leptospirose" in payload["content"].lower()
+        assert "inundação" in payload["content"].lower()
     finally:
         await cache.close()
         await http_client.aclose()
@@ -592,12 +592,34 @@ def test_new_corpus_files_carry_provenance_and_length():
     data_dir = Path(__file__).resolve().parents[2] / "src" / "scholar_mcp" / "data"
     for rel in (
         "guidelines/nota_metodologica_c3_gestacao_puerperio.txt",
-        "guidelines/vigilancia_enchentes_rs_2025.txt",
+        "guidelines/guia_resposta_inundacao_2017.txt",
     ):
         text = (data_dir / rel).read_text(encoding="utf-8")
         assert len(text) > 1000
         for marker in ("Fonte:", "URL:", "Extraído em:", "Licença:"):
             assert marker in text, f"{rel} missing provenance marker {marker}"
+
+
+def _self_authored(license_text: str) -> bool:
+    # "Resumo técnico autoral" marks a summary someone wrote; official texts
+    # say "sem direito autoral" (no copyright), which is not authorship.
+    return "autoral" in license_text.lower().replace("direito autoral", "")
+
+
+def test_bundled_corpus_has_no_self_authored_summaries():
+    # Each bundled text is served as a Ministry of Health source, so a
+    # summary someone wrote would be cited as official doctrine.
+    data_dir = Path(__file__).resolve().parents[2] / "src" / "scholar_mcp" / "data"
+    catalog = json.loads(
+        (data_dir / "brazil_moh_extended_catalog.json").read_text(encoding="utf-8")
+    )
+    for record_id, row in catalog.items():
+        assert not _self_authored(row["license"]), record_id
+        assert (data_dir / row["file_path"]).is_file(), record_id
+    for path in sorted((data_dir / "guidelines").glob("*.txt")):
+        with path.open(encoding="utf-8") as f:
+            license_line = next(line for line in f if line.startswith("Licença:"))
+        assert not _self_authored(license_line), path.name
 
 
 def test_config_fulltext_ceiling_defaults_and_env(monkeypatch):
