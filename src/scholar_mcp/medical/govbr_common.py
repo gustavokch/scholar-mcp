@@ -258,4 +258,6 @@ def parse_folder_index(html: str, base_url: str, parent_path: str) -> list[str]:
 # Declared here rather than reused from brazil_moh.CACHE_SCHEMA because
 # brazil_moh imports both engines; the reverse import would be a cycle.
 # v2: has_full_text (ENAMED misses plan B4). v3: origin. v4: PCDT keywords.
-CACHE_SCHEMA = "v4"
+# v5: PCDT search rows carry bundled-corpus records, and two of those were
+# replaced (see brazil_moh v6).
+CACHE_SCHEMA = "v5"

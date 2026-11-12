@@ -1,0 +1,2136 @@
+Fonte: Ministério da Saúde, Secretaria de Vigilância em Saúde — Guia de preparação e resposta à emergência em saúde pública por inundação (2017)
+URL: https://www.gov.br/saude/pt-br/centrais-de-conteudo/publicacoes/svsa/enchentes/guia-de-preparacao-e-resposta-a-emergencia-em-saude-publica-por-inundacao.pdf
+Extraído em: 2026-11-11
+Licença: Publicação oficial do Ministério da Saúde — licença não declarada no documento
+
+                        MINISTÉRIO DA SAÚDE
+
+
+
+
+Guia de preparação e
+resposta à emergência
+em saúde pública
+por inundação
+
+
+
+
+Brasília / DF • 2017
+SUMÁRIO
+
+
+
+
+APRESENTAÇÃO                                                            5
+
+1 INTRODUÇÃO                                                            6
+
+1.1 Efeitos das inundações na saúde humana                              8
+
+1.2 A gestão de risco de desastres no âmbito do setor Saúde            12
+
+1.3 Um olhar sobre o território na preparação e resposta do setor
+    Saúde às inundações                                                20
+
+1.4 Análise de situação de saúde aplicada nas situações de inundação   21
+
+2 ESTRATÉGIA DE RESPOSTA À EMERGÊNCIA EM SAÚDE PÚBLICA
+  POR INUNDAÇÃO                                                        24
+
+2.1 Mecanismos para a atuação em emergência em saúde pública           27
+
+    2.1.1 Comitê de Saúde em Desastre                                  28
+
+    2.1.2 Matriz de cenários e responsabilidades                       30
+
+    2.1.3 Plano de Contingência                                        33
+
+    2.1.4 Centro de Operações de Emergência em Saúde                   34
+
+3 RESPONSABILIDADES E AÇÕES DO SETOR SAÚDE                             38
+
+3.1 As ações de Atenção à Saúde                                        40
+
+3.2 As ações de Vigilância em Saúde                                    43
+
+REFERÊNCIAS                                                            53
+
+BIBLIOGRAFIA                                                           55
+APRESENTAÇÃO
+
+Desastre é definido como o resultado de eventos adversos, naturais
+ou provocados pelo homem, sobre um ecossistema considerado
+vulnerável, causando danos humanos, materiais e/ou ambientais
+e consequentes prejuízos econômicos, ambientais e sociais. Na
+perspectiva da saúde pública, os desastres definem-se por seu
+efeito sobre as pessoas e sobre a infraestrutura dos serviços de
+saúde, nos quais as inundações estão entre as ocorrências mais
+frequentes, atingindo todas as regiões do País, resultando em
+impactos significativos sobre a saúde.
+
+Para atuar de forma oportuna nessas situações, o setor Saúde deve
+se organizar para garantir a preparação adequada e a continuidade
+dos serviços durante uma inundação. Para tanto, a sistematização
+prévia do processo de trabalho, possibilita o estabelecimento da
+capacidade de manutenção do desenvolvimento das ações de
+vigilância em atenção à saúde.
+
+Nesse sentido, é essencial que, no Sistema Único de Saúde (SUS),
+sejam desenvolvidas ações para o fortalecimento da capacidade
+de atuação em emergências em saúde pública associadas à
+inundações. Este Guia foi elaborado com o objetivo de nortear
+a atuação das Secretarias de Saúde no desenvolvimento de
+suas ações de preparação e resposta às inundações. Importante
+lembrar que muitas das atividades a serem executadas não são de
+competência apenas do setor Saúde, por isso, articulação efetiva
+com os demais setores, identificando suas responsabilidades e as
+ações conjuntas, torna-se imprescindível.
+
+A Secretaria de Vigilância em Saúde, do Ministério da Saúde espera
+que, este documento contribua para o fortalecimento da capacidade
+de atuação do SUS em emergência em saúde pública por desastres.
+
+                                    Secretaria de Vigilância em Saúde
+
+
+
+                                                                        5
+INTRODUÇÃO
+O
+      risco de desastres faz parte do nosso dia a dia e pode ser
+      relacionado com a própria dinâmica de desenvolvimento das
+      sociedades. Resulta da combinação de ameaças ou perigos
+(eventos naturais ou tecnológicos) e condições de vulnerabilidades
+(condições de vida, organização e capacidade de resposta etc.).
+Essa combinação é decisiva para a dimensão dos impactos dos
+desastres, incluindo aqueles sobre a saúde, que, entre outros efeitos,
+podem resultar em óbitos, lesões, doenças e comprometimento da
+prestação dos serviços de saúde.
+
+Os desastres de origem natural têm aumentado em intensidade e
+frequência, podendo se apresentar em qualquer região do mundo.
+Eventos como terremotos, ciclones tropicais, tornados, vendavais,
+inundações, alagamentos, secas e erupções vulcânicas tendem a se
+constituir numa ameaça ou perigo. Tais eventos podem resultar em
+desastre quando houver ruptura do funcionamento normal de um
+sistema ou comunidade, uma vez que provocam danos e efeitos
+ao bem-estar físico, social, mental, econômico e ambiental de uma
+determinada localidade.
+
+Define-se por inundação o transbordamento de água da calha
+normal de rios, mares, lagos e açudes, ou acumulação de água
+por drenagem deficiente, em áreas não habitualmente submersas.
+Em função do padrão evolutivo, são classificadas como enchentes
+ou inundações graduais, enxurradas ou inundações bruscas,
+alagamentos e inundações litorâneas. A sua ocorrência, na maioria
+das vezes, é provocada por precipitações pluviométricas, intensas
+e concentradas, pela intensificação do regime de chuvas sazonais,
+por saturação do lençol freático ou por degelo.
+
+As inundações estão entre as ocorrências mais frequentes que
+atingem todas as regiões do País e têm impactos significativos sobre
+a saúde das pessoas e à infraestrutura de saúde. É, portanto, essencial
+que sejam desenvolvidas ações para a organização da atuação do
+setor Saúde em emergências em saúde pública por inundação.
+
+
+
+                                                                          7
+    1.1 Efeitos das inundações na saúde humana
+    No Brasil, as inundações podem ocorrer em todas as regiões
+    onde muitos municípios são atingidos. As inundações têm como
+    característica relevante a possibilidade de abranger uma grande
+    área, uma vez que sua ocorrência geralmente ocorre de forma
+    brusca (enxurrada), apresentando-se entre os desastres que
+    proporcionam maiores danos à saúde, ocasionando óbitos e
+    traumas. Já a inundação gradual também é preocupante, uma vez
+    que pode expor a população por um período mais longo, podendo
+    ocasionar alteração no comportamento das doenças, bem como de
+    vetores. Tanto as inundações bruscas quanto as graduais podem
+    trazer prejuízos ao patrimônio público, ao ambiente e aos bens
+    materiais individuais e coletivos.
+
+    No que concerne à frequência de ocorrência e à magnitude dos
+    danos à saúde e à infraestrutura de uma determinada localidade,
+    dependerão das vulnerabilidades locais associadas às condições
+    sociais, econômicas, políticas, ambientais, climáticas, geográficas
+    e sanitárias do território.
+
+
+
+
+8
+                      Território é considerado um espaço de relações
+                      (sociais, econômicas e políticas), um sistema de
+                      objetos e de ações em permanente interação. Mas,
+                      sobretudo, nesses espaços delimitados de poder é
+                      que os diferentes atores sociais que fazem uso do
+                      território buscam viabilizar seus projetos e dese-
+                      jos para levar a vida (SANTOS, 1999, p. 11).
+
+
+Diversos são os impactos que as inundações podem causar à
+saúde, tanto de efeito imediato, quanto de médio e longo prazo.
+Entre os principais impactos sobre a saúde, é esperado:
+
+a) Aumentar o número de óbitos.
+
+b) Causar traumatismos, afogamentos e outros agravos à saúde
+   que podem exceder capacidade de resposta dos serviços locais
+   de saúde.
+
+
+
+                                                                           9
+     c) Danificar ou destruir a infraestrutura física e funcional dos serviços
+        de saúde, incluindo os arquivos com consequente perda de dados.
+
+     d) Afetar os recursos humanos do setor Saúde comprometendo o
+        funcionamento da estrutura local de saúde.
+
+     e) Danificar e interromper os sistemas e/ou soluções alternativas
+        de abastecimento de água, os serviços de drenagem, limpeza
+        urbana e esgotamento sanitário.
+
+     f) Aumentar os riscos de contaminação microbiológica de água para
+        consumo humano e alimentos em razão de alagamentos de lixões,
+        aterros sanitários, transbordamento de esgotos e fossas sépticas.
+
+     g) Aumentar a ocorrência de doenças infecciosas (respiratórias
+        e de transmissão hídrica e alimentar) e agravar as doenças
+        crônicas e de transmissão por vetores, assim como o surgimento
+        de doenças mentais, acidentes por animais peçonhentos e por
+        outros animais, e doenças provocadas pela maior exposição às
+        intempéries (frio, umidade, calor, tempestade etc.).
+
+     h) Danificar as instalações de fontes fixas ou móveis de produtos peri-
+        gosos, gerando o risco de desastre secundário (unidades industriais,
+        depósitos, comércios, transportes, oleodutos, gasodutos, lagoas de
+        contenção de rejeitos) e de substâncias radioativas, entre outros,
+        podendo aumentar o risco de adoecimento e óbitos no território.
+
+     i) Aumentar o risco de transtornos psicológicos na população atingida,
+        principalmente quando ocorrem perdas familiares, econômicas,
+        materiais ou quando há necessidade de ir para abrigos (podendo
+        gerar problemas secundários, a exemplo de violência física e sexual).
+
+     j) Desagregar comunidades e famílias.
+
+     k) Provocar migração populacional (deslocamento) em busca de
+        fontes alternativas de água, alimentos, moradia, emprego, entre
+        outros fatores condicionantes.
+
+
+10
+l) Aumentar a escassez de alimentos, podendo ocasionar problemas
+   nutricionais, especialmente nos casos de inundações prolongadas.
+
+m) Causar agravos aos profissionais envolvidos em alguma etapa do
+   processo (resgate, atendimento, acolhimento, planejamento etc.)
+   decorrentes do desastre, como, por exemplo: transtornos mentais,
+   intoxicações, acidentes com materiais biológicos e outros.
+
+n) Aumentar a ocorrência de doenças de pele, como fungos,
+   foliculite, melasma, alergia e até mesmo câncer de pele.
+
+Os impactos das inundações podem reduzir, ou até inviabilizar,
+a prestação dos serviços de saúde, tanto pelos danos causados à
+infraestrutura e aos profissionais que prestam esse serviço quanto
+pelo aumento da demanda pelos serviços de saúde, o que pode
+superar a capacidade de atendimento local.
+
+Para reduzir a vulnerabilidade dos serviços de saúde frente a
+desastres, é necessário que a Secretaria de Saúde esteja preparada
+para atuar, conforme a necessidade do território que ela atende,
+seja com os próprios recursos ou com a solicitação de apoio
+adicional, com base na avaliação de danos e necessidades locais.
+
+Nesse contexto, é essencial ressaltar que quanto mais organizada
+no processo de preparação e resposta a desastres for a Secretaria
+de Saúde, ou seja, que tiver condições de superar os problemas e
+recuperar sua capacidade de atuação, menor é o impacto sobre a
+saúde da população, considerando, ainda, sua resiliência.
+
+                      Resiliência – Capacidade de um sistema, comu-
+                      nidade ou sociedade exposta a um desastre em
+                      resistir, absorver, adaptar e se recuperar de seus
+                      efeitos de modo oportuno e eficaz, o que inclui a
+                      preservação e restauração de suas estruturas e
+                      funções básicas. (ISDR, 2009, p. 28).
+
+
+
+
+                                                                           11
+     1.2 A gestão de risco de desastres no âmbito do setor Saúde
+     Para fortalecer a capacidade de atuação local e reduzir o risco de
+     exposição da população, dos profissionais e da infraestrutura de
+     saúde é necessário o desenvolvimento de um trabalho contínuo de
+     preparação, baseado na gestão do risco, envolvendo a organização
+     do setor Saúde para atuar com ações de redução do risco, manejo
+     do desastre e com a recuperação dos seus efeitos. Esse trabalho
+     deve estar em consonância com a organização institucional local
+     e com os planos de outros setores para a preparação e a resposta
+     a desastres. O plano de preparação e resposta do setor Saúde
+     complementa os demais planos locais e propicia o atendimento
+     oportuno em uma situação de emergência e, quando pensado com
+     um olhar preventivo, reduz o risco e os impactos dos desastres,
+     tornando-os menos graves do que poderiam ser.
+
+
+
+       Vale lembrar que, para uma atuação adequada em situações
+       de desastres, é necessário o desenvolvimento de um trabalho
+       contínuo e permanente de preparação, com planejamento
+       definido, de forma que as instituições e os diversos setores
+       dessas instituições sejam envolvidos em todo o processo.
+       Isso possibilita que cada setor tenha clareza das suas
+       responsabilidades, tanto nas ações de preparação quanto na
+       resposta e na recuperação, de acordo com a sua atribuição legal.
+
+
+     A gestão do risco de desastres pensa a atuação desde antes de
+     um desastre acontecer até depois do período imediato de resposta.
+     Se divide em três etapas: Redução do Risco, Manejo do Desastres
+     e Recuperação.
+
+
+
+
+12
+                                          GESTÃO DE RISCO
+
+
+
+
+    REDUÇÃO DE RISCO                     MANEJO DO DESASTRE                    RECUPERAÇÃO
+
+
+
+          Prevenção                              Alerta                         Reabilitação
+
+
+
+          Mitigação                            Resposta                        Reconstrução
+
+
+
+         Preparação
+
+
+
+
+Fonte: Adaptado de "NARVÁEZ, L.; LAVELL, A.; ORTEGA, G. P. La gestión del riesgo de desastres: un
+enfoque basado en procesos. Lima, 2009".
+
+
+
+
+O processo de gestão do risco de desastres, composto por essas três
+etapas (redução do risco, manejo do desastre e recuperação), quando
+aplicado ao setor Saúde, também tem objetivos bem definidos no
+intuito de estabelecer as ações mais adequadas à necessidade local.
+
+Na etapa de redução do risco, as ações desenvolvidas visam eliminar
+ou mitigar o risco existente, prevenir os riscos futuros, bem como
+preparar para a resposta a um desastre. São atividades a serem
+realizadas antes da ocorrência de um desastre. Todas as áreas que
+são necessárias na resposta a uma emergência em saúde pública
+por inundação devem se envolver no processo de planejamento e
+preparação da Secretaria de Saúde para desenvolver suas ações
+de forma oportuna, caso um desastre ocorra. Esse planejamento
+deve levar em consideração e complementar as ações intersetoriais
+(defesa civil, assistência social etc.).
+
+
+
+
+                                                                                                    13
+     Para uma visualização geral da atuação do setor Saúde no processo
+     de gestão do risco de desastres provocados por inundação, são
+     exemplificadas as ações a serem desenvolvidas em cada uma dessas
+     etapas, conforme observado nos quadros a seguir.
+
+     QUADRO 1 PRINCIPAIS AÇÕES DA ETAPA DE REDUÇÃO DO RISCO ANTES DA OCORRÊNCIA
+
+
+        Estruturar o Programa de Vigilância em Saúde dos Riscos
+       
+        Associados aos Desastres – Vigidesastres.
+
+        Identificar e estabelecer normas para subsidiar a atuação.
+       
+
+        Instituir o Comitê de Saúde em Desastres para articular e organizar
+       
+        a atuação da Secretaria de Saúde em situações de desastres.
+
+       Identificar e mapear atores e responsabilidades das áreas da Secretaria
+         de Saúde e de outros setores que atuam em situações de inundações.
+
+        Promover articulação intra e intersetorial.
+       
+
+        Identificar ameaças, vulnerabilidades e recursos para traçar o
+       
+        cenário para situações de inundações.
+
+        Identificar, fortalecer e estabelecer políticas e normas para
+       
+        redução do risco de desastres no setor Saúde.
+
+        Identificar e mapear o perfil epidemiológico local.
+       
+
+        Identificar planos de preparação e resposta a desastres.
+       
+
+        Elaborar o plano de preparação e resposta à emergência em
+       
+        saúde pública por inundação.
+
+        Estabelecer mecanismos para a gestão da informação.
+       
+
+        Estabelecer estratégia de comunicação (intra e intersetorial).
+       
+
+        Promover capacitações, treinamentos e simulados para a
+       
+        atuação do setor Saúde em inundações.
+
+        Elaborar e divulgar material de orientação e educação em saúde.
+       
+
+                                                                             Continua
+
+
+
+
+14
+Conclusão
+
+
+
+    Identificar e mapear:
+   
+            »» Rede de Atenção à Saúde (atenção básica, média e alta
+               complexidade).
+            »» Rede laboratorial.
+            »» Infraestrutura de vigilância em saúde.
+            »» Medicamentos e insumos estratégicos necessários
+               em situações de inundações (hipoclorito, vacinas,
+               medicamentos, kits diagnósticos etc.).
+            »» Sistemas e soluções alternativas de abastecimento de água.
+
+    Articular as ações da Rede de Atenção à Saúde:
+   
+            »» Atenção básica (unidades básicas de saúde, saúde da
+               família, saúde bucal, saúde mental, agentes comunitários,
+               entre outros, conforme organização local).
+            »» Atenção de média complexidade (urgência e emergência,
+               rede hospitalar, etc.).
+            »» Hospitais de referência.
+
+    Articular as ações da Rede de Vigilância em Saúde:
+   
+            »» Vigilância epidemiológica.
+            »» Vigilância sanitária.
+            »» Vigilância em saúde ambiental.
+            »» Rede laboratorial.
+
+    Estabelecer e desenvolver ações de promoção e educação em
+   
+    saúde com foco em inundações.
+
+    Identificar e estabelecer rede de referência para atendimento
+   
+    ambulatorial e hospitalar em locais seguros.
+
+Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+
+
+                                                                            15
+     Para que na etapa de manejo do desastre as ações desenvolvidas
+     sejam adequadas, é necessária a preparação prévia. É nesse
+     período que todo o planejamento anterior vai se colocar em prática
+     e todos os setores desenvolverão as ações de sua responsabilidade.
+     Tem início a partir do momento que uma inundação se converte
+     em um desastre. As ações desta etapa são desenvolvidas no intuito
+     do enfrentamento do desastre visando reduzir ao máximo seus
+     impactos sobre a saúde por meio de uma atuação oportuna do
+     setor Saúde. As principais estão listadas a seguir.
+
+
+       Em situações de desastres, a atuação oportuna de uma Secretaria de
+       Saúde envolve o desenvolvimento de ações adequadas, no momento
+       e com recursos apropriados, conforme as necessidades identificadas,
+       no intuito de reduzir ou eliminar o risco de impacto à saúde.
+
+
+
+     QUADRO 2 PRINCIPAIS AÇÕES DA ETAPA DE MANEJO DO DESASTRE DURANTE A OCORRÊNCIA
+
+
+        Solicitar informações à Defesa Civil ou órgão equivalente.
+       
+        Definir ponto focal da saúde na sala de situação interinstitucional,
+       
+        quando for ativada.
+        Avaliar o cenário de risco para a saúde.
+       
+        Emitir alerta para as demais áreas da Secretaria de Saúde para
+       
+        intensificar o monitoramento.
+        Notificar o desastre, dependendo da dimensão da ocorrência, para
+       
+        <notifica@saude.gov.br>.
+        Acionar e ativar o Centro de Operações de Emergência em Saúde
+       
+        (Coes ou COE-Saúde).
+
+        Realizar avaliação de danos e necessidades de saúde
+       
+        (preliminar, até 24h; e complementar – até 72h).
+        Avaliar capacidade de atendimento local disponível.
+       
+
+                                                                            Continua
+
+
+
+16
+Conclusão
+
+
+
+    Solicitar recursos adicionais, se for necessário.
+   
+    Realizar ações de saúde prioritárias:
+   
+            »» Ações de socorro.
+            »» Ações de vigilância em saúde.
+            »» Ações de atenção à saúde.
+            »» Ações de assistência farmacêutica.
+            »» Ações de orientação à população, incluindo abrigos.
+
+    Executar estratégia de atendimento nos abrigos.
+   
+    Estabelecer doenças e agravos de interesse para intensificação
+   
+    do atendimento e monitoramento, incluindo vigilância ativa.
+    Elaborar informe técnico periódico sobre a situação (diário,
+   
+    dependendo da dimensão do evento, pode reduzir ou ampliar
+    o período de divulgação).
+    Elaborar informe para divulgação das informações aos meios
+   
+    de comunicação, à comunidade e às instituições parceiras.
+    Acompanhar e divulgar os alertas da Defesa Civil e outros órgãos.
+   
+
+Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+A etapa de recuperação compreende a reabilitação das atividades
+e programas para restituir à sociedade a prestação dos serviços de
+saúde. Envolve também a reconstrução da infraestrutura danificada
+ou destruída. O processo de recuperação após a ocorrência de um
+desastre traz a oportunidade para desenvolver e aplicar medidas de
+redução do risco para ocorrências futuras. As principais ações a serem
+desenvolvidas nessa etapa são apresentadas no quadro a seguir.
+
+
+
+
+                                                                         17
+     QUADRO 3 PRINCIPAIS AÇÕES DA ETAPA DE RECUPERAÇÃO DEPOIS DA OCORRÊNCIA
+
+
+         Realizar avaliação complementar dos danos e impactos à saúde
+        
+         (infraestrutura; doenças e agravos etc.).
+         Avaliar a situação para desmobilização do Coes.
+        
+         Intensificar a vigilância epidemiológica de doenças de interesse
+        
+         (sentinela).
+         Reorganizar os serviços de atenção e vigilância em saúde,
+        
+         conforme necessidade.
+         Intensificar as ações de vigilância em saúde para a detecção
+        
+         precoce de surtos e intervenção oportuna.
+         Reestabelecer a rede de serviços e os programas de saúde.
+        
+         Reconstruir ou recuperar a infraestrutura de saúde danificada
+        
+         ou destruída.
+         Avaliar a atuação na preparação e resposta a desastres –
+        
+         lições aprendidas.
+         Revisar e adequar o plano de preparação e resposta e os
+        
+         protocolos e procedimentos.
+
+     Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+
+
+        Depois de apresentar as principais ações a serem desenvolvidas pela
+        Secretaria de Saúde nas três etapas de gestão do risco, vale relembrar
+        que esse é um processo em constante transformação. A cada atuação
+        deve ser avaliado o desempenho, discutindo com transparência os
+        problemas enfrentados, os desafios e os pontos positivos encontrados
+        para subsidiar a revisão do Plano e novamente as ações de preparação
+        para a resposta a um evento futuro.
+
+
+
+
+18
+                                          DEFINIÇÃO
+                                           DO FOCO
+
+
+
+
+                                                                  ESTABELECIMENTO
+             ATUALIZAÇÃO
+                                                                     DO CENÁRIO
+
+
+
+
+                                                                         DEFINIÇÃO
+           AVALIAÇÃO
+                                                                         DAS AÇÕES
+
+
+
+
+                                                                    IDENTIFICAÇÃO
+             PREPARAÇÃO                                              DOS ATORES E
+                                                                  RESPONSABILIDADES
+
+
+                                          ELABORAR
+                                           O PLANO
+
+
+
+
+Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+
+O processo de gestão remete à importância de a Secretaria de
+Saúde planejar as ações adequando à realidade do município,
+mediante o conhecimento das características locais e das ameaças
+ou perigos e vulnerabilidades presente no território. Deve, ainda,
+conhecer a estrutura organizacional do governo local, incluindo as
+áreas técnicas da própria Secretaria de Saúde, suas competências
+e atribuições, para articular e coordenar a preparação de forma
+adequada e com a participação de todos os atores que serão
+envolvidos na ocorrência de um desastre.
+
+Vale ressaltar que a organização para atuar em situações de
+desastres é um processo contínuo, dinâmico e, sobretudo,
+participativo, visando ao fortalecimento da capacidade instalada, de
+modo a garantir a implementação efetiva de ações de prevenção,
+preparação e recuperação no intuito de dotar a Secretaria de Saúde
+da capacidade necessária para o desenvolvimento de suas ações.
+                                                                                      19
+     Por ser um processo contínuo e dinâmico, deve ser atualizado sempre
+     que necessário para se adequar às possíveis mudanças no território.
+
+     Para isso, é importante observar as estratégias e os mecanismos
+     que são utilizados para a organização da atuação em desastres.
+     A primeira estratégia é conhecer a dinâmica do território.
+
+
+     1.3 Um olhar sobre o território na preparação e resposta
+         do setor Saúde às inundações
+     A organização para atuar em situações de desastres envolve uma
+     multiplicidade de ações e a necessidade de articulação intersetorial
+     e multidisciplinar. Nesse contexto, vale ressaltar que o desastre
+     ocorre no território, na localidade, logo, quanto mais preparada
+     estiver a área que for atingida, menores serão os impactos.
+
+     A preparação do setor Saúde para atuar em inundações deve
+     considerar o perfil do território em que ela ocorre. Conhecer a
+     dinâmica das relações sociais, econômicas e políticas daquela
+     localidade onde pode ocorrer um desastre, propiciará o subsídio
+     para uma análise da situação, no intuito de apontar as medidas
+     mais adequadas à redução do risco de descontinuidade de
+     prestação de serviços e à saúde da população.
+
+
+       Conhecer a realidade local é o primeiro passo para a preparação
+       e resposta a uma situação de inundação. É importante observar
+       alguns aspectos para traçar o perfil da ocorrência das inundações
+       na localidade:
+        Quando e onde acontece a inundação?
+        Qual o perfil socioeconômico da localidade?
+        Qual o perfil epidemiológico?
+        Qual a estrutura de saúde?
+        Qual a organização local para atuar em situações de desastres?
+
+
+
+20
+As respostas às perguntas apontadas no quadro possibilitam
+conhecer as condições presentes no território que podem
+influenciar o efeito da inundação sobre a saúde. No contexto
+do perfil epidemiológico, é importante analisar: pessoa (quem
+pode ser/foi afetado?), tempo (quando ocorreu/quanto durou/é
+recorrente?) e lugar (onde?). Esse olhar deve ser adotado tanto
+em uma análise de situação prévia à ocorrência de um desastre
+quanto para avaliar os impactos após o seu acontecimento.
+Subsidia, ainda, o conhecimento sobre a dinâmica da área
+atingida, possibilitando a preparação e a resposta oportuna.
+
+Organizar os serviços locais e torná-los resilientes, para retornar ao
+seu funcionamento normal, no menor tempo possível, garante que
+o impacto das inundações sobre a saúde da população será menor.
+Propiciar uma avaliação de danos e necessidades, de forma opor-
+tuna, possibilita que a Secretaria de Saúde local possa identificar
+aquele que tem capacidade instalada para responder com seus pró-
+prios recursos e o que precisa ser solicitado como apoio adicional.
+
+
+1.4 Análise de situação de saúde aplicada situações
+    de inundação
+Em situações de desastres, o processo de análise de situação de
+saúde é essencial, tanto aquele que é realizado antes da ocorrência
+de um evento, no intuito de conhecer as dinâmicas do território,
+quanto o realizado quando um desastre acontece, a fim de avaliar
+os danos e as necessidades.
+
+Análise de situação de saúde compreende um processo de levanta-
+mento e análise de dados e informações para a compreensão dos pro-
+blemas de saúde, identificar necessidades e subsidiar a priorização de
+ações. Nesse contexto, é importante observar algumas variáveis que
+possibilitam conhecer as características da população, suas condições
+de vida e seu perfil epidemiológico. Faz-se necessário ainda conhecer
+os recursos que a Secretaria de Saúde tem disponível para responder
+a uma eventual emergência.
+
+                                                                         21
+     A análise de situação de saúde contribui para conhecer a realidade
+     presente no território e predizer os potenciais impactos de uma
+     inundação sobre os serviços de saúde. Quanto mais conhecimento
+     sobre as ameaças e as vulnerabilidades do território, mais
+     condições de apontar as medidas necessárias para a redução do
+     risco à saúde da população.
+
+     Para exemplificar, observe algumas variáveis para caracterizar o
+     perfil do território e subsidiar essa análise de situação. Entre elas
+     estão aquelas que caracterizam a população, como as demográficas
+     (faixa etária de idade, sexo, local de residência), as socioeconômicas
+     (renda, inserção no mercado de trabalho, ocupação), as culturais
+     (grau de instrução, hábitos, comportamentos) e as políticas
+     (interesses, necessidades e demandas). Faz parte desse processo
+     também o conhecimento sobre as condições de vida da população,
+     a exemplo de como são as condições ambientais a que ela está
+     exposta (saneamento, habitação, transporte, segurança e lazer),
+     bem como o perfil epidemiológico, principalmente identificando as
+     características de morbidade e mortalidade.
+
+     Outro ponto a ser considerado é o contexto das ocorrências de
+     desastres no local (o que, onde e quando eles acontecem). Deve-se
+     buscar o histórico das ocorrências para identificar os tipos mais
+     frequentes, assim como a sua dimensão. No caso das inundações,
+     deve-se identificar as principais localidades atingidas e o período
+     que as chuvas ocorrem para subsidiar o desenvolvimento de ações
+     preventivas de preparação da Secretaria de Saúde.
+
+     No âmbito da organização governamental, é necessário conhecer
+     como está organizada a estrutura local (tem defesa civil?; qual é
+     a cobertura da saúde da família?; etc.). Conhecer os atores e as
+     responsabilidades do governo local permite a identificação das
+     áreas que devem ser acionadas para se envolver no processo de
+     preparação, possibilitando uma resposta oportuna quando da
+     ocorrência de um desastre.
+
+
+
+22
+  Para resumir o contexto da análise de situação, reflita sobre
+  as perguntas a seguir, que devem ser feitas no processo de
+  preparação local para uma situação de desastre por inundação:
+   Quando, onde e qual a duração de uma inundação?
+
+   Qual a organização governamental local para atender à demanda?
+
+   Qual a estrutura dos serviços de saúde?
+
+   Qual o perfil de atendimento de saúde?
+
+   Os recursos disponíveis são suficientes para a atuação da
+     Secretaria de Saúde no atendimento à população atingida pela
+     inundação? Caso não, o que é necessário?
+
+  As respostas a essas perguntas possibilitarão identificar ameaças
+  ou perigos, vulnerabilidades, recursos disponíveis e necessários
+  para atuar em uma emergência em saúde pública por inundação.
+
+
+
+Considerando esse contexto, a Secretaria de Saúde conhecerá
+os potenciais condicionantes e determinantes de saúde locais,
+o cenário de ocorrência de desastre, a capacidade instalada no
+território, as instituições e os setores envolvidos na preparação e na
+resposta a uma inundação, bem como as potenciais necessidades.
+Essa contextualização propiciará dados e informações para a
+elaboração do plano local de preparação e resposta à emergência
+em saúde pública por inundação.
+
+
+
+
+                                                                         23
+ ESTRATÉGIA DE
+  RESPOSTA À
+EMERGÊNCIA EM
+ SAÚDE PÚBLICA
+POR INUNDAÇÃO
+O
+       Sistema Único de Saúde (SUS) é, por definição constitucional,
+       um sistema público, nacional e de caráter universal, baseado
+       na concepção de saúde como direito de cidadania e nas dire-
+trizes organizacionais de descentralização, com comando único em
+cada esfera de governo, integralidade do atendimento e participação
+da comunidade.
+
+As estratégias e as ações definidas no planejamento prévio para co-
+nhecimento e gestão do risco no âmbito do SUS devem ser baseadas
+nos seus princípios básicos, especialmente na integralidade e na
+equidade, compreendendo a atenção integral no cuidado. Deve-se
+ressaltar, ainda, que a atuação do setor Saúde em desastres engloba
+ações de promoção, vigilância e atenção à saúde da população e dos
+profissionais envolvidos no processo.
+
+Assim, na ocorrência de um desastre, o setor Saúde deve assumir
+suas responsabilidades e atribuições, respeitando as especificidades
+de cada componente do processo, e articular-se com os demais
+entes e instituições que também atuam nessas situações.
+
+Nesse contexto, um dos desafios para o setor Saúde é organizar sua
+atuação baseada na lógica do processo de gestão do risco, devendo
+envolver tanto as ações de redução do risco, manejo do desastre e
+recuperação dos seus efeitos. Para isso, é necessária uma ampla
+articulação intrassetorial e interinstitucional da Secretaria de Saúde
+com outros atores, a exemplo da própria vigilância, bem como da
+área de Atenção à Saúde.
+
+A Vigilância em Saúde compreende o desenvolvimento de ações
+articuladas e integradas das seguintes áreas: Vigilância Epide-
+miológica, Vigilância em Saúde Ambiental, Saúde do Trabalhador,
+Vigilância Sanitária e Saúde Indígena, incluindo seus aspectos de
+gestão. É entendida como um campo que integra diversas áreas de
+conhecimento e práticas e tem como objetivo a promoção da saúde
+e a melhoria da qualidade de vida da população. Nesse sentido, a
+Vigilância em Saúde aborda temas como política e planejamento;
+
+
+                                                                         25
+     territorialização; epidemiologia; processo saúde-doença; condições
+     de vida e situação de saúde das populações; ambiente e saúde; e
+     processo de trabalho.
+
+     O setor de Atenção à Saúde é a organização estratégica do
+     sistema e das práticas de saúde em resposta às necessidades da
+     população. É expressa em políticas, programas e serviços de saúde
+     consoante os princípios e as diretrizes que estruturam o SUS,
+     englobando as ações que envolvem o cuidado com a saúde do ser
+     humano, incluindo as ações e os serviços de promoção, prevenção,
+     reabilitação e tratamento de doenças.
+
+     Para promover a vigilância e a atenção à saúde da população, diver-
+     sas são as iniciativas necessárias para uma atuação oportuna. Em
+     situações de emergência em saúde pública, essa organização deve
+     estar em consonância com as necessidades que se apresentam no
+     território para que se reduza o risco de exposição da população.
+
+     Emergência em saúde pública (ESP) é definida por evento ou situações
+     que apresentem risco de propagação de doenças que exigem uma
+     resposta coordenada. Podem representar a reintrodução de doença,
+     apresentar gravidade elevada ou extrapolar a capacidade de resposta
+     local, demandando o emprego urgente de medidas de prevenção, con-
+     trole e contenção de riscos, danos e agravos à saúde pública.
+
+     A estratégia de atuação do SUS em ESP foi estabelecida por meio do
+     Decreto Presidencial nº 7.616, de 17 de novembro de 2011, que dispõe
+     sobre a declaração de Emergência em Saúde Pública de Importância
+     Nacional (Espin) e a criação da Força Nacional do SUS, lei regulamen-
+     tada pela Portaria Ministerial nº 2.952, de 14 de dezembro de 2011.
+
+     Para a implementação dessa estratégia, o Ministério da Saúde
+     estabeleceu diretrizes e documentos norteadores que apontam
+     mecanismos e ferramentas para a gestão de emergências e as
+     principais ações a serem desenvolvidas, conforme a tipologia do
+     evento que deu origem à emergência.
+
+
+
+26
+Os mecanismos de gestão foram apontados no Plano de Resposta
+à Emergência em Saúde Pública. Ele define a instituição de um
+Centro de Operações de Emergência em Saúde (COE-Saúde ou
+Coes) como mecanismo de coordenação da emergência e o Sistema
+de Comando de Operações (SCO) como ferramenta para a sua
+organização. As principais ações são apresentadas nos Planos de
+Contingência específicos, entre eles o Plano de Contingência para
+Emergência em Saúde Pública por Inundação.
+
+
+  Para saber os detalhes sobre a estratégia de resposta à
+  emergência em saúde pública, acesse os planos. Eles estão
+  disponíveis em <http://portalsaude.saude.gov.br/index.php/o-
+  ministerio/principal/leia-mais-o-ministerio/197-secretaria-
+  svs/12109-planos-vigilancia-ambiental>.
+
+
+Quando ocorre um desastre, os mecanismos de coordenação
+da resposta são aplicados da mesma forma, considerando os
+potenciais impactos, os danos e as necessidades inerentes ao
+tipo de ocorrência e à sua magnitude. Em situação de inundações,
+vários setores são impactados ou demandados, por isso, o processo
+de preparação e resposta envolve ações articuladas no setor Saúde
+e com outras instituições que atuam no território atingido.
+
+
+2.1 Mecanismos para a atuação em emergência em
+    saúde pública
+A primeira etapa para uma Secretaria de Saúde atuar de forma
+oportuna em situações de inundação está em um processo de
+preparação adequado, transversal, multidisciplinar, participativo
+e coordenado. Para tanto, é recomendado que seja estabelecido
+um comitê, uma comissão ou uma organização equivalente,
+no âmbito da Secretaria de Saúde, cujo objetivo se baseie no
+conhecimento das características e vulnerabilidades do território,
+
+
+                                                                     27
+     por meio do levantamento dos cenários (ameaças ou perigos e
+     vulnerabilidades). Com isso, é possível se conhecer os riscos e
+     elaborar o Plano de Contingência específico para o local.
+
+     Nesse contexto, apresentam-se a seguir alguns mecanismos
+     que auxiliam na organização do setor Saúde para a gestão de
+     risco de desastre.
+
+
+     2.1.1 Comitê de Saúde em Desastre
+     Observe que, nas etapas de gestão do risco de desastres (redução
+     do risco, manejo do desastre e recuperação), são preconizadas
+     ações a serem desenvolvidas antes de um desastre ocorrer, ações
+     de resposta ao evento e de recuperação dos seus efeitos.
+
+     Para organizar e preparar o setor Saúde para atuar em um desastre,
+     é recomendado que a Secretaria de Saúde institua um grupo que
+     atue de forma contínua e permanente tendo como base os cenários
+     de risco, identificando os atores e as ações necessárias para cada
+     um desses cenários identificados no território (inundação, seca,
+     acidentes químicos etc.), mapeando os recursos disponíveis e
+     necessários no setor para o atendimento de saúde, bem como
+     promover a articulação entre as diversas áreas da Saúde e de outros
+     setores (defesa civil, assistência social, ambiental, entre outros).
+
+     A composição do Comitê depende da organização estrutural da
+     Secretaria de Saúde; no entanto, é importante que seja garantida
+     a participação das áreas envolvidas na resposta visando a uma
+     vigilância e assistência oportuna, conforme exemplificado a seguir.
+
+
+
+
+28
+FIGURA 1 COMPOSIÇÃO DO COMITÊ DE SAÚDE EM DESASTRE
+
+
+                                COORDENAÇÃO
+                      Secretário Municipal de Saúde
+
+   Vigilância em Saúde
+                                           Atenção Primária à Saúde.
+                                            
+   Ambiental.                                Atenção Psicossocial
+                                            
+   Vigilância Epidemiológica.
+                                           (Centros de Atenção
+   Vigilância Sanitária.
+                                           Psicossocial – Caps).
+
+   Saúde do Trabalhador.
+                                           Laboratórios Públicos
+                                            
+
+
+
+
+                                                                            Staff de Comunicação
+                                             de Referência.
+   Setor de Informação
+  
+   e Análise de Situação                     Assessoria de Comunicação
+                                            
+   em Saúde.                                 em Saúde.
+
+   Centro de Informações
+                                           Educação em Saúde.
+                                            
+   Estratégicas e Resposta                   Setor de Planejamento.
+                                            
+   em Vigilância em Saúde                    Setor de Financeiro
+                                            
+   (Cievs) ou equivalente.                   e Compras.
+   Centro de Controle de
+                                           Setor Administrativo.
+                                            
+   Zoonoses (CCZ).
+                                             Setor de Saneamento.
+                                            
+   Setor de Imunização.
+  
+                                             Setor de Logística
+                                            
+   Assistência Pré-Hospitalar
+                                           e Transporte.
+   e Hospitalar e Central de
+                                             Setor de Recursos Humanos.
+                                            
+   Regulação.
+                                             Conselho Municipal de Saúde.
+                                            
+   Assistência Farmacêutica.
+  
+                                             Outros.
+                                            
+
+
+                            Representação do SUS
+
+
+
+
+                        Grupos interinstitucionais
+Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+
+                                                                                                   29
+     A Secretaria de Saúde poderá optar, também, por fazer um comitê
+     geral com os gestores das áreas técnicas (superintendente/
+     diretor/coordenador) e essas áreas trabalharem em subcomitês,
+     subsidiando o comitê geral. No caso de já existir um grupo
+     com esse objetivo no âmbito da Saúde, pode-se incluir o tema
+     “desastres” nesse grupo. Sugere-se que o comitê trabalhe em
+     articulação com outras instituições afins ao processo de gestão do
+     risco de desastre, considerando ações intra e interinstitucionais.
+
+     No Comitê é importante identificar quais as áreas do setor Saúde
+     estarão envolvidas e definir de forma clara o papel de cada uma delas,
+     bem como as articulações com demais setores, como Defesa Civil,
+     Corpo de Bombeiros, Assistência Social, entre outras, na formação de
+     um grupo interinstitucional. Para isso, uma ferramenta essencial é o
+     estabelecimento da matriz de cenários e responsabilidades.
+
+
+     2.1.2 Matriz de cenários e responsabilidades
+     As responsabilidades do setor Saúde em uma ESP são inerentes
+     ao que é de sua competência para proteger a saúde das pessoas e
+     garantir a prestação dos serviços de saúde, reduzindo ao máximo
+     os impactos e a exposição aos fatores de risco. Para isso, quando
+     se trata de desastre, é imprescindível a preparação prévia e o
+     conhecimento dos atores envolvidos e suas funções na preparação
+     e na reposta à emergência e aos desastres.
+
+     A matriz de cenários e responsabilidades está organizada para pro-
+     porcionar a visualização do cenário, dos órgãos e setores envolvidos
+     na atuação, das ações a serem desenvolvidas na respectiva etapa
+     da gestão do risco (preparação e resposta), bem como qual é a atri-
+     buição de cada ator envolvido no desenvolvimento da ação. Ele tem
+     a competência legal de coordenar a ação (C = coordenador), possui
+     alguma responsabilidade legal na sua execução (R = responsável) ou
+     pode apoiar o seu desenvolvimento (A = apoio). A seguir é descrito o
+     que deve ser considerado nos campos da matriz.
+
+
+
+30
+     QUADRO 4 CAMPOS DA MATRIZ
+
+                 Cenário                   Setores/Instituições                 Ações                Responsabilidades
+
+      O cenário é estabelecido          Neste campo da matriz,         Deve-se preencher neste     As responsabilidades
+      de acordo com a tipologia         são identificados os atores    campo um rol de ações a     pelo desenvolvimento das
+      da emergência ou do               que desenvolvem ações na       serem desenvolvidas para    ações são distribuídas em
+      desastre. Nesse caso,             preparação e na resposta       a preparação e para a       coordenação, responsável
+      o cenário apresentado             a uma inundação, tanto da      reposta a uma inundação.    e apoio. A coordenação
+      é ocorrências de                  Secretaria de Saúde quanto     Essa descrição subsidia     normalmente é do
+      inundações.                       de outros órgãos que           os atores envolvidos        ator (setor) que tem a
+                                        apoiem ou complementem         no desenvolvimento          atribuição legal para
+                                        a atuação do setor Saúde       das suas atribuições        isso. O responsável pode
+                                        (Defesa Civil, Assistência     e responsabilidades         compartilhar/comple-
+                                        Social etc.).                  e permite ao comitê         mentar a ação que é
+                                                                       sistematizar as ações       de atribuição de outro
+                                                                       desenvolvidas e seus        setor, mas que a ele
+                                                                       respectivos responsáveis.   cabe, naquela etapa, o
+                                                                                                   seu desenvolvimento.
+                                                                                                   Além disso, alguns atores
+                                                                                                   têm a função de apoio
+                                                                                                   ao desenvolvimento das
+                                                                                                   ações, seja de apoiar o
+                                                                                                   coordenador ou um dos
+                                                                                                   responsáveis.
+
+     Fonte: Elaborado pelo Vigidesastres – CGVAM/DSAST/SVS/MS, 2016.
+
+
+
+
+31
+     Para o preenchimento da Matriz de Cenários e Responsabilidades,
+     a Secretaria de Saúde deve se pautar na legislação que estabelece
+     a estrutura e as competências do governo local e nela identificar os
+     atores e suas respectivas atribuições, relacionando-as com as ações
+     necessárias para a preparação e a resposta a uma inundação.
+
+     O formulário da Matriz de Cenários e Responsabilidades é apresen-
+     tado a seguir. Ele pode ser ampliado conforme a necessidade da
+     Secretaria de Saúde, tanto nas ações quanto no número de setores
+     e instituições presentes na estrutura local.
+
+     QUADRO 5 MATRIZ DE CENÁRIOS E RESPONSABILIDADES INSTITUCIONAIS
+
+      CENÁRIO                                                  SETORES/INSTITUIÇÕES
+      (Tipo de evento ou
+      ameaça/perigo)                               SETOR SAÚDE                            OUTROS SETORES
+
+
+                                         Ator 1   Ator 2   Ator 3   Ator 4   Ator 5   Ator 1   Ator 2   Ator 3   Ator 4
+
+
+      AÇÕES
+
+      1. Ação 1                            C        R        R        R        A        R        R        R        A
+
+             1.1 Subação 1
+
+             1.2 Subação 2
+
+      2. Ação 2                            R        C        R        R        R        A        R        R        A
+
+             2.1 Subação 1
+
+             2.2 Subação 2
+
+      Função:
+      C = Coordenação (Instituição ou ator com atribuição legal para coordenar a sua realização).
+      R = Responsável (Instituição ou ator com alguma responsabilidade na sua realização).
+      A = Apoio (Instituição ou ator que pode apoiar a realização da ação).
+
+     Fonte: (BRASIL, 2014b, adaptado).
+
+
+
+
+32
+Com o preenchimento da Matriz de Cenários e Reponsabilidades,
+o Comitê de Saúde em Desastre terá identificado todas as ações
+necessárias para a preparação e a resposta à inundação e também
+aos setores envolvidos nesse processo, tanto no setor Saúde quanto
+nos demais setores. A partir disso, poderá iniciar a elaboração do
+Plano de Contingência ou do Plano de Preparação e Reposta local à
+emergência em Saúde Pública por inundação. Os pontos principais
+da organização e do conteúdo do Plano serão apontados a seguir.
+
+
+2.1.3 Plano de Contingência
+O Plano de Contingência é um documento que descreve de forma
+clara e concisa os riscos, os atores e suas responsabilidades para
+fazer frente a uma emergência ou desastre e tem como premissa a
+simplicidade e a objetividade, além de ser flexível e adaptável. Ele é
+específico, ou seja, para um tipo de ameaça ou perigo, há um plano;
+por exemplo, para resposta à inundação, para resposta à seca etc.
+Para cada tipologia de emergência deve ser elaborado um Plano
+de Contingência e seu processo de construção segue uma lógica,
+conforme pontuado a seguir.
+
+Seu processo de elaboração passa por diversas etapas e o Plano de
+Contingência pode ser atualizado sempre que identificada a neces­
+sidade; uma vez que o processo no território é dinâmico, a mudança
+de cenário pode requerer a alteração do documento. Nesse contexto,
+para a elaboração do Plano de Contingência, são necessários:
+
+ Definição do foco (Qual o problema/perigo?) – O Plano de
+
+ Contingência é específico.
+
+ Estabelecimento do cenário (Qual o risco?) – Identificar as
+
+ vulnerabilidades e os recursos presentes no território.
+
+ Definição das ações (O que faz?) – Para o cenário identificado
+
+ e o risco que se apresenta no território, elencar as ações são
+ necessárias para uma resposta oportuna.
+
+
+                                                                         33
+      Identificação dos atores e das responsabilidades (Quem faz?) –
+     
+      Considerar a estrutura e as competências locais para definir isso.
+
+      Elaborar o Plano (Quando? Como? Com o quê?) – Consideram-se,
+     
+      na elaboração do documento, todas as informação levantadas
+      previamente à elaboração do documento e aponta-se quando se
+      inicia o processo de preparação e resposta à emergência, como
+      essas ações serão executadas e quais os recursos disponíveis
+      e necessários.
+
+      Preparação – Avalia se a Secretaria de Saúde possui todos os
+     
+      recursos necessários para a resposta à emergência (humanos,
+      financeiros, materiais etc.). Desenvolvem-se ações de capacitação,
+      aquisição de bens e insumos estratégicos e demais recursos
+      necessários para a atuação.
+
+      Avaliação – A avaliação do Plano é periódica ou após a resposta a
+     
+      uma emergência.
+
+      Atualização – O documento deve ser reformulado ou atualizado
+     
+      sempre que identificada a necessidade.
+
+     A elaboração de protocolo que inclua as ações macros que
+     envolvem mais de um setor/instituição e seus procedimentos
+     a serem adotados (o detalhamento de cada uma dessas ações)
+     garante que as ações previstas no Plano de Contingência sejam
+     desenvolvidas de forma articulada e coordenada.
+
+     2.1.4 Centro de Operações de Emergência em Saúde
+     O COE-Saúde ou Coes é uma sala de situação ou sala de crise
+     que é acionada quando ocorre uma emergência ou desastres que
+     necessitam de uma resposta coordenada do setor Saúde. Tem por
+     objetivo promover a resposta coordenada por meio da articulação
+     e da integração dos atores envolvidos, e as áreas ou setores da
+     Saúde que o compõem são definidas de acordo com o tipo de
+
+
+34
+ocorrência e as ações necessárias para a resposta à emergência.
+O COE-Saúde é coordenado pela área ou setor que tem a
+competência legal para desenvolver as ações para a tipologia de
+emergência para o qual foi acionado (ex.: epidemia de dengue –
+Vigilância Epidemiológica; inundação – Saúde Ambiental; acidente
+com múltiplas vítimas – Urgência e Emergência).
+
+A sua estruturação permite a análise dos dados e das informações
+para subsidiar a tomada de decisão dos gestores e técnicos, na
+definição de estratégias e ações adequadas e oportunas para o
+enfrentamento de emergências em saúde pública. Ele é constituído
+por representantes das áreas técnicas com competência para atuar
+na tipologia de emergência identificada.
+
+No Coes realiza-se o planejamento, a organização, a coordenação,
+a avaliação e o controle das atividades de resposta a um evento.
+A sua estruturação utiliza como mecanismo de coordenação
+o Sistema de Comando de Operações (SCO) que permite a
+organização da atuação sob um comando unificado a partir de
+um esforço sistemático, para a unificação de grupos heterogêneos
+e desenvolvimento de ações multissetoriais, necessárias para a
+gestão de uma situação de emergência.
+
+A utilização de um sistema de coordenação predefinido permite
+uma articulação adequada das ações e o melhor aproveitamento
+dos recursos, otimizando, assim, os resultados.
+
+A estruturação do Coes em um SCO possibilita a unificação dos
+diversos grupos necessários para a resposta a uma emergência em
+saúde pública, estabelecendo a unificação desta resposta, por meio
+da elaboração de planos consolidados de ação.
+
+
+
+
+                                                                     35
+     FIGURA 2 SISTEMA DE COMANDO DE OPERAÇÕES (SCO)
+
+
+
+                                              COMANDO
+
+
+
+
+                             RELAÇÕES PÚBLICAS          PORTA-VOZ
+
+
+
+
+                                                                    ADMINISTRAÇÃO
+     OPERAÇÕES                    LOGÍSTICA         PLANEJAMENTO
+                                                                      E FINANÇAS
+
+
+
+     Fonte: (BRASIL, 2014b, adaptado).
+
+
+
+
+        Para saber mais sobre as funções de cada posto no Sistema de
+        Comando de Operações estabelecido na estratégia de resposta
+        à emergência em saúde pública, acesse o Plano de Resposta à
+        Emergência em Saúde Pública: <http://portalsaude.saude.gov.br/
+        images/pdf/2014/outubro/07/plano-de-resposta-emergencias-
+        saude-publica-2014.pdf>.
+
+
+
+     O Coes é desmobilizado assim que cessa a emergência e o Comitê
+     de Saúde em Desastre reassume atividades de avaliação da
+     resposta e readequação dos planos (com base na avaliação das
+     lições aprendidas na resposta à emergência ou ao desastre).
+
+
+
+
+36
+RESPONSABILIDADES
+    E AÇÕES DO
+   SETOR SAÚDE
+R
+     essalta-se que o setor Saúde, em situações de inundações,
+     tem responsabilidades em todas as etapas da gestão do
+     risco, que contribui para caracterizar o cenário de atuação e
+promover ações de proteção da saúde da população, tanto em uma
+perspectiva de gestão corretiva quanto prospectiva. Entre essas
+responsabilidades, vale destacar:
+
+ Levantamento e avaliação do comportamento das inundações
+
+ local e regional.
+
+ Levantamento e avaliação dos recursos disponíveis.
+
+
+ Identificação das necessidades.
+
+
+ Identificação das áreas/atores envolvidos na atuação.
+
+
+ Articulação intersetorial e interinstitucional.
+
+
+ Elaboração do Plano de Contingência local.
+
+
+ Promoção de ações de capacitação e treinamento das equipes de
+
+ saúde, envolvendo instituições parceiras.
+
+ Definição de estratégia de educação em saúde (profissionais e
+
+ população vulnerável).
+
+Essas atividades são transversais e envolvem diversos setores
+no âmbito do SUS para dotar os serviços de saúde da capacidade
+necessária para o desenvolvimento de ações oportunas em uma
+inundação. No intuito de organizar o processo de planejamento
+e resposta, as ações podem ser consolidadas em grandes grupos
+ou macroações de Atenção e Vigilância em Saúde; Laboratórios;
+Medicamentos, Insumos e Equipamentos; Comunicação em Saúde;
+Orientação e Educação em Saúde e Identificação de Recursos.
+
+
+
+
+                                                                     39
+     3.1 As ações de Atenção à Saúde
+     São todas as estratégias que envolvem o cuidado com a saúde
+     do ser humano, incluindo as ações e os serviços de promoção,
+     prevenção, tratamento de doenças e reabilitação. A rede de serviços
+     de saúde deve promover, de forma articulada, o desenvolvimento
+     de ações com a finalidade de garantir a integralidade do cuidado,
+     incluindo em situações de desastres, quando a demanda pelos
+     serviços de saúde pode aumentar e as unidades de saúde podem
+     ter seu funcionamento comprometido.
+
+     Buscar a organização dos serviços para a continuidade do seu
+     funcionamento é primordial para a redução do risco à saúde da
+     população. Para isso, serão apontadas, a seguir, as principais
+     ações de atenção à saúde que devem ser observadas em uma
+     situação de desastre.
+
+     QUADRO 6 PRINCIPAIS AÇÕES E RESPONSABILIDADES DA ATENÇÃO À SAÚDE EM
+              SITUAÇÕES DE INUNDAÇÕES
+
+
+            Tema                                Ações
+
+      Atenção Básica        Participar da avaliação dos danos
+                           
+                            e necessidades.
+
+                            Incentivar a retomada dos serviços de rotina.
+                           
+
+                            Fomentar a integração com a Vigilância em
+                           
+                            saúde e rede especializada.
+
+                            Identificar e recadastrar as famílias atingidas.
+                           
+
+                            Intensificar ações nos abrigos e nas
+                           
+                            comunidades.
+
+                            Distribuir e orientar sobre uso do hipoclorito
+                           
+                            de sódio a 2,5%.
+
+                                                                        Continua
+
+
+
+
+40
+Continuação
+
+
+          Tema                         Ações
+
+  Atenção Básica    Desenvolver ações de busca ativa de casos
+                   
+                    agudos e crônicos.
+                    Notificar os casos suspeitos e confirmados
+                   
+                    de cada agravo no Sinan1.
+                    Manter atualizado o Siab2 e o Sisvan3 ou
+                   
+                    outros sistemas utilizados na Atenção Básica.
+                    Atender e acompanhar os casos notificados.
+                   
+                    Atender e acompanhar pacientes egressos
+                   
+                    de outros níveis de atenção.
+                    Realizar avaliação da situação da saúde em
+                   
+                    conjunto com as outras equipes.
+                    Reorganizar o atendimento da Rede Básica
+                   
+                    de Saúde.
+
+
+  Urgência e        Estabelecer ações com outros níveis de
+                   
+  emergência        cobertura de assistência e complexidade.
+                    Restabelecer os serviços de urgência.
+                   
+                    Realizar ações integradas com a equipe
+                   
+                    de resgate.
+                    Identificar a necessidade da presença de
+                   
+                    equipes da FN-SUS4.
+
+
+  Atenção           Fazer diagnóstico da situação do hospital.
+                   
+  hospitalar
+                    Estabelecer plano de remanejamento de
+                   
+                    equipamentos, insumos e serviços.
+
+                    Implementar o plano de evacuação de
+                   
+                    pacientes.
+
+                                                               Continua
+
+
+
+
+                                                                          41
+     Continuação
+
+
+               Tema                        Ações
+
+       Atenção          Monitorar o fornecimento de energia e água
+                       
+       hospitalar       para o funcionamento das unidades de saúde.
+                        Estabelecer fluxo de atendimento.
+                       
+                        Estabelecer fluxo diário de notificação das
+                       
+                        doenças relacionadas ao evento.
+                        Manter atualizado os sistemas de
+                       
+                        informação (SIH5, Sinan, Sinasc6, SIM7).
+
+
+       Sangue e         Identificar serviços de hemoterapia para
+                       
+       hemoderivados    servir como alternativa.
+                        Definir e estabelecer as funções para as
+                       
+                        diferentes áreas de trabalho.
+                        Avaliar os danos nos serviços de hemoterapia.
+                       
+                        Verificar o número de unidades de
+                       
+                        hemocomponentes disponíveis.
+                        Avaliar a demanda, perdas e estoque de
+                       
+                        hemocomponentes.
+                        Racionalizar o uso dos hemocomponentes/
+                       
+                        hemoderivados existentes.
+
+
+       Atenção          Diagnóstico da situação prévia.
+                       
+       psicossocial
+                        Avaliação de danos psicológicos.
+                       
+                        Garantir o atendimento das pessoas afetadas.
+                       
+                        Estruturar a coordenação das ações de
+                       
+                        saúde mental.
+                        Integração permanente com as equipes de
+                       
+                        Atenção Básica.
+
+                                                                   Continua
+
+
+
+42
+Conclusão
+
+
+            Tema                                     Ações
+
+    Assistência                Diagnóstico das necessidades.
+                              
+    farmacêutica
+                               Garantir o fornecimento dos medicamentos
+                              
+                               e insumos.
+                               Manter fluxo de informação entre a assistência
+                              
+                               farmacêutica e os serviços de saúde.
+                               Estabelecer parcerias com outros níveis de
+                              
+                               cobertura de assistência farmacêutica.
+                               Elaborar mapa de distribuição de
+                              
+                               medicamentos prioritários para doenças
+                               crônicas.
+
+
+                               Identificar os serviços de saúde em
+                              
+    Regulação                  funcionamento.
+                               Reorganizar o fluxo de atendimento em saúde.
+                              
+                               Estabelecer parcerias com outros níveis de
+                              
+                               cobertura de assistência à saúde.
+
+Fonte: Vigidesastres/CGVAM/DSAST/SVS/MS.
+1
+  Sistema de Informação de Agravos de Notificação.
+2
+  Sistema de informação da Atenção Básica.
+3
+  Sistema de Vigilância Alimentar Nutricional.
+4
+  Força Nacional do SUS.
+5
+  Sistema de Informações Hospitalares do SUS.
+6
+  Sistema de Informação sobre Nascidos Vivos.
+7
+  Sistema de Informação sobre Mortalidade.
+
+
+
+3.2 As ações de Vigilância em Saúde
+A Vigilância em Saúde tem por objetivo a observação e a análise
+permanentes da situação de saúde da população, articulando-se
+em um conjunto de ações destinadas a controlar determinantes,
+riscos e danos à saúde de populações que vivem em determinados
+
+
+
+                                                                                43
+     territórios, garantindo-se a integralidade da atenção, o que inclui
+     tanto a abordagem individual como coletiva dos problemas de
+     saúde. Em casos de inundação, a situação de saúde pode ser direta
+     ou indiretamente afetada e os serviços de saúde devem estar
+     sensíveis para detectar mudanças no comportamento das doenças
+     e dos agravos e prover as medidas-controle, bem como estabelecer
+     rotinas de redução do risco de exposição da população.
+
+     Algumas dessas ações estão pontuadas no quadro a seguir.
+
+     QUADRO 7 PRINCIPAIS AÇÕES E RESPONSABILIDADES DA VIGILÂNCIA EM SAÚDE
+              EM SITUAÇÕES DE INUNDAÇÕES
+
+
+             Tema                                   Ações
+
+
+       Vigilância              Vigilância, monitoramento e controle de:
+                              
+       e controle                 »» Doenças diarreicas agudas.
+       de doenças
+       transmissíveis             »» Leptospirose.
+                                  »» Hepatite A.
+                                  »» Doenças de transmissão respiratória.
+                                  »» Tétano acidental.
+                                  »» Doenças transmitidas por vetores.
+
+
+       Vigilância e            Vigilância, monitoramento e controle de:
+                              
+       controle de                »» Transtornos psicossociais.
+       doenças não
+       transmissíveis             »» Doenças crônicas descompensadas.
+       e agravos                  »» Acidentes com animais peçonhentos
+                                     e não peçonhentos.
+                                  »» Desnutrição.
+                                  »» Acidentes (afogamento, choque
+                                     elétrico, quedas, soterramento etc.).
+                                  »» Vigilância da violência nos abrigos
+                                     (física e/ou sexual).
+
+                                                                         Continua
+44
+Continuação
+
+
+
+              Tema                       Ações
+
+
+   Detecção            Monitoramento de doenças e agravos.
+                      
+   de surtos e
+                       Notificação ao Cievs.
+                      
+   epidemias
+                       Investigação e ações de controle.
+                      
+
+
+   Monitoramento       Notificação de morbimortalidades nos
+                      
+   e notificação de    Sistemas de Informação (Sinan, SIM).
+   morbimortalidade
+                       Monitorar dados de outros sistemas
+                      
+                       de informação.
+                       Acompanhamento do perfil epidemiológico.
+                      
+
+
+   Imunização          Identificar necessidade de
+                      
+                       remanejamento de imunobiológicos.
+                       Avaliação de perda de insumos e
+                      
+                       imunobiológicos.
+                       Manutenção da rede de frio
+                      
+                       (infraestrutura e equipamentos).
+                       Garantir distribuição das vacinas e dos
+                      
+                       insumos.
+                       Controle do registro de perda e reposição
+                      
+                       do estoque.
+                       Identificar os casos especiais e definir
+                      
+                       intensificação de imunização.
+
+
+   Vigilância da       Avaliar os danos nos Sistemas de Abasteci-
+                      
+   qualidade           mento de Água (SAA) e Soluções Alternati-
+   da água para        vas Coletivas e Individuais (SAC e SAI).
+   consumo humano
+                       Avaliar a quantidade e a qualidade da
+                      
+                       água nos abrigos temporários.
+
+                                                                  Continua
+
+
+                                                                             45
+     Continuação
+
+
+
+                   Tema                          Ações
+
+
+        Vigilância da          Assegurar a qualidade da água para
+                              
+        qualidade              consumo humano.
+        da água para
+        consumo humano         Identificar a necessidade e a disponibili-
+                              
+                               zação do hipoclorito de sódio 2,5%.
+                               Participar do planejamento das ações emer-
+                              
+                               genciais voltadas para os recursos hídricos.
+                               Sistematizar e monitorar o acesso à
+                              
+                               informação sobre a qualidade da água
+                               para consumo humano.
+                               Identificar, em articulação com o
+                              
+                               responsável pelo abastecimento de água
+                               para consumo humano, outras fontes
+                               seguras de abastecimento.
+
+
+        Controle sanitário     Identificar os estabelecimentos
+                              
+        de alimentos           comerciais atingidos.
+                               Inspecionar e avaliar as condições
+                              
+                               higiênico-sanitárias de armazenamento,
+                               preparação e conservação dos produtos
+                               comerciais, doados e nos serviços de saúde.
+                               Articulação entre os serviços de
+                              
+                               vigilância sanitária e outros setores nas
+                               investigações de surtos.
+
+
+        Controle               Avaliar as instalações físicas e a
+                              
+        higiênico-sanitário    capacidade instalada dos abrigos.
+        de abrigos
+                              Inspecionar a cozinha e as condições de
+                                armazenamento e preparação dos alimentos.
+
+                                                                        Continua
+
+
+
+46
+Continuação
+
+
+
+              Tema                      Ações
+
+
+   Manejo de          Promover educação em saúde para
+                     
+   resíduos           promoção da segurança alimentar.
+
+                      Articular a coleta dos resíduos sólidos.
+                     
+
+                      Orientar e promover o manejo e descarte
+                     
+                      adequado de resíduos sólidos normais,
+                      biocontaminados e perigosos.
+
+                      Gerenciamento de resíduos perigosos
+                     
+                      nos serviços de saúde.
+
+                      Intensificar a Vigilância de Acidentes com
+                     
+                      Produtos Perigosos.
+
+
+   Laboratórios      Rede de referência e colaboradores:
+
+                      Avaliar possíveis danos na infraestrutura e
+                     
+                      nos equipamentos.
+
+                      Identificar e promover articulação com
+                     
+                      laboratórios colaboradores (incluindo os
+                      laboratórios móveis).
+
+                      Elaborar fluxograma de atendimento
+                     
+                      imediato.
+
+                      Realizar a gestão de pessoas.
+                     
+
+                      Solicitar apoio da instância estadual
+                     
+                      quando exceder a capacidade de viabilizar
+                      a execução das atividades.
+
+                      Articular com as áreas técnicas para
+                     
+                      elaborar fluxo de informação com a
+                      Rede de Gerenciamento de Ambiente
+                      Laboratorial (GAL).
+
+                                                                 Continua
+
+
+
+                                                                            47
+     Continuação
+
+
+
+                   Tema                      Ações
+
+
+        Laboratórios      Fluxo de amostras e resultados oportunos:
+                           Organizar as atividades dos laboratórios
+                          
+                           para não prejudicar as atividades de rotina.
+                           Estabelecer o fluxo de envio e
+                          
+                           recebimento de amostras.
+                           Organizar o fluxo do envio de resultados
+                          
+                           em tempo oportuno.
+                          Insumos e equipamentos:
+                           Identificar as necessidades de
+                          
+                           substituição ou suplementação de
+                           equipamentos e insumos.
+                           Controlar a entrada de novos
+                          
+                           equipamentos.
+                           Gerenciar a quantidade de insumos
+                          
+                           existentes e recebidos.
+                           Gestão dos profissionais capacitados
+                          
+                           para manusear os novos equipamentos.
+
+
+        Medicamentos,     Gestão:
+        insumos e
+                           Realizar o diagnóstico de perdas de
+                          
+        equipamentos
+                           medicamentos e danos aos equipamentos.
+                           Identificar as necessidades.
+                          
+                           Controlar a entrada de novos equipamentos.
+                          
+                           Gerenciar a quantidade de medicamentos
+                          
+                           e insumos existentes e recebidos.
+                           Controlar o estoque disponível.
+                          
+                           Estabelecer a logística de controle
+                          
+                           e distribuição.
+
+                                                                   Continua
+
+
+48
+Continuação
+
+
+
+              Tema                        Ações
+
+
+   Medicamentos,     Recebimento no local de consumo:
+   insumos e          Definir o coordenador para a gestão
+                     
+   equipamentos
+                      do recebimento.
+                      Estabelecer a logística de controle
+                     
+                      e entrega na rede de saúde.
+
+
+   Comunicação       Definir atores envolvidos em:
+   e educação         Diagnóstico da situação e definição
+                     
+   em saúde
+                      dos objetivos.
+                      Identificação das pessoas a serem
+                     
+                      informadas prioritariamente.
+                      Identificação dos atores sociais.
+                     
+                     Identificação das áreas envolvidas na resposta.
+
+                     Estabelecer fluxo de informações:
+                      Definir as ferramentas a serem utilizadas.
+                     
+                      Desenvolvimento de cronograma
+                     
+                      de ações com prazos e indicação
+                      de responsáveis.
+                      Definição da estratégia do fluxo
+                     
+                      da informação.
+
+                     Definir meios de comunicação para:
+                      Diagnosticar a situação da área.
+                     
+                      Definir os meios de comunicação mais
+                     
+                      eficazes para a situação.
+                      Estabelecer as ações de comunicação de
+                     
+                      acordo com os meios disponíveis.
+                      Definir o porta-voz responsável pela
+                     
+                      divulgação das informações.
+
+                                                                  Continua
+
+                                                                             49
+     Continuação
+
+
+
+                   Tema                      Ações
+
+
+        Comunicação       Elaboração de relatórios, informes, boletins
+        e educação        e outros:
+        em saúde
+                           Definir o tipo de documento de acordo
+                          
+                           com o destinatário (gestor, profissionais
+                           e população).
+                           Estabelecer a frequência de envio.
+                          
+                           Estabelecer sistema de retroalimentação.
+                          
+                           Avaliar as informações divulgadas,
+                          
+                           conforme
+                           a reação da população.
+
+                          Estabelecer ações educativas
+                          (abrigos e comunidades):
+                           Diagnosticar a situação para definir
+                          
+                           as ações.
+                           Definir os meios (palestras, fôlderes,
+                          
+                           cartazes, spots etc.).
+                           Definir os profissionais responsáveis.
+                          
+                           Identificar e montar os materiais
+                          
+                           necessários.
+                           Organizar a logística.
+                          
+                           Definir os temas (cuidados com os
+                          
+                           alimentos, limpeza domiciliar, acidentes,
+                           água domiciliar, violência, doenças
+                           relacionadas etc.).
+
+                                                                    Continua
+
+
+
+
+50
+Continuação
+
+
+
+              Tema                       Ações
+
+
+   Comunicação       Criar parcerias com outros setores
+   e educação        relativos à educação em saúde:
+   em saúde
+                      Identificar os setores envolvidos na ação.
+                     
+                      Promover a articulação intra e intersetorial.
+                     
+                      Estabelecer cooperação técnica.
+                     
+
+
+   Identificação     Medicamentos, insumos e equipamentos:
+   de recursos
+                      Identificar e avaliar os recursos disponíveis.
+                     
+   adicionais
+                      Identificar as necessidades.
+                     
+                      Avaliar e estabelecer os meios de atendi-
+                     
+                      mento às necessidades identificadas.
+                      Articular com os colaboradores.
+                     
+                      Estabelecer um fluxo de recebimento,
+                     
+                      triagem e entrega.
+                      Estabelecer o controle de armazena­
+                     
+                      mento e estoque.
+                     Gestão de pessoas:
+
+                     Identificar os profissionais dos serviços
+                       de saúde disponíveis.
+                      Remanejar os profissionais para as áreas
+                     
+                      afetadas, de acordo com a necessidade.
+                      Estabelecer a jornada de trabalho (rotina,
+                     
+                      plantões etc.).
+                      Identificar e cadastrar os voluntários e
+                     
+                      integrá-los nas ações.
+                      Identificar a necessidade da presença da
+                     
+                      FN-SUS.
+
+                                                                 Continua
+
+
+
+                                                                            51
+     Conclusão
+
+
+
+                 Tema                                  Ações
+
+
+        Identificação                Recursos financeiros:
+        de recursos
+                                      Identificar a disponibilidade de recursos
+                                     
+        adicionais
+                                      para atendimento emergencial.
+                                      Busca de recursos complementares.
+                                     
+                                      Estabelecer o processo administrativo
+                                     
+                                      para a aquisição de recursos
+                                      complementares.
+
+                                     Logística (transporte, alimento, hospedagem
+                                     e serviços diversos):
+
+                                      Diagnosticar a situação e identificar
+                                     
+                                      as necessidades.
+                                      Definir responsável pela coordenação.
+                                     
+                                      Articular com os setores diversos.
+                                     
+                                      Estabelecer fluxo de informação e
+                                     
+                                      entrega de insumos, medicamentos etc.
+                                      Definir meios de transporte e local
+                                     
+                                      de entrega.
+                                      Articular a disponibilidade de
+                                     
+                                      hospedagem com o coordenador.
+                                      Diagnosticar e mapear os recursos
+                                     
+                                      estruturais (Rede de Saúde, Rede de
+                                      Laboratório, Rede de Frio, sangue e
+                                      hemoderivados, farmácias) e capacidade
+                                      de resposta.
+                                      Articular com os responsáveis de cada
+                                     
+                                      área-fim, para implementar a resposta.
+
+     Fonte: Vigidesastres/CGVAM/DSAST/SVS/MS.
+
+
+
+
+52
+REFERÊNCIAS
+
+
+BRASIL. Ministério da Saúde. Plano de contingência para
+emergência em saúde pública por inundação. Brasília, 2014a. 36 p.,
+il. Disponível em: <http://portalsaude.saude.gov.br/images/pdf/2014/
+outubro/07/plano-de-contingencia-por-inundacao-out2014.pdf>.
+Acesso em: 20 out. 2015.
+
+______. Ministério da Saúde. Plano de resposta às emergências
+em saúde pública. Brasília, 2014b. 44 p., il. Disponível em: <http://
+portalsaude.saude.gov.br/images/pdf/2014/outubro/07/plano-de-
+resposta-emergencias-saude-publica-2014.pdf>. Acesso em: 20
+out. 2015.
+
+INTERNATIONAL STRATEGY FOR DISASTER REDUCTION (ISDR).
+Terminología sobre reducción del riesgo de desastres. Geneva,
+2009. Disponível em: <http://www.unisdr.org/files/7817_
+UNISDRTerminologySpanish.pdf>. Acesso em: 17 out. 2015.
+
+NARVÁEZ, L.; LAVELL, A.; ORTEGA, G. P. La gestión del riesgo de
+desastres: un enfoque basado en procesos. Lima, 2009.
+
+SANTOS, M. A Natureza do espaço: técnica e tempo, razão e emoção.
+3. ed. São Paulo: Hucitec, 1999. 384 p.
+
+
+
+
+                                                                        53
+BIBLIOGRAFIA
+
+
+FREITAS, C. M.; XIMENES, E. F. Enchentes e saúde pública: uma
+questão na literatura científica recente das causas, consequências e
+respostas para prevenção e mitigação. Ciência & Saúde Coletiva, Rio
+de Janeiro, v. 17, n. 6, p. 1601-1616, 2012.
+
+OLIVEIRA, M. de. Manual gerenciamento de desastres: sistema de
+comando em operações. Florianópolis: Ministério da Integração
+Nacional, Secretaria Nacional de Defesa Civil; Universidade Federal
+de Santa Catarina, Centro Universitário de Estudos e Pesquisas sobre
+Desastres, 2010.
+
+ORGANIZAÇÃO PAN-AMERICANA DA SAÚDE. ORGANIZAÇÃO MUNDIAL DA
+SAÚDE. Desastres naturais e saúde no Brasil. Brasília: OPAS; Ministério
+da Saúde, 2015. 56 p., il. (Série Desenvolvimento Sustentável e Saúde,
+2). Disponível em: <http://www.paho.org/BRA/images/stories/GCC/
+desastresesaudebrasil_2edicao.pdf>. Acesso em: 20 out. 2015.
+
+ORGANIZACIÓN PANAMERICANA DE LA SALUD. Los desastres naturales y
+la protección de la salud. Washington, D.C: OPAS; OMS, 2000. Disponível
+em: <http://apps.who.int/iris/bitstream/10665/167773/1/9275315752.
+pdf>. Acesso em: 20 out. 2015.
+
+
+
+
+                                                                          55
+
